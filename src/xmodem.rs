@@ -313,6 +313,24 @@ pub(crate) async fn xmodem_send(
         }
     };
 
+    // Drain any trailing negotiation bytes (e.g. IMP8 sends 'C' then 'K' for
+    // XMODEM-1K; we accepted 'C' but 'K' is still in the buffer).
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let mut drain_buf = [0u8; 64];
+    loop {
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            reader.read(&mut drain_buf),
+        )
+        .await
+        {
+            Ok(Ok(n)) if n > 0 => {
+                if verbose { eprintln!("XMODEM send: drained {} negotiation bytes", n); }
+            }
+            _ => break,
+        }
+    }
+
     // Pad data to block boundary
     let mut padded = data.to_vec();
     if padded.is_empty() {

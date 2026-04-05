@@ -180,7 +180,8 @@ opt in to ANSI color; PETSCII/ANSI terminals can opt out.
    - Most terminal programs have a "Send File" or "Upload" option under a
      Transfer or File menu
    - Select XMODEM as the protocol
-6. The transfer runs at 128-byte blocks with CRC-16 error checking
+6. The transfer runs at 128-byte blocks with CRC-16 error checking (falls back
+   to checksum mode if the client does not support CRC)
 7. On completion, the server reports bytes, blocks, and elapsed time
 
 ### Downloading a File from the Server
