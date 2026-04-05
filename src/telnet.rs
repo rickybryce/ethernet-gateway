@@ -771,7 +771,7 @@ impl TelnetSession {
         // Color preference
         let (color_label, default_yes) = match self.terminal_type {
             TerminalType::Petscii => ("PETSCII", true),
-            TerminalType::Ansi => ("ANSI", true),
+            TerminalType::Ansi => ("ANSI", false),
             TerminalType::Ascii => ("ANSI", false),
         };
         let default_char = if default_yes { 'Y' } else { 'N' };
@@ -1407,6 +1407,7 @@ impl TelnetSession {
         self.send_line("").await?;
         self.flush().await?;
 
+        eprintln!("XMODEM upload: IAC escaping={}", self.xmodem_iac);
         self.drain_input().await;
 
         let start = std::time::Instant::now();
@@ -1661,6 +1662,7 @@ impl TelnetSession {
         self.send_line("").await?;
         self.flush().await?;
 
+        eprintln!("XMODEM download: IAC escaping={}", self.xmodem_iac);
         self.drain_input().await;
 
         let start = std::time::Instant::now();
@@ -1675,8 +1677,6 @@ impl TelnetSession {
         .await;
         drop(writer_guard);
         let elapsed = start.elapsed();
-
-        self.drain_input().await;
 
         match result {
             Ok(()) => {
@@ -2538,6 +2538,7 @@ pub fn start_server(shutdown: Arc<AtomicBool>, shutdown_notify: Arc<tokio::sync:
                             let sw = session_writers.clone();
                             let lo = lockouts.clone();
                             tokio::spawn(async move {
+                                let _ = stream.set_nodelay(true);
                                 let (read_half, write_half) = stream.into_split();
                                 let writer_box: Box<dyn tokio::io::AsyncWrite + Unpin + Send> = Box::new(write_half);
                                 let writer_arc: SharedWriter = Arc::new(tokio::sync::Mutex::new(writer_box));
@@ -2552,7 +2553,7 @@ pub fn start_server(shutdown: Arc<AtomicBool>, shutdown_notify: Arc<tokio::sync:
                                     lockouts: lo,
                                     peer_addr: Some(addr.ip()),
                                     transfer_subdir: String::new(),
-                                    xmodem_iac: false,
+                                    xmodem_iac: true,
                                 };
                                 if let Err(e) = session.run().await {
                                     eprintln!("Telnet: session error from {}: {}", addr, e);
