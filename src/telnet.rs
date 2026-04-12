@@ -1895,7 +1895,8 @@ impl TelnetSession {
             self.green("Begin XMODEM send now.")
         ))
         .await?;
-        self.send_line("  Start transfer within 90 seconds.")
+        self.send_line(&format!("  Start transfer within {} seconds.",
+            config::get_config().xmodem_negotiation_timeout))
             .await?;
         let esc_label = match self.terminal_type {
             TerminalType::Petscii => "<-",
@@ -2164,7 +2165,8 @@ impl TelnetSession {
             self.green("Start XMODEM receive now.")
         ))
         .await?;
-        self.send_line("  Start transfer within 90 seconds.")
+        self.send_line(&format!("  Start transfer within {} seconds.",
+            config::get_config().xmodem_negotiation_timeout))
             .await?;
         let esc_label = match self.terminal_type {
             TerminalType::Petscii => "<-",
