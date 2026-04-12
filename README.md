@@ -151,18 +151,18 @@ opens on startup. The GUI provides:
 - **Serial port auto-detection** -- the Serial Modem section lists detected
   serial ports in a dropdown; click the refresh button to re-scan
 - **User Manual button** -- opens the PDF user manual on GitHub in your browser
-- **Save Configuration** -- writes changes to `xmodem.conf`
-- **Restart Server** -- saves configuration and restarts the server so all
-  changes (including security, ports, and credentials) take effect immediately
+- **Save and Restart Server** -- writes changes to `xmodem.conf` and restarts
+  the server so all changes (including security, ports, and credentials) take
+  effect immediately
 
 The GUI window closes automatically when the server receives a shutdown signal
-(Ctrl+C, SIGTERM, SIGHUP) or when the Restart Server button is clicked (the
-GUI reopens after the restart completes). Closing the GUI window does **not**
-stop the server -- it continues running headless until a shutdown signal is
-received.
+(Ctrl+C, SIGTERM, SIGHUP) or when the Save and Restart Server button is
+clicked (the GUI reopens after the restart completes). Closing the GUI window
+does **not** stop the server -- it continues running headless until a shutdown
+signal is received.
 
 To disable the GUI, set `enable_console = false` in `xmodem.conf` or uncheck
-"Show GUI on Startup" in the General section and save.
+"Show GUI on Startup" in the Other Settings section and save.
 
 ## Main Menu
 
@@ -331,8 +331,8 @@ terminal type:
 | 0x08 or 0x7F  | ANSI          | Modern terminal with escape sequence color |
 | Other         | ASCII         | Plain text, no color |
 
-After detection, the server asks whether to enable color. PETSCII defaults to
-color on; ANSI and ASCII default to color off but can opt in.
+After detection, the server asks whether to enable color. The user must press
+Y or N to continue; no default is applied.
 
 ## Transferring Files
 
@@ -341,8 +341,9 @@ color on; ANSI and ASCII default to color off but can opt in.
 1. Connect via telnet and navigate to **F** (File Transfer)
 2. Press **U** (Upload)
 3. Enter a filename (letters, numbers, dots, hyphens, underscores only; max 64
-   characters)
-4. The server displays "Begin XMODEM send now" and waits up to 90 seconds
+   characters; cannot start with a dot, cannot contain `..`, must include at
+   least one letter or digit)
+4. The server displays "Begin XMODEM send now" and waits up to 45 seconds
 5. In your terminal client, start an XMODEM send of the local file
    - Most terminal programs have a "Send File" or "Upload" option under a
      Transfer or File menu
@@ -357,7 +358,7 @@ color on; ANSI and ASCII default to color off but can opt in.
 2. The server lists files in the current transfer directory (paginated, 10 per
    page)
 3. Enter the number of the file to download
-4. The server displays "Start XMODEM receive now" and waits up to 90 seconds
+4. The server displays "Start XMODEM receive now" and waits up to 45 seconds
 5. In your terminal client, start an XMODEM receive
    - Select XMODEM as the protocol
    - Choose where to save the file locally
@@ -428,10 +429,9 @@ This is useful for accessing SSH servers from terminals that only support telnet
 (such as a Commodore 64).
 
 1. From the main menu, press **S** (SSH Gateway)
-2. Press **S** to start a connection
-3. Enter the remote host, port (default 22), username, and password
-4. Once connected, you have a full interactive shell on the remote server
-5. Press **Ctrl+]** to disconnect from the SSH session
+2. Enter the remote host, port (default 22), username, and password
+3. Once connected, you have a full interactive shell on the remote server
+4. Press **ESC** twice to disconnect from the SSH session
 
 The server acts as a proxy between your telnet client and the remote SSH server.
 All input is forwarded to the SSH session, and all output is sent back to your
@@ -452,7 +452,7 @@ useful for accessing BBS systems or other telnet services from retro terminals.
 2. Enter the remote host and port (default 23)
 3. Once connected, all input and output is proxied between your terminal and the
    remote server
-4. Press **Ctrl+]** to disconnect
+4. Press **ESC** twice to disconnect
 
 For PETSCII and ASCII terminals, ANSI escape sequences from the remote host are
 automatically filtered.
