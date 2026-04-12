@@ -193,7 +193,8 @@ telnet_enabled = true
 # Telnet server port
 telnet_port = 2323
 
-# Show the GUI configuration editor on startup
+# Show the GUI configuration/console window on startup.
+# Set to false when running as a headless service.
 enable_console = true
 
 # Security: set to true to require username/password login
@@ -212,16 +213,18 @@ max_sessions = 50
 # Idle session timeout in seconds (0 = no timeout)
 idle_timeout_secs = 900
 
-# Groq API key for AI Chat (leave empty to disable)
+# Groq API key for AI Chat (get one at https://console.groq.com/keys)
+# Leave empty to disable AI Chat.
 groq_api_key =
 
-# URL to load automatically when entering the browser
+# Browser homepage URL (loaded automatically when entering the browser)
+# Leave empty to start with a blank prompt.
 browser_homepage = http://telnetbible.com
 
-# US zip code for weather (saved automatically after first use)
+# Last-used weather zip code (updated automatically when you check weather)
 weather_zip =
 
-# Enable verbose XMODEM protocol logging to stderr
+# Verbose logging: set to true for detailed XMODEM protocol diagnostics
 verbose = false
 
 # XMODEM protocol timeouts
@@ -230,17 +233,34 @@ xmodem_block_timeout = 20
 xmodem_max_retries = 10
 
 # Serial modem emulation (Hayes AT commands)
+# Set serial_enabled = true and configure the port to activate.
 serial_enabled = false
+
+# Serial port device (e.g. /dev/ttyUSB0 on Linux, COM3 on Windows)
+# Leave empty if not configured. Use the Modem Emulator menu to detect ports.
 serial_port =
+
+# Serial port parameters
 serial_baud = 9600
 serial_databits = 8
 serial_parity = none
 serial_stopbits = 1
 serial_flowcontrol = none
 
-# SSH server interface (encrypted access)
+# Saved modem settings (written by AT&W, restored by ATZ)
+serial_echo = true
+serial_verbose = true
+serial_quiet = false
+serial_s_regs = 5,0,43,13,10,8,2,50,2,6,14,95,50
+
+# SSH server interface (encrypted access to the gateway)
+# Set ssh_enabled = true to activate. Uses its own credentials.
 ssh_enabled = false
+
+# SSH server port
 ssh_port = 2222
+
+# SSH credentials (independent of telnet credentials)
 ssh_username = admin
 ssh_password = changeme
 ```
