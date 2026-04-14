@@ -330,7 +330,9 @@ impl eframe::App for App {
                         );
                         ui.label(
                             egui::RichText::new("Server IP:")
-                                .color(AMBER_DIM),
+                                .color(AMBER)
+                                .monospace()
+                                .size(16.0),
                         );
                     });
                 });
