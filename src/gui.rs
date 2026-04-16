@@ -62,10 +62,17 @@ pub fn run(cfg: Config, shutdown: Arc<AtomicBool>, restart: Arc<AtomicBool>) {
 }
 
 fn apply_theme(ctx: &egui::Context) {
-    // Increase base font sizes
+    // Set absolute font sizes (avoids compounding if theme is re-applied)
     let mut style = (*ctx.global_style()).clone();
-    for (_text_style, font_id) in style.text_styles.iter_mut() {
-        font_id.size *= 1.2;
+    for (text_style, font_id) in style.text_styles.iter_mut() {
+        font_id.size = match text_style {
+            egui::TextStyle::Small => 13.2,
+            egui::TextStyle::Body => 16.8,
+            egui::TextStyle::Monospace => 16.8,
+            egui::TextStyle::Button => 16.8,
+            egui::TextStyle::Heading => 24.0,
+            egui::TextStyle::Name(_) => font_id.size,
+        };
     }
     ctx.set_global_style(style);
 
@@ -160,6 +167,9 @@ struct App {
     serial_baud_buf: String,
     // Detected serial ports for the dropdown
     serial_ports: Vec<String>,
+    /// Set when the user edits any field; prevents refresh_from_global from
+    /// overwriting in-progress edits. Cleared on save.
+    dirty: bool,
 }
 
 impl App {
@@ -191,18 +201,19 @@ impl App {
             max_retries_buf,
             serial_baud_buf,
             serial_ports,
+            dirty: false,
         }
     }
 
     fn sync_numeric_fields(&mut self) {
-        if let Ok(v) = self.telnet_port_buf.parse() { self.cfg.telnet_port = v; }
-        if let Ok(v) = self.ssh_port_buf.parse() { self.cfg.ssh_port = v; }
-        if let Ok(v) = self.max_sessions_buf.parse() { self.cfg.max_sessions = v; }
+        if let Ok(v) = self.telnet_port_buf.parse::<u16>() && v >= 1 { self.cfg.telnet_port = v; }
+        if let Ok(v) = self.ssh_port_buf.parse::<u16>() && v >= 1 { self.cfg.ssh_port = v; }
+        if let Ok(v) = self.max_sessions_buf.parse::<usize>() && v >= 1 { self.cfg.max_sessions = v; }
         if let Ok(v) = self.idle_timeout_buf.parse() { self.cfg.idle_timeout_secs = v; }
-        if let Ok(v) = self.negotiation_timeout_buf.parse() { self.cfg.xmodem_negotiation_timeout = v; }
-        if let Ok(v) = self.block_timeout_buf.parse() { self.cfg.xmodem_block_timeout = v; }
-        if let Ok(v) = self.max_retries_buf.parse() { self.cfg.xmodem_max_retries = v; }
-        if let Ok(v) = self.serial_baud_buf.parse() { self.cfg.serial_baud = v; }
+        if let Ok(v) = self.negotiation_timeout_buf.parse::<u64>() && v >= 1 { self.cfg.xmodem_negotiation_timeout = v; }
+        if let Ok(v) = self.block_timeout_buf.parse::<u64>() && v >= 1 { self.cfg.xmodem_block_timeout = v; }
+        if let Ok(v) = self.max_retries_buf.parse::<usize>() && v >= 1 { self.cfg.xmodem_max_retries = v; }
+        if let Ok(v) = self.serial_baud_buf.parse::<u32>() && v >= 300 { self.cfg.serial_baud = v; }
     }
 
     fn poll_logs(&mut self) {
@@ -220,6 +231,9 @@ impl App {
     /// sync (i.e. a telnet/SSH session persisted a setting), refresh every
     /// GUI field to match.
     fn refresh_from_global(&mut self) {
+        if self.dirty {
+            return; // Don't overwrite fields the user is actively editing.
+        }
         let global = config::get_config();
         if global == self.last_synced_cfg {
             return;
@@ -556,6 +570,7 @@ impl eframe::App for App {
                         self.sync_numeric_fields();
                         config::save_config(&self.cfg);
                         self.last_synced_cfg = self.cfg.clone();
+                        self.dirty = false;
                         logger::log("Configuration saved — restarting server...".into());
                         // Set restart BEFORE shutdown so main loop sees the
                         // intent to restart when it checks after join().
@@ -633,6 +648,21 @@ impl eframe::App for App {
                 });
                 ui.add_space(20.0);
             });
+
+        // Detect whether the user has unsaved edits.  Compare bound
+        // config fields against the last-synced snapshot so that
+        // refresh_from_global will not overwrite in-progress changes.
+        if !self.dirty {
+            self.dirty = self.cfg != self.last_synced_cfg
+                || self.telnet_port_buf != self.last_synced_cfg.telnet_port.to_string()
+                || self.ssh_port_buf != self.last_synced_cfg.ssh_port.to_string()
+                || self.max_sessions_buf != self.last_synced_cfg.max_sessions.to_string()
+                || self.idle_timeout_buf != self.last_synced_cfg.idle_timeout_secs.to_string()
+                || self.negotiation_timeout_buf != self.last_synced_cfg.xmodem_negotiation_timeout.to_string()
+                || self.block_timeout_buf != self.last_synced_cfg.xmodem_block_timeout.to_string()
+                || self.max_retries_buf != self.last_synced_cfg.xmodem_max_retries.to_string()
+                || self.serial_baud_buf != self.last_synced_cfg.serial_baud.to_string();
+        }
     }
 }
 
@@ -715,12 +745,13 @@ mod tests {
     #[test]
     fn test_sync_boundary_values() {
         let mut app = test_app();
+        let orig_ssh = app.cfg.ssh_port;
         // u16 max for ports
         app.telnet_port_buf = "65535".into();
-        app.ssh_port_buf = "0".into();
+        app.ssh_port_buf = "0".into(); // port 0 is rejected (minimum is 1)
         app.sync_numeric_fields();
         assert_eq!(app.cfg.telnet_port, 65535);
-        assert_eq!(app.cfg.ssh_port, 0);
+        assert_eq!(app.cfg.ssh_port, orig_ssh);
     }
 
     #[test]

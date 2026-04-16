@@ -110,13 +110,17 @@ fn record_auth_failure(lockouts: &LockoutMap, ip: IpAddr) -> u32 {
 }
 
 /// Constant-time byte slice comparison to prevent timing attacks on credentials.
+/// Iterates over both slices fully regardless of length difference so that
+/// neither the length relationship nor the content is leaked via timing.
 pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        // Still iterate to avoid leaking length difference through timing.
-        let _ = a.iter().fold(0u8, |acc, &x| acc | x);
-        return false;
+    let mut diff = (a.len() != b.len()) as u8;
+    let max_len = a.len().max(b.len());
+    for i in 0..max_len {
+        let x = if i < a.len() { a[i] } else { 0 };
+        let y = if i < b.len() { b[i] } else { 0 };
+        diff |= x ^ y;
     }
-    a.iter().zip(b.iter()).fold(0u8, |acc, (&x, &y)| acc | (x ^ y)) == 0
+    diff == 0
 }
 
 fn clear_lockout(lockouts: &LockoutMap, ip: IpAddr) {
@@ -472,9 +476,12 @@ fn check_known_host(
 
 /// Save a host key to the known-hosts file.
 ///
-/// Uses write-to-temp-then-rename so concurrent sessions cannot corrupt the
-/// file by racing on read-modify-write.
+/// Uses a static mutex to serialise read-modify-write across concurrent
+/// sessions, and write-to-temp-then-rename for crash safety.
 fn save_known_host(host: &str, port: u16, key: &russh::keys::PublicKey) {
+    static HOSTS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = HOSTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
     let entry = format!("{}:{} {}\n", host, port, format_host_key(key));
 
     let mut content = std::fs::read_to_string(GATEWAY_HOSTS_FILE).unwrap_or_default();
@@ -499,13 +506,23 @@ fn save_known_host(host: &str, port: u16, key: &russh::keys::PublicKey) {
     }
 }
 
-/// Write `content` to `path` atomically by writing to a temporary file in the
-/// same directory and then renaming it into place. This prevents partial writes
-/// and corruption from concurrent operations.
+/// Write `content` to `path` atomically by writing to a uniquely-named
+/// temporary file and then renaming it into place. This prevents partial
+/// writes and avoids races between concurrent callers.
+///
+/// Callers that perform read-modify-write on the same file must still
+/// serialise externally (e.g. via a mutex) to avoid lost updates.
 fn atomic_write(path: &str, content: &str) -> Result<(), std::io::Error> {
-    let tmp = format!("{}.tmp", path);
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp = format!("{}.{}.{}.tmp", path, std::process::id(), seq);
     std::fs::write(&tmp, content)?;
-    std::fs::rename(&tmp, path)
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
 }
 
 // ─── Weather data ──────────────────────────────────────────
@@ -557,6 +574,7 @@ pub(crate) struct TelnetSession {
     weather_zip: String,
     is_serial: bool,
     is_ssh: bool,
+    idle_timeout: std::time::Duration,
 }
 
 impl TelnetSession {
@@ -594,6 +612,7 @@ impl TelnetSession {
             weather_zip: config::get_config().weather_zip,
             is_serial: true,
             is_ssh: false,
+            idle_timeout: std::time::Duration::from_secs(config::get_config().idle_timeout_secs),
         }
     }
 
@@ -629,6 +648,7 @@ impl TelnetSession {
             weather_zip: config::get_config().weather_zip,
             is_serial: false,
             is_ssh: true,
+            idle_timeout: std::time::Duration::from_secs(config::get_config().idle_timeout_secs),
         }
     }
 
@@ -792,7 +812,23 @@ impl TelnetSession {
     }
 
     async fn read_byte_filtered(&mut self) -> Result<Option<u8>, std::io::Error> {
-        read_byte_iac_filtered(&mut self.reader, true).await
+        let filter_iac = !self.is_serial && !self.is_ssh;
+        if self.idle_timeout.is_zero() {
+            read_byte_iac_filtered(&mut self.reader, filter_iac).await
+        } else {
+            match tokio::time::timeout(
+                self.idle_timeout,
+                read_byte_iac_filtered(&mut self.reader, filter_iac),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "idle timeout",
+                )),
+            }
+        }
     }
 
     async fn echo_backspace(&mut self) -> Result<(), std::io::Error> {
@@ -1343,8 +1379,6 @@ impl TelnetSession {
             }
         }
 
-        let idle_timeout = std::time::Duration::from_secs(cfg.idle_timeout_secs);
-
         // Welcome banner
         self.clear_screen().await?;
         let sep = self.separator();
@@ -1364,6 +1398,21 @@ impl TelnetSession {
         .await?;
         self.send_line("").await?;
 
+        match self.run_menu_loop().await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                let _ = self
+                    .send_line("\r\n\r\nDisconnected: idle timeout.")
+                    .await;
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Inner menu loop, separated so that idle timeout errors from any
+    /// sub-menu propagate up and are handled uniformly in `run()`.
+    async fn run_menu_loop(&mut self) -> Result<(), std::io::Error> {
         loop {
             if self.shutdown.load(Ordering::SeqCst) {
                 self.send_line("\r\nServer shutting down. Goodbye.")
@@ -1381,18 +1430,7 @@ impl TelnetSession {
             self.send(&prompt).await?;
             self.flush().await?;
 
-            let input = if idle_timeout.is_zero() {
-                self.get_menu_input(true).await?
-            } else {
-                match tokio::time::timeout(idle_timeout, self.get_menu_input(true)).await {
-                    Ok(result) => result?,
-                    Err(_) => {
-                        self.send_line("\r\n\r\nDisconnected: idle timeout.")
-                            .await?;
-                        break;
-                    }
-                }
-            };
+            let input = self.get_menu_input(true).await?;
 
             let input = match input {
                 Some(s) if !s.is_empty() => s,
@@ -3107,6 +3145,7 @@ impl TelnetSession {
         let is_petscii = self.terminal_type == TerminalType::Petscii;
         let is_ascii = self.terminal_type == TerminalType::Ascii;
 
+        let erase_char = self.erase_char;
         let mut remote_buf = [0u8; 4096];
         let mut filter_buf: Vec<u8> = Vec::new();
         let mut ansi_state: u8 = 0;
@@ -3127,8 +3166,11 @@ impl TelnetSession {
                             // Forward the previously held ESC before this byte
                             if last_was_esc {
                                 last_was_esc = false;
-                                if remote_writer.write_all(&[esc_byte]).await.is_err() { break; }
+                                let e = if is_petscii { petscii_to_ascii_byte(esc_byte) } else { esc_byte };
+                                if remote_writer.write_all(&[e]).await.is_err() { break; }
                             }
+                            let b = if is_petscii { petscii_to_ascii_byte(b) } else { b };
+                            let b = if b == erase_char && erase_char != 0x7F { 0x7F } else { b };
                             if remote_writer.write_all(&[b]).await.is_err() { break; }
                             if remote_writer.flush().await.is_err() { break; }
                         }
@@ -6954,6 +6996,7 @@ pub fn start_server(shutdown: Arc<AtomicBool>, restart: Arc<AtomicBool>, shutdow
                                     weather_zip: config::get_config().weather_zip,
                                     is_serial: false,
                                     is_ssh: false,
+                                    idle_timeout: std::time::Duration::from_secs(cfg.idle_timeout_secs),
                                 };
                                 if let Err(e) = session.run().await {
                                     glog!("Telnet: session error from {}: {}", addr, e);
@@ -7332,6 +7375,7 @@ mod tests {
             weather_zip: String::new(),
             is_serial: false,
             is_ssh: false,
+            idle_timeout: std::time::Duration::ZERO,
         }
     }
 

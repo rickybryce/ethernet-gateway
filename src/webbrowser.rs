@@ -242,6 +242,12 @@ pub(crate) fn submit_form(base_url: &str, form: &WebForm, width: usize) -> Resul
         };
 
         let final_url = response.get_uri().to_string();
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_lowercase();
         let mut body_bytes = Vec::new();
         response
             .into_body()
@@ -249,6 +255,22 @@ pub(crate) fn submit_form(base_url: &str, form: &WebForm, width: usize) -> Resul
             .take(MAX_BODY_SIZE as u64)
             .read_to_end(&mut body_bytes)
             .map_err(|e| format!("Read error: {}", e))?;
+
+        if content_type.contains("text/plain") {
+            let text = String::from_utf8_lossy(&body_bytes);
+            let lines: Vec<String> = text
+                .lines()
+                .flat_map(|line| wrap_line(line, width))
+                .take(MAX_RENDERED_LINES)
+                .collect();
+            return Ok(WebPage {
+                title: None,
+                lines,
+                links: Vec::new(),
+                url: final_url,
+                forms: Vec::new(),
+            });
+        }
 
         render_html_body(&body_bytes, final_url, width)
     } else {
@@ -696,15 +718,17 @@ fn save_bookmarks(bookmarks: &[Bookmark]) -> bool {
     let content: String = bookmarks
         .iter()
         .map(|b| {
-            // Sanitize: collapse whitespace in title, strip newlines from URL
-            let safe_url: String = b.url.chars().filter(|&c| c != '\n' && c != '\r').collect();
+            // Sanitize: strip newlines and spaces from URL, collapse whitespace in title
+            let safe_url: String = b.url.chars().filter(|&c| !c.is_whitespace()).collect();
             let safe_title: String = b.title.split_whitespace().collect::<Vec<_>>().join(" ");
             format!("{} {}", safe_url, safe_title)
         })
         .collect::<Vec<_>>()
         .join("\n");
-    if let Err(e) = std::fs::write(BOOKMARKS_FILE, content) {
+    let tmp = format!("{}.{}.tmp", BOOKMARKS_FILE, std::process::id());
+    if let Err(e) = std::fs::write(&tmp, &content).and_then(|()| std::fs::rename(&tmp, BOOKMARKS_FILE)) {
         glog!("Warning: could not save bookmarks: {}", e);
+        let _ = std::fs::remove_file(&tmp);
         return false;
     }
     true
@@ -911,7 +935,7 @@ fn render_gopher_directory(
         }
 
         let item_type = line.chars().next().unwrap_or('i');
-        let rest = &line[1..];
+        let rest = &line[item_type.len_utf8()..];
         let fields: Vec<&str> = rest.split('\t').collect();
 
         let display = fields.first().unwrap_or(&"");
