@@ -204,6 +204,7 @@ fn read_config_file(path: &str) -> Config {
         telnet_port: map
             .get("telnet_port")
             .and_then(|v| v.parse().ok())
+            .filter(|&v: &u16| v >= 1)
             .unwrap_or(DEFAULT_TELNET_PORT),
         enable_console: map
             .get("enable_console")
@@ -231,6 +232,7 @@ fn read_config_file(path: &str) -> Config {
         max_sessions: map
             .get("max_sessions")
             .and_then(|v| v.parse().ok())
+            .filter(|&v: &usize| v >= 1)
             .unwrap_or(DEFAULT_MAX_SESSIONS),
         idle_timeout_secs: map
             .get("idle_timeout_secs")
@@ -255,14 +257,17 @@ fn read_config_file(path: &str) -> Config {
         xmodem_negotiation_timeout: map
             .get("xmodem_negotiation_timeout")
             .and_then(|v| v.parse().ok())
+            .filter(|&v: &u64| v >= 1)
             .unwrap_or(DEFAULT_XMODEM_NEGOTIATION_TIMEOUT),
         xmodem_block_timeout: map
             .get("xmodem_block_timeout")
             .and_then(|v| v.parse().ok())
+            .filter(|&v: &u64| v >= 1)
             .unwrap_or(DEFAULT_XMODEM_BLOCK_TIMEOUT),
         xmodem_max_retries: map
             .get("xmodem_max_retries")
             .and_then(|v| v.parse().ok())
+            .filter(|&v: &usize| v >= 1)
             .unwrap_or(DEFAULT_XMODEM_MAX_RETRIES),
         serial_enabled: map
             .get("serial_enabled")
@@ -275,6 +280,7 @@ fn read_config_file(path: &str) -> Config {
         serial_baud: map
             .get("serial_baud")
             .and_then(|v| v.parse().ok())
+            .filter(|&v: &u32| v >= 300)
             .unwrap_or(DEFAULT_SERIAL_BAUD),
         serial_databits: map
             .get("serial_databits")
@@ -319,6 +325,7 @@ fn read_config_file(path: &str) -> Config {
         ssh_port: map
             .get("ssh_port")
             .and_then(|v| v.parse().ok())
+            .filter(|&v: &u16| v >= 1)
             .unwrap_or(DEFAULT_SSH_PORT),
         ssh_username: map
             .get("ssh_username")
@@ -483,7 +490,10 @@ pub fn update_config_value(key: &str, value: &str) {
 }
 
 /// Update multiple keys in a single read-modify-write cycle.
+/// Holds the global CONFIG lock for the entire operation to prevent
+/// concurrent callers from overwriting each other's changes.
 pub fn update_config_values(pairs: &[(&str, &str)]) {
+    let mut guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
     let mut cfg = if Path::new(CONFIG_FILE).exists() {
         read_config_file(CONFIG_FILE)
     } else {
@@ -493,7 +503,6 @@ pub fn update_config_values(pairs: &[(&str, &str)]) {
         apply_config_key(&mut cfg, key, value);
     }
     write_config_file(CONFIG_FILE, &cfg);
-    let mut guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
     *guard = Some(cfg);
 }
 
@@ -502,7 +511,7 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
     match key {
         "telnet_enabled" => cfg.telnet_enabled = value.eq_ignore_ascii_case("true"),
         "telnet_port" => {
-            if let Ok(v) = value.parse() {
+            if let Ok(v) = value.parse::<u16>() && v >= 1 {
                 cfg.telnet_port = v;
             }
         }
@@ -512,7 +521,7 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
         "password" => cfg.password = value.to_string(),
         "transfer_dir" => cfg.transfer_dir = value.to_string(),
         "max_sessions" => {
-            if let Ok(v) = value.parse() {
+            if let Ok(v) = value.parse::<usize>() && v >= 1 {
                 cfg.max_sessions = v;
             }
         }
@@ -526,24 +535,24 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
         "weather_zip" => cfg.weather_zip = value.to_string(),
         "verbose" => cfg.verbose = value.eq_ignore_ascii_case("true"),
         "xmodem_negotiation_timeout" => {
-            if let Ok(v) = value.parse() {
+            if let Ok(v) = value.parse::<u64>() && v >= 1 {
                 cfg.xmodem_negotiation_timeout = v;
             }
         }
         "xmodem_block_timeout" => {
-            if let Ok(v) = value.parse() {
+            if let Ok(v) = value.parse::<u64>() && v >= 1 {
                 cfg.xmodem_block_timeout = v;
             }
         }
         "xmodem_max_retries" => {
-            if let Ok(v) = value.parse() {
+            if let Ok(v) = value.parse::<usize>() && v >= 1 {
                 cfg.xmodem_max_retries = v;
             }
         }
         "serial_enabled" => cfg.serial_enabled = value.eq_ignore_ascii_case("true"),
         "serial_port" => cfg.serial_port = value.to_string(),
         "serial_baud" => {
-            if let Ok(v) = value.parse() {
+            if let Ok(v) = value.parse::<u32>() && v >= 300 {
                 cfg.serial_baud = v;
             }
         }
@@ -573,7 +582,7 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
         "serial_s_regs" => cfg.serial_s_regs = value.to_string(),
         "ssh_enabled" => cfg.ssh_enabled = value.eq_ignore_ascii_case("true"),
         "ssh_port" => {
-            if let Ok(v) = value.parse() {
+            if let Ok(v) = value.parse::<u16>() && v >= 1 {
                 cfg.ssh_port = v;
             }
         }
@@ -659,8 +668,10 @@ pub fn save_dialup_mappings(entries: &[DialupEntry]) {
     for entry in entries {
         content.push_str(&format!("{} = {}:{}\n", entry.number, entry.host, entry.port));
     }
-    if let Err(e) = std::fs::write(DIALUP_FILE, &content) {
+    let tmp = format!("{}.{}.tmp", DIALUP_FILE, std::process::id());
+    if let Err(e) = std::fs::write(&tmp, &content).and_then(|()| std::fs::rename(&tmp, DIALUP_FILE)) {
         glog!("Warning: could not write {}: {}", DIALUP_FILE, e);
+        let _ = std::fs::remove_file(&tmp);
     }
 }
 
@@ -696,6 +707,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let cfg = Config::default();
+        assert!(cfg.telnet_enabled);
         assert_eq!(cfg.telnet_port, 2323);
         assert!(cfg.enable_console);
         assert!(!cfg.security_enabled);
@@ -707,6 +719,10 @@ mod tests {
         assert_eq!(cfg.groq_api_key, "");
         assert_eq!(cfg.browser_homepage, "http://telnetbible.com");
         assert_eq!(cfg.weather_zip, "");
+        assert!(!cfg.verbose);
+        assert_eq!(cfg.xmodem_negotiation_timeout, 45);
+        assert_eq!(cfg.xmodem_block_timeout, 20);
+        assert_eq!(cfg.xmodem_max_retries, 10);
         assert!(!cfg.serial_enabled);
         assert_eq!(cfg.serial_port, "");
         assert_eq!(cfg.serial_baud, 9600);
@@ -714,6 +730,10 @@ mod tests {
         assert_eq!(cfg.serial_parity, "none");
         assert_eq!(cfg.serial_stopbits, 1);
         assert_eq!(cfg.serial_flowcontrol, "none");
+        assert!(cfg.serial_echo);
+        assert!(cfg.serial_verbose);
+        assert!(!cfg.serial_quiet);
+        assert_eq!(cfg.serial_s_regs, "5,0,43,13,10,8,2,50,2,6,14,95,50");
         assert!(!cfg.ssh_enabled);
         assert_eq!(cfg.ssh_port, 2222);
         assert_eq!(cfg.ssh_username, "admin");

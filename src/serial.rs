@@ -982,11 +982,13 @@ fn process_online_bytes(
 ) {
     let esc = escape_char(state);
     let guard = guard_time(state);
+    // Per Hayes standard, S2 > 127 or S12 = 0 disables escape detection.
+    let escape_enabled = esc <= 127 && !guard.is_zero();
 
     for &byte in data {
         let now = Instant::now();
 
-        if byte == esc {
+        if escape_enabled && byte == esc {
             if state.plus_count == 0 {
                 // First escape char: only start sequence if guard time (silence) has elapsed
                 if now.duration_since(state.last_data_time) >= guard {
@@ -1092,7 +1094,7 @@ fn process_ring(state: &mut ModemState, sender: tokio::sync::mpsc::Sender<u8>) {
                         manual_answer = true;
                         break;
                     }
-                } else if byte >= 0x20 {
+                } else if byte >= 0x20 && state.cmd_buffer.len() < MAX_CMD_LEN {
                     state.cmd_buffer.push(byte as char);
                 }
             }
