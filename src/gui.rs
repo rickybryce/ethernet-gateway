@@ -39,7 +39,7 @@ pub fn run(cfg: Config, shutdown: Arc<AtomicBool>, restart: Arc<AtomicBool>) {
         let options = eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_title(format!("XMODEM Gateway v{}", env!("CARGO_PKG_VERSION")))
-                .with_inner_size([900.0, 780.0])
+                .with_inner_size([990.0, 810.0])
                 .with_min_inner_size([640.0, 480.0]),
             ..Default::default()
         };
@@ -170,6 +170,10 @@ struct App {
     /// Set when the user edits any field; prevents refresh_from_global from
     /// overwriting in-progress edits. Cleared on save.
     dirty: bool,
+    /// Whether the Server "More..." popup is open.
+    server_popup_open: bool,
+    /// Whether the Serial Modem "More..." popup is open.
+    serial_popup_open: bool,
 }
 
 impl App {
@@ -202,6 +206,8 @@ impl App {
             serial_baud_buf,
             serial_ports,
             dirty: false,
+            server_popup_open: false,
+            serial_popup_open: false,
         }
     }
 
@@ -225,6 +231,213 @@ impl App {
                 self.console_lines.drain(..excess);
             }
         }
+    }
+
+    /// Render the Server frame's primary field rows (telnet/SSH ports,
+    /// session cap, idle timeout).  Shared between the main layout and
+    /// the Server popup so both stay in sync.
+    fn draw_server_controls(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.cfg.telnet_enabled, "Telnet");
+            labeled_field(ui, "Port:", &mut self.telnet_port_buf, 50.0);
+            ui.add_space(8.0);
+            labeled_field(ui, "Sessions:", &mut self.max_sessions_buf, 40.0);
+        });
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.cfg.ssh_enabled, "SSH");
+            ui.add_space(16.0);
+            labeled_field(ui, "Port:", &mut self.ssh_port_buf, 50.0);
+            ui.add_space(8.0);
+            labeled_field(ui, "Idle (s):", &mut self.idle_timeout_buf, 50.0);
+        });
+    }
+
+    /// Render the Server frame's advanced options (telnet gateway
+    /// negotiation/raw mode).  Shown only in the popup.
+    fn draw_server_advanced(&mut self, ui: &mut egui::Ui) {
+        ui.label(egui::RichText::new("Telnet Gateway").strong().color(AMBER));
+        ui.checkbox(
+            &mut self.cfg.telnet_gateway_negotiate,
+            "Negotiate TTYPE / NAWS with remote",
+        );
+        ui.checkbox(
+            &mut self.cfg.telnet_gateway_raw,
+            "Raw TCP mode (disable telnet IAC)",
+        );
+    }
+
+    /// Render the Serial Modem frame's primary field rows (port, baud,
+    /// line framing, flow control).  Shared between the main layout and
+    /// the Serial popup.
+    fn draw_serial_controls(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Port:");
+            let selected = if self.cfg.serial_port.is_empty() {
+                "(none)".to_string()
+            } else {
+                self.cfg.serial_port.clone()
+            };
+            egui::ComboBox::from_id_salt("serial_port")
+                .width(120.0)
+                .selected_text(&selected)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.cfg.serial_port,
+                        String::new(),
+                        "(none)",
+                    );
+                    for port in &self.serial_ports {
+                        ui.selectable_value(
+                            &mut self.cfg.serial_port,
+                            port.clone(),
+                            port,
+                        );
+                    }
+                });
+            if ui.small_button("\u{21bb}").on_hover_text("Refresh ports").clicked() {
+                self.serial_ports = detect_serial_ports();
+            }
+            ui.add_space(4.0);
+            labeled_field(ui, "Baud:", &mut self.serial_baud_buf, 70.0);
+        });
+        ui.horizontal(|ui| {
+            ui.label("Bits:");
+            egui::ComboBox::from_id_salt("databits")
+                .width(36.0)
+                .selected_text(self.cfg.serial_databits.to_string())
+                .show_ui(ui, |ui| {
+                    for b in [5u8, 6, 7, 8] {
+                        ui.selectable_value(&mut self.cfg.serial_databits, b, b.to_string());
+                    }
+                });
+            ui.label("Par:");
+            egui::ComboBox::from_id_salt("parity")
+                .width(56.0)
+                .selected_text(&self.cfg.serial_parity)
+                .show_ui(ui, |ui| {
+                    for p in ["none", "odd", "even"] {
+                        ui.selectable_value(&mut self.cfg.serial_parity, p.to_string(), p);
+                    }
+                });
+            ui.label("Stop:");
+            egui::ComboBox::from_id_salt("stopbits")
+                .width(36.0)
+                .selected_text(self.cfg.serial_stopbits.to_string())
+                .show_ui(ui, |ui| {
+                    for s in [1u8, 2] {
+                        ui.selectable_value(&mut self.cfg.serial_stopbits, s, s.to_string());
+                    }
+                });
+            ui.label("Flow:");
+            egui::ComboBox::from_id_salt("flow")
+                .width(72.0)
+                .selected_text(&self.cfg.serial_flowcontrol)
+                .show_ui(ui, |ui| {
+                    for f in ["none", "hardware", "software"] {
+                        ui.selectable_value(&mut self.cfg.serial_flowcontrol, f.to_string(), f);
+                    }
+                });
+        });
+    }
+
+    /// Render the Serial Modem frame's advanced options — Hayes AT saved
+    /// state, S-registers, and stored phone-number slots.  Shown only in
+    /// the popup.
+    fn draw_serial_advanced(&mut self, ui: &mut egui::Ui) {
+        ui.label(egui::RichText::new("Hayes AT Saved State").strong().color(AMBER));
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.cfg.serial_echo, "Echo (E1)");
+            ui.add_space(8.0);
+            ui.checkbox(&mut self.cfg.serial_verbose, "Verbose (V1)");
+            ui.add_space(8.0);
+            ui.checkbox(&mut self.cfg.serial_quiet, "Quiet (Q1)");
+        });
+        ui.horizontal(|ui| {
+            ui.label("Result level (X):");
+            egui::ComboBox::from_id_salt("x_code")
+                .width(36.0)
+                .selected_text(self.cfg.serial_x_code.to_string())
+                .show_ui(ui, |ui| {
+                    for x in 0u8..=4 {
+                        ui.selectable_value(&mut self.cfg.serial_x_code, x, x.to_string());
+                    }
+                });
+            ui.add_space(8.0);
+            ui.label("DTR (&D):");
+            egui::ComboBox::from_id_salt("dtr_mode")
+                .width(36.0)
+                .selected_text(self.cfg.serial_dtr_mode.to_string())
+                .show_ui(ui, |ui| {
+                    for d in 0u8..=3 {
+                        ui.selectable_value(&mut self.cfg.serial_dtr_mode, d, d.to_string());
+                    }
+                });
+            ui.add_space(8.0);
+            ui.label("Flow (&K):");
+            egui::ComboBox::from_id_salt("flow_mode")
+                .width(36.0)
+                .selected_text(self.cfg.serial_flow_mode.to_string())
+                .show_ui(ui, |ui| {
+                    for f in 0u8..=4 {
+                        ui.selectable_value(&mut self.cfg.serial_flow_mode, f, f.to_string());
+                    }
+                });
+            ui.add_space(8.0);
+            ui.label("DCD (&C):");
+            egui::ComboBox::from_id_salt("dcd_mode")
+                .width(36.0)
+                .selected_text(self.cfg.serial_dcd_mode.to_string())
+                .show_ui(ui, |ui| {
+                    for c in 0u8..=1 {
+                        ui.selectable_value(&mut self.cfg.serial_dcd_mode, c, c.to_string());
+                    }
+                });
+        });
+
+        ui.add_space(6.0);
+        ui.separator();
+        ui.add_space(2.0);
+        ui.label(egui::RichText::new("S-Registers").strong().color(AMBER));
+        ui.label(
+            egui::RichText::new(
+                "Comma-separated decimal values for S0..S26 (ATSn=v sets, ATSn? reads).",
+            )
+            .italics()
+            .small(),
+        );
+        ui.add(
+            egui::TextEdit::multiline(&mut self.cfg.serial_s_regs)
+                .desired_rows(2)
+                .desired_width(f32::INFINITY),
+        );
+
+        ui.add_space(6.0);
+        ui.separator();
+        ui.add_space(2.0);
+        ui.label(
+            egui::RichText::new("Stored Phone Numbers (AT&Zn=s / ATDSn)")
+                .strong()
+                .color(AMBER),
+        );
+        for (i, slot) in self.cfg.serial_stored_numbers.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(format!("&Z{} =", i));
+                ui.add(
+                    egui::TextEdit::singleline(slot)
+                        .desired_width(f32::INFINITY),
+                );
+            });
+        }
+    }
+
+    /// Persist the current in-memory config to disk.  Called by popup
+    /// Save buttons; leaves the server running (no restart).
+    fn save_config_now(&mut self) {
+        self.sync_numeric_fields();
+        config::save_config(&self.cfg);
+        self.last_synced_cfg = self.cfg.clone();
+        self.dirty = false;
+        logger::log("Configuration saved.".into());
     }
 
     /// Pull the global config singleton and, if it changed since our last
@@ -361,20 +574,19 @@ impl eframe::App for App {
                             egui::Frame::group(ui.style()).show(ui, |ui| {
                                 ui.set_min_height(row_h);
                                 ui.set_min_width(ui.available_width());
-                                ui.label(egui::RichText::new("Server").strong().color(AMBER));
                                 ui.horizontal(|ui| {
-                                    ui.checkbox(&mut self.cfg.telnet_enabled, "Telnet");
-                                    labeled_field(ui, "Port:", &mut self.telnet_port_buf, 50.0);
-                                    ui.add_space(8.0);
-                                    labeled_field(ui, "Sessions:", &mut self.max_sessions_buf, 40.0);
+                                    ui.label(egui::RichText::new("Server").strong().color(AMBER));
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.add_space(4.0);
+                                            if ui.small_button("More...").clicked() {
+                                                self.server_popup_open = true;
+                                            }
+                                        },
+                                    );
                                 });
-                                ui.horizontal(|ui| {
-                                    ui.checkbox(&mut self.cfg.ssh_enabled, "SSH");
-                                    ui.add_space(16.0);
-                                    labeled_field(ui, "Port:", &mut self.ssh_port_buf, 50.0);
-                                    ui.add_space(8.0);
-                                    labeled_field(ui, "Idle (s):", &mut self.idle_timeout_buf, 50.0);
-                                });
+                                self.draw_server_controls(ui);
                             });
                         },
                     );
@@ -467,75 +679,17 @@ impl eframe::App for App {
                                     ui.label(egui::RichText::new("Serial Modem").strong().color(AMBER));
                                     ui.add_space(8.0);
                                     ui.checkbox(&mut self.cfg.serial_enabled, "Enabled");
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.add_space(4.0);
+                                            if ui.small_button("More...").clicked() {
+                                                self.serial_popup_open = true;
+                                            }
+                                        },
+                                    );
                                 });
-                                ui.horizontal(|ui| {
-                                    ui.label("Port:");
-                                    let selected = if self.cfg.serial_port.is_empty() {
-                                        "(none)".to_string()
-                                    } else {
-                                        self.cfg.serial_port.clone()
-                                    };
-                                    egui::ComboBox::from_id_salt("serial_port")
-                                        .width(120.0)
-                                        .selected_text(&selected)
-                                        .show_ui(ui, |ui| {
-                                            ui.selectable_value(
-                                                &mut self.cfg.serial_port,
-                                                String::new(),
-                                                "(none)",
-                                            );
-                                            for port in &self.serial_ports {
-                                                ui.selectable_value(
-                                                    &mut self.cfg.serial_port,
-                                                    port.clone(),
-                                                    port,
-                                                );
-                                            }
-                                        });
-                                    if ui.small_button("\u{21bb}").on_hover_text("Refresh ports").clicked() {
-                                        self.serial_ports = detect_serial_ports();
-                                    }
-                                    ui.add_space(4.0);
-                                    labeled_field(ui, "Baud:", &mut self.serial_baud_buf, 70.0);
-                                });
-                                ui.horizontal(|ui| {
-                                    ui.label("Bits:");
-                                    egui::ComboBox::from_id_salt("databits")
-                                        .width(36.0)
-                                        .selected_text(self.cfg.serial_databits.to_string())
-                                        .show_ui(ui, |ui| {
-                                            for b in [5u8, 6, 7, 8] {
-                                                ui.selectable_value(&mut self.cfg.serial_databits, b, b.to_string());
-                                            }
-                                        });
-                                    ui.label("Par:");
-                                    egui::ComboBox::from_id_salt("parity")
-                                        .width(56.0)
-                                        .selected_text(&self.cfg.serial_parity)
-                                        .show_ui(ui, |ui| {
-                                            for p in ["none", "odd", "even"] {
-                                                ui.selectable_value(&mut self.cfg.serial_parity, p.to_string(), p);
-                                            }
-                                        });
-                                    ui.label("Stop:");
-                                    egui::ComboBox::from_id_salt("stopbits")
-                                        .width(36.0)
-                                        .selected_text(self.cfg.serial_stopbits.to_string())
-                                        .show_ui(ui, |ui| {
-                                            for s in [1u8, 2] {
-                                                ui.selectable_value(&mut self.cfg.serial_stopbits, s, s.to_string());
-                                            }
-                                        });
-                                    ui.label("Flow:");
-                                    egui::ComboBox::from_id_salt("flow")
-                                        .width(72.0)
-                                        .selected_text(&self.cfg.serial_flowcontrol)
-                                        .show_ui(ui, |ui| {
-                                            for f in ["none", "hardware", "software"] {
-                                                ui.selectable_value(&mut self.cfg.serial_flowcontrol, f.to_string(), f);
-                                            }
-                                        });
-                                });
+                                self.draw_serial_controls(ui);
                             });
                         },
                     );
@@ -648,6 +802,70 @@ impl eframe::App for App {
                 });
                 ui.add_space(20.0);
             });
+
+        // ── Advanced-options popups ──────────────────────────
+        // Drawn after the scroll area so they float above the main
+        // layout.  Each popup mirrors the primary controls and adds
+        // per-frame advanced fields, with its own Save button.
+        let ctx = ui.ctx().clone();
+
+        let mut server_open = self.server_popup_open;
+        egui::Window::new(egui::RichText::new("Server — More").strong().color(AMBER_BRIGHT))
+            .open(&mut server_open)
+            .resizable(true)
+            .collapsible(false)
+            .default_width(440.0)
+            .show(&ctx, |ui| {
+                self.draw_server_controls(ui);
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(4.0);
+                self.draw_server_advanced(ui);
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+                if ui
+                    .add(egui::Button::new(
+                        egui::RichText::new("Save")
+                            .strong()
+                            .size(16.0)
+                            .color(AMBER_BRIGHT),
+                    ))
+                    .clicked()
+                {
+                    self.save_config_now();
+                }
+            });
+        self.server_popup_open = server_open;
+
+        let mut serial_open = self.serial_popup_open;
+        egui::Window::new(egui::RichText::new("Serial Modem — More").strong().color(AMBER_BRIGHT))
+            .open(&mut serial_open)
+            .resizable(true)
+            .collapsible(false)
+            .default_width(520.0)
+            .show(&ctx, |ui| {
+                self.draw_serial_controls(ui);
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(4.0);
+                self.draw_serial_advanced(ui);
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+                if ui
+                    .add(egui::Button::new(
+                        egui::RichText::new("Save")
+                            .strong()
+                            .size(16.0)
+                            .color(AMBER_BRIGHT),
+                    ))
+                    .clicked()
+                {
+                    self.save_config_now();
+                }
+            });
+        self.serial_popup_open = serial_open;
 
         // Detect whether the user has unsaved edits.  Compare bound
         // config fields against the last-synced snapshot so that
