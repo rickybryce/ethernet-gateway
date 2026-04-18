@@ -41,8 +41,22 @@ const DEFAULT_XMODEM_MAX_RETRIES: usize = 10;
 const DEFAULT_SERIAL_ECHO: bool = true;
 const DEFAULT_SERIAL_VERBOSE: bool = true;
 const DEFAULT_SERIAL_QUIET: bool = false;
-/// Default S-register values (S0–S12), comma-separated for config storage.
-const DEFAULT_SERIAL_S_REGS: &str = "5,0,43,13,10,8,2,50,2,6,14,95,50";
+/// Default S-register values (S0–S26), comma-separated for config storage.
+/// S7 is 15 (not the Hayes 50) — gateway-friendly carrier wait.  S13–S24
+/// are reserved-zero placeholders; S25 (DTR detect 50 ms) and S26 (RTS/CTS
+/// delay 10 ms) match Hayes.  Older config files with only 13 values are
+/// still accepted: missing indices fall back to defaults.
+const DEFAULT_SERIAL_S_REGS: &str =
+    "5,0,43,13,10,8,2,15,2,6,14,95,50,0,0,0,0,0,0,0,0,0,0,0,0,5,1";
+/// ATX4 — emit the full extended result-code set (Hayes default).
+const DEFAULT_SERIAL_X_CODE: u8 = 4;
+/// AT&D0 — ignore DTR (gateway-friendly; Hayes default is &D2).
+const DEFAULT_SERIAL_DTR_MODE: u8 = 0;
+/// AT&K0 — no modem-level flow control (gateway-friendly; Hayes default is &K3).
+/// Physical port flow control is still controlled by `serial_flowcontrol`.
+const DEFAULT_SERIAL_FLOW_MODE: u8 = 0;
+/// AT&C1 — DCD reflects carrier state (Hayes default).
+const DEFAULT_SERIAL_DCD_MODE: u8 = 1;
 const DEFAULT_SSH_ENABLED: bool = false;
 const DEFAULT_SSH_PORT: u16 = 2222;
 const DEFAULT_SSH_USERNAME: &str = "admin";
@@ -98,6 +112,17 @@ pub struct Config {
     pub serial_quiet: bool,
     /// Saved S-register values as comma-separated decimal (AT&W persists, ATZ restores).
     pub serial_s_regs: String,
+    /// Saved ATX result-code level (0-4). AT&W persists, ATZ restores.
+    pub serial_x_code: u8,
+    /// Saved AT&D DTR-handling mode (0-3). AT&W persists, ATZ restores.
+    pub serial_dtr_mode: u8,
+    /// Saved AT&K flow-control mode (0-4). AT&W persists, ATZ restores.
+    pub serial_flow_mode: u8,
+    /// Saved AT&C DCD mode (0-1). AT&W persists, ATZ restores.
+    pub serial_dcd_mode: u8,
+    /// Stored phone-number slots (AT&Zn=s sets, ATDSn dials).  Four slots,
+    /// persisted by AT&W and restored by ATZ.  Empty string = unset.
+    pub serial_stored_numbers: [String; 4],
     /// Enable SSH server interface.
     pub ssh_enabled: bool,
     /// SSH server port.
@@ -138,6 +163,16 @@ impl Default for Config {
             serial_verbose: DEFAULT_SERIAL_VERBOSE,
             serial_quiet: DEFAULT_SERIAL_QUIET,
             serial_s_regs: DEFAULT_SERIAL_S_REGS.into(),
+            serial_x_code: DEFAULT_SERIAL_X_CODE,
+            serial_dtr_mode: DEFAULT_SERIAL_DTR_MODE,
+            serial_flow_mode: DEFAULT_SERIAL_FLOW_MODE,
+            serial_dcd_mode: DEFAULT_SERIAL_DCD_MODE,
+            serial_stored_numbers: [
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+            ],
             ssh_enabled: DEFAULT_SSH_ENABLED,
             ssh_port: DEFAULT_SSH_PORT,
             ssh_username: DEFAULT_SSH_USERNAME.into(),
@@ -318,6 +353,32 @@ fn read_config_file(path: &str) -> Config {
             .get("serial_s_regs")
             .cloned()
             .unwrap_or_else(|| DEFAULT_SERIAL_S_REGS.into()),
+        serial_x_code: map
+            .get("serial_x_code")
+            .and_then(|v| v.parse::<u8>().ok())
+            .filter(|&v| v <= 4)
+            .unwrap_or(DEFAULT_SERIAL_X_CODE),
+        serial_dtr_mode: map
+            .get("serial_dtr_mode")
+            .and_then(|v| v.parse::<u8>().ok())
+            .filter(|&v| v <= 3)
+            .unwrap_or(DEFAULT_SERIAL_DTR_MODE),
+        serial_flow_mode: map
+            .get("serial_flow_mode")
+            .and_then(|v| v.parse::<u8>().ok())
+            .filter(|&v| v <= 4)
+            .unwrap_or(DEFAULT_SERIAL_FLOW_MODE),
+        serial_dcd_mode: map
+            .get("serial_dcd_mode")
+            .and_then(|v| v.parse::<u8>().ok())
+            .filter(|&v| v <= 1)
+            .unwrap_or(DEFAULT_SERIAL_DCD_MODE),
+        serial_stored_numbers: [
+            map.get("serial_stored_0").cloned().unwrap_or_default(),
+            map.get("serial_stored_1").cloned().unwrap_or_default(),
+            map.get("serial_stored_2").cloned().unwrap_or_default(),
+            map.get("serial_stored_3").cloned().unwrap_or_default(),
+        ],
         ssh_enabled: map
             .get("ssh_enabled")
             .map(|v| v.eq_ignore_ascii_case("true"))
@@ -428,6 +489,24 @@ serial_verbose = {}
 serial_quiet = {}
 serial_s_regs = {}
 
+# Hayes extended command state (written by AT&W, restored by ATZ)
+# serial_x_code:    ATX level 0-4 (4 = all extended result codes, Hayes default)
+# serial_dtr_mode:  AT&D 0-3 (0 = ignore DTR, gateway-friendly default)
+# serial_flow_mode: AT&K 0-4 (0 = no flow control at modem layer,
+#                   gateway-friendly default; physical port flow control
+#                   is still controlled by serial_flowcontrol above)
+# serial_dcd_mode:  AT&C 0-1 (1 = DCD reflects carrier, Hayes default)
+serial_x_code = {}
+serial_dtr_mode = {}
+serial_flow_mode = {}
+serial_dcd_mode = {}
+
+# Hayes stored phone-number slots (AT&Zn=s sets, ATDSn dials).  Empty = unset.
+serial_stored_0 = {}
+serial_stored_1 = {}
+serial_stored_2 = {}
+serial_stored_3 = {}
+
 # SSH server interface (encrypted access to the gateway)
 # Set ssh_enabled = true to activate. Uses its own credentials.
 ssh_enabled = {}
@@ -466,6 +545,14 @@ ssh_password = {}
         cfg.serial_verbose,
         cfg.serial_quiet,
         sanitize_value(&cfg.serial_s_regs),
+        cfg.serial_x_code,
+        cfg.serial_dtr_mode,
+        cfg.serial_flow_mode,
+        cfg.serial_dcd_mode,
+        sanitize_value(&cfg.serial_stored_numbers[0]),
+        sanitize_value(&cfg.serial_stored_numbers[1]),
+        sanitize_value(&cfg.serial_stored_numbers[2]),
+        sanitize_value(&cfg.serial_stored_numbers[3]),
         cfg.ssh_enabled,
         cfg.ssh_port,
         sanitize_value(&cfg.ssh_username),
@@ -580,6 +667,30 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
         "serial_verbose" => cfg.serial_verbose = value.eq_ignore_ascii_case("true"),
         "serial_quiet" => cfg.serial_quiet = value.eq_ignore_ascii_case("true"),
         "serial_s_regs" => cfg.serial_s_regs = value.to_string(),
+        "serial_x_code" => {
+            if let Ok(v) = value.parse::<u8>() && v <= 4 {
+                cfg.serial_x_code = v;
+            }
+        }
+        "serial_dtr_mode" => {
+            if let Ok(v) = value.parse::<u8>() && v <= 3 {
+                cfg.serial_dtr_mode = v;
+            }
+        }
+        "serial_flow_mode" => {
+            if let Ok(v) = value.parse::<u8>() && v <= 4 {
+                cfg.serial_flow_mode = v;
+            }
+        }
+        "serial_dcd_mode" => {
+            if let Ok(v) = value.parse::<u8>() && v <= 1 {
+                cfg.serial_dcd_mode = v;
+            }
+        }
+        "serial_stored_0" => cfg.serial_stored_numbers[0] = value.to_string(),
+        "serial_stored_1" => cfg.serial_stored_numbers[1] = value.to_string(),
+        "serial_stored_2" => cfg.serial_stored_numbers[2] = value.to_string(),
+        "serial_stored_3" => cfg.serial_stored_numbers[3] = value.to_string(),
         "ssh_enabled" => cfg.ssh_enabled = value.eq_ignore_ascii_case("true"),
         "ssh_port" => {
             if let Ok(v) = value.parse::<u16>() && v >= 1 {
@@ -733,7 +844,20 @@ mod tests {
         assert!(cfg.serial_echo);
         assert!(cfg.serial_verbose);
         assert!(!cfg.serial_quiet);
-        assert_eq!(cfg.serial_s_regs, "5,0,43,13,10,8,2,50,2,6,14,95,50");
+        assert_eq!(
+            cfg.serial_s_regs,
+            "5,0,43,13,10,8,2,15,2,6,14,95,50,0,0,0,0,0,0,0,0,0,0,0,0,5,1"
+        );
+        assert_eq!(cfg.serial_x_code, 4);
+        assert_eq!(cfg.serial_dtr_mode, 0);
+        assert_eq!(cfg.serial_flow_mode, 0);
+        assert_eq!(cfg.serial_dcd_mode, 1);
+        assert_eq!(cfg.serial_stored_numbers, [
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+        ]);
         assert!(!cfg.ssh_enabled);
         assert_eq!(cfg.ssh_port, 2222);
         assert_eq!(cfg.ssh_username, "admin");
@@ -841,6 +965,16 @@ mod tests {
             serial_verbose: false,
             serial_quiet: true,
             serial_s_regs: "1,0,43,13,10,8,2,50,2,6,14,95,50".into(),
+            serial_x_code: 3,
+            serial_dtr_mode: 2,
+            serial_flow_mode: 3,
+            serial_dcd_mode: 0,
+            serial_stored_numbers: [
+                "5551234".into(),
+                "example.com:23".into(),
+                String::new(),
+                "9W,5551212".into(),
+            ],
             ssh_enabled: true,
             ssh_port: 2222,
             ssh_username: "sshuser".into(),
@@ -876,6 +1010,11 @@ mod tests {
         assert_eq!(loaded.serial_verbose, original.serial_verbose);
         assert_eq!(loaded.serial_quiet, original.serial_quiet);
         assert_eq!(loaded.serial_s_regs, original.serial_s_regs);
+        assert_eq!(loaded.serial_x_code, original.serial_x_code);
+        assert_eq!(loaded.serial_dtr_mode, original.serial_dtr_mode);
+        assert_eq!(loaded.serial_flow_mode, original.serial_flow_mode);
+        assert_eq!(loaded.serial_dcd_mode, original.serial_dcd_mode);
+        assert_eq!(loaded.serial_stored_numbers, original.serial_stored_numbers);
         assert_eq!(loaded.ssh_enabled, original.ssh_enabled);
         assert_eq!(loaded.ssh_port, original.ssh_port);
         assert_eq!(loaded.ssh_username, original.ssh_username);

@@ -5,9 +5,19 @@
 //! via `tokio::runtime::Handle` for `ATDT xmodem-gateway` connections.
 //!
 //! Supported AT commands: AT, AT?, ATZ, AT&F, AT&W, AT&V, ATE0/ATE1,
-//! ATV0/ATV1, ATQ0/ATQ1, ATI, ATH, ATA, ATO, ATDT, ATDP, ATD, ATDL,
-//! ATS?, ATSn?, ATSn=v.  S-registers S0–S12 are supported.
-//! The `+++` escape (configurable via S2/S12) returns to command mode.
+//! ATV0/ATV1, ATQ0/ATQ1, ATI (I0-I7), ATH, ATA, ATO, ATDT, ATDP, ATD,
+//! ATDL, ATDS (and ATDSn), AT&Zn=s (four stored-number slots), ATS?,
+//! ATSn?, ATSn=v, ATX0-ATX4, AT&C0/AT&C1, AT&D0-AT&D3, AT&K0-AT&K4, and
+//! the `A/` repeat-last-command shortcut.  S-registers S0–S26 are
+//! supported (S13–S24 reserved, S25 DTR detect, S26 RTS/CTS delay).  The
+//! `+++` escape (configurable via S2/S12) returns to command mode.
+//! Unknown AT commands (ATB, ATC, ATL, ATM, AT&B, AT&G, AT&J, AT&S,
+//! AT&T, AT&Y, etc.) return OK so legacy init strings don't halt.
+//!
+//! Gateway-friendly defaults: AT&D0 (ignore DTR), AT&K0 (no modem-layer
+//! flow control), S7=15 (carrier wait).  These differ from Hayes defaults
+//! (AT&D2, AT&K3, S7=50) to avoid breaking retro clients that don't drive
+//! DTR/RTS correctly.  All settings persist via AT&W into `xmodem.conf`.
 
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,15 +32,24 @@ use crate::logger::glog;
 // ─── Constants ─────────────────────────────────────────────
 
 const SERIAL_READ_TIMEOUT: Duration = Duration::from_millis(100);
-const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Hard cap on the TCP-connect timeout to protect the dedicated serial
+/// thread from blocking arbitrarily long if the user raises S7.
+const MAX_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
+/// Maximum total comma-pause we will honor, to avoid a dial string full of
+/// commas from tying up the thread indefinitely.
+const MAX_COMMA_PAUSE: Duration = Duration::from_secs(60);
 /// Maximum AT command buffer length.  Real Hayes modems cap at ~40 chars;
 /// we allow 256 to be generous.  Bytes beyond this limit are silently dropped.
 const MAX_CMD_LEN: usize = 256;
 
-/// Number of S-registers (S0 through S12).
-const NUM_S_REGS: usize = 13;
+/// Number of S-registers (S0 through S26).  S0-S12 are the Hayes Smartmodem
+/// 2400 set; S13-S26 cover the V.series extensions most often referenced by
+/// retro terminal software.  Registers beyond S12 that have no emulator
+/// effect are stored verbatim so `AT&W`/`ATZ` round-trip works.
+const NUM_S_REGS: usize = 27;
 
-/// Default S-register values per the Hayes standard.
+/// Default S-register values.  Matches Hayes except S7 (carrier wait) which
+/// is 15s rather than the Hayes 50s to keep the gateway responsive.
 const S_REG_DEFAULTS: [u8; NUM_S_REGS] = [
     5,   // S0:  Auto-answer ring count (5 = answer after 5 rings)
     0,   // S1:  Ring counter (read-only in real modems)
@@ -39,13 +58,43 @@ const S_REG_DEFAULTS: [u8; NUM_S_REGS] = [
     10,  // S4:  Line feed character
     8,   // S5:  Backspace character
     2,   // S6:  Wait for dial tone (seconds)
-    50,  // S7:  Wait for carrier (seconds)
+    15,  // S7:  Wait for carrier (seconds) — gateway default (Hayes: 50)
     2,   // S8:  Comma pause time (seconds)
     6,   // S9:  Carrier detect response time (1/10s)
     14,  // S10: Carrier loss disconnect time (1/10s)
     95,  // S11: DTMF tone duration (milliseconds)
     50,  // S12: Escape guard time (1/50s; 50 = 1 second)
+    0,   // S13: Reserved (bit flags on real modems)
+    0,   // S14: Reserved (bit flags)
+    0,   // S15: Reserved
+    0,   // S16: Reserved (self-test mode)
+    0,   // S17: Reserved
+    0,   // S18: Test timer (seconds)
+    0,   // S19: Reserved
+    0,   // S20: Reserved
+    0,   // S21: Reserved (bit flags)
+    0,   // S22: Reserved (bit flags)
+    0,   // S23: Reserved (bit flags)
+    0,   // S24: Reserved
+    5,   // S25: DTR detect time (1/100s; Hayes default 5 = 50 ms)
+    1,   // S26: RTS-to-CTS delay (1/100s; Hayes default 1)
 ];
+
+/// Gateway-friendly default for ATX (result-code verbosity).
+/// X4 = emit all extended codes (CONNECT with baud, BUSY, NO DIALTONE).
+const DEFAULT_X_CODE: u8 = 4;
+/// Gateway-friendly default for AT&D (DTR handling).
+/// &D0 = ignore DTR.  Hayes default is &D2 (hang up on DTR drop), which
+/// breaks retro clients that don't drive DTR.
+const DEFAULT_DTR_MODE: u8 = 0;
+/// Gateway-friendly default for AT&K (modem-layer flow control).
+/// &K0 = none.  Hayes default is &K3 (RTS/CTS), which stalls clients that
+/// don't do hardware flow control.  Physical-port flow control is set by
+/// `serial_flowcontrol` in xmodem.conf.
+const DEFAULT_FLOW_MODE: u8 = 0;
+/// Gateway-friendly default for AT&C (DCD handling).
+/// &C1 = DCD tracks carrier state.  Matches Hayes default.
+const DEFAULT_DCD_MODE: u8 = 1;
 
 /// Flag to signal the serial thread to restart with new config.
 static SERIAL_RESTART: AtomicBool = AtomicBool::new(false);
@@ -102,8 +151,30 @@ struct ModemState {
     active_connection: Option<ActiveConnection>,
     /// S-register values (S0–S12).
     s_regs: [u8; NUM_S_REGS],
+    /// ATX result-code level (0-4).  Controls whether CONNECT includes a
+    /// baud rate and whether BUSY/NO DIALTONE/NO ANSWER can be emitted.
+    x_code: u8,
+    /// AT&D DTR-handling mode (0-3).  Stored and persisted.  &D0 (default)
+    /// ignores DTR transitions.  Higher modes are recognized and saved but
+    /// not enforced because DTR semantics on USB-serial adapters are
+    /// platform-specific.
+    dtr_mode: u8,
+    /// AT&K modem-layer flow control (0-4).  Stored and persisted.  The
+    /// physical serial port's flow control is controlled by
+    /// `serial_flowcontrol` in xmodem.conf, not by this value.
+    flow_mode: u8,
+    /// AT&C DCD mode (0-1).  Stored and persisted.  &C1 (default) reports
+    /// carrier; &C0 forces DCD always asserted.  Physical DCD signalling
+    /// depends on the serial adapter.
+    dcd_mode: u8,
     /// Last dialed target for ATDL (redial).
     last_dial: String,
+    /// Last fully-processed AT command line, for Hayes `A/` repeat.  Not
+    /// persisted — real modems keep A/ state in RAM only.
+    last_command: String,
+    /// Hayes stored-number slots (AT&Zn=s / ATDSn).  Mirrored from config on
+    /// startup and ATZ, persisted to config on AT&W.
+    stored_numbers: [String; 4],
 }
 
 // ─── Public API ────────────────────────────────────────────
@@ -247,10 +318,16 @@ fn serial_thread(
         baud: cfg.serial_baud,
         active_connection: None,
         s_regs: parse_s_regs(&cfg.serial_s_regs),
+        x_code: cfg.serial_x_code,
+        dtr_mode: cfg.serial_dtr_mode,
+        flow_mode: cfg.serial_flow_mode,
+        dcd_mode: cfg.serial_dcd_mode,
         last_dial: String::new(),
+        last_command: String::new(),
+        stored_numbers: cfg.serial_stored_numbers.clone(),
     };
 
-    send_response(&mut state.port, "OK");
+    send_response(&mut state, "OK");
 
     while !state.shutdown.load(Ordering::SeqCst) && !SERIAL_RESTART.load(Ordering::SeqCst) {
         // Check for a pending ring request.
@@ -288,35 +365,50 @@ fn command_mode_tick(state: &mut ModemState) {
             state.last_data_time = Instant::now();
             state.plus_count = 0;
 
-            match byte {
-                b'\r' | b'\n' => {
+            let cr = state.s_regs[3];
+            let lf = state.s_regs[4];
+            let bs = state.s_regs[5];
+
+            // Line terminator: configured CR (S3), configured LF (S4), or
+            // the historical ASCII pair 0x0D / 0x0A.  This keeps line-ending
+            // auto-detection working even when S3/S4 are customized.
+            if byte == cr || byte == lf || byte == 0x0D || byte == 0x0A {
+                if state.echo {
+                    let _ = state.port.write_all(&[cr, lf]);
+                }
+                let cmd = std::mem::take(&mut state.cmd_buffer);
+                let cmd = cmd.trim().to_string();
+                if !cmd.is_empty() {
+                    process_at_command(state, &cmd);
+                }
+            } else if byte == bs || byte == 0x7F {
+                // Backspace: configured S5 character or ASCII DEL.
+                if !state.cmd_buffer.is_empty() {
+                    state.cmd_buffer.pop();
                     if state.echo {
-                        let _ = state.port.write_all(b"\r\n");
-                    }
-                    let cmd = std::mem::take(&mut state.cmd_buffer);
-                    let cmd = cmd.trim().to_string();
-                    if !cmd.is_empty() {
-                        process_at_command(state, &cmd);
+                        // Echo BS-SPACE-BS using the configured BS char.
+                        let _ = state.port.write_all(&[bs, b' ', bs]);
                     }
                 }
-                0x08 | 0x7F => {
-                    if !state.cmd_buffer.is_empty() {
-                        state.cmd_buffer.pop();
-                        if state.echo {
-                            let _ = state.port.write_all(b"\x08 \x08");
-                        }
-                    }
+            } else if byte == b'/' && matches!(state.cmd_buffer.as_str(), "A" | "a") {
+                // Hayes `A/` — repeat last command.  Triggers immediately on
+                // the `/` keystroke, no CR required.  The preceding `A` is
+                // already echoed; finish the visual line with `/` + CR/LF.
+                state.cmd_buffer.clear();
+                if state.echo {
+                    let _ = state.port.write_all(&[b'/', cr, lf]);
                 }
-                _ if byte >= 0x20 => {
-                    if state.cmd_buffer.len() < MAX_CMD_LEN {
-                        if state.echo {
-                            let _ = state.port.write_all(&[byte]);
-                        }
-                        state.cmd_buffer.push(byte as char);
-                    }
+                if !state.last_command.is_empty() {
+                    let cmd = state.last_command.clone();
+                    process_at_command(state, &cmd);
                 }
-                _ => {} // ignore control chars
+            } else if byte >= 0x20 && state.cmd_buffer.len() < MAX_CMD_LEN {
+                if state.echo {
+                    let _ = state.port.write_all(&[byte]);
+                }
+                state.cmd_buffer.push(byte as char);
             }
+            // Other control characters are ignored.
         }
         Ok(_) => {}
         Err(ref e)
@@ -361,6 +453,18 @@ enum AtResult {
     Help,
     /// ATS? — show S-register help.
     SRegHelp,
+    /// ATX n — set result-code verbosity (0-4).
+    XSet(u8),
+    /// AT&C n — set DCD mode (0-1).
+    DcdSet(u8),
+    /// AT&D n — set DTR-handling mode (0-3).
+    DtrSet(u8),
+    /// AT&K n — set modem-layer flow control (0-4).
+    FlowSet(u8),
+    /// AT&Zn=s — store phone number `s` in slot `n` (0-3).
+    StoreNumber(usize, String),
+    /// ATDSn — dial stored number from slot `n` (0-3).
+    DialStored(usize),
 }
 
 /// Parse an AT command line into a list of responses.  Pure function for
@@ -419,6 +523,28 @@ fn parse_at_command(
             )),
             AtResult::Ok,
         ],
+        "I1" => vec![AtResult::Info("000".into()), AtResult::Ok],
+        "I2" => vec![AtResult::Ok],
+        "I3" => vec![
+            AtResult::Info(format!(
+                "XMODEM Gateway {}",
+                env!("CARGO_PKG_VERSION")
+            )),
+            AtResult::Ok,
+        ],
+        "I4" => vec![
+            AtResult::Info("Hayes-compatible virtual modem over TCP".into()),
+            AtResult::Ok,
+        ],
+        "I5" => vec![AtResult::Info("B00".into()), AtResult::Ok],
+        "I6" => vec![
+            AtResult::Info("No link diagnostics available".into()),
+            AtResult::Ok,
+        ],
+        "I7" => vec![
+            AtResult::Info("Product: xmodem-gateway (software emulator)".into()),
+            AtResult::Ok,
+        ],
         "?" => vec![AtResult::Help],
         "O" | "O0" => vec![AtResult::Online],
         "A" => vec![AtResult::NoCarrier],
@@ -430,6 +556,43 @@ fn parse_at_command(
         }
         "&W" | "&W0" => vec![AtResult::SaveConfig],
         "&V" => vec![AtResult::ShowConfig],
+        "X" | "X0" => vec![AtResult::XSet(0)],
+        "X1" => vec![AtResult::XSet(1)],
+        "X2" => vec![AtResult::XSet(2)],
+        "X3" => vec![AtResult::XSet(3)],
+        "X4" => vec![AtResult::XSet(4)],
+        "&C" | "&C0" => vec![AtResult::DcdSet(0)],
+        "&C1" => vec![AtResult::DcdSet(1)],
+        "&D" | "&D0" => vec![AtResult::DtrSet(0)],
+        "&D1" => vec![AtResult::DtrSet(1)],
+        "&D2" => vec![AtResult::DtrSet(2)],
+        "&D3" => vec![AtResult::DtrSet(3)],
+        "&K" | "&K0" => vec![AtResult::FlowSet(0)],
+        "&K1" => vec![AtResult::FlowSet(1)],
+        // &K2 is reserved (not defined in Hayes spec)
+        "&K3" => vec![AtResult::FlowSet(3)],
+        "&K4" => vec![AtResult::FlowSet(4)],
+        _ if rest.starts_with("&Z") => {
+            // AT&Zn=s — store a phone number.  n is a single digit slot 0-3.
+            // We slice from the original `cmd` to preserve case in `s`.
+            let after = &rest[2..];
+            let (slot, eq_idx) = match after.find('=') {
+                Some(i) if i >= 1 => {
+                    let slot_str = &after[..i];
+                    match slot_str.parse::<usize>() {
+                        std::result::Result::Ok(n) if n < 4 => (n, i),
+                        _ => return vec![AtResult::Error],
+                    }
+                }
+                _ => return vec![AtResult::Error],
+            };
+            // Offset into `cmd`: "AT" (2) + "&Z" (2) + slot digits + "=".
+            // Use the ASCII-only prefix length via byte indexing — rest is
+            // all ASCII (came from to_ascii_uppercase of ASCII input).
+            let prefix_len = 2 + 2 + eq_idx + 1;
+            let value = cmd.get(prefix_len..).unwrap_or("").trim().to_string();
+            vec![AtResult::StoreNumber(slot, value)]
+        }
         _ if rest.starts_with("S") && rest.len() > 1 => {
             // S-register: ATS? (help), ATSn? (query), or ATSn=v (set)
             let s_rest = &rest[1..];
@@ -463,6 +626,23 @@ fn parse_at_command(
             }
         }
         "DL" => vec![AtResult::Redial],
+        _ if rest.starts_with("DS") && {
+            // Only treat as ATDS if what follows `DS` is empty or a slot
+            // digit.  This prevents swallowing legitimate `ATDsomething`
+            // hostname dials that happen to start with 's'.
+            let tail = rest[2..].trim();
+            tail.is_empty() || tail.chars().all(|c| c.is_ascii_digit())
+        } => {
+            let n_str = rest[2..].trim();
+            if n_str.is_empty() {
+                vec![AtResult::DialStored(0)]
+            } else {
+                match n_str.parse::<usize>() {
+                    std::result::Result::Ok(n) if n < 4 => vec![AtResult::DialStored(n)],
+                    _ => vec![AtResult::Error],
+                }
+            }
+        }
         _ if rest.starts_with("DT") || rest.starts_with("DP") || rest.starts_with("D") => {
             // Preserve original case for the dial string (hostnames).
             let dial_str = if rest.starts_with("DT") || rest.starts_with("DP") {
@@ -484,6 +664,9 @@ fn parse_at_command(
 }
 
 fn process_at_command(state: &mut ModemState, cmd: &str) {
+    // Stash the line for Hayes `A/` repeat.  Real modems skip the A/
+    // pseudo-command itself (we never route "A/" through here anyway).
+    state.last_command = cmd.to_string();
     let results = parse_at_command(
         cmd,
         &mut state.echo,
@@ -497,16 +680,23 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
             AtResult::NoCarrier => { send_result(state, "NO CARRIER"); }
             AtResult::Info(msg) => {
                 if !state.quiet {
-                    send_response(&mut state.port, &msg);
+                    send_response(state, &msg);
                 }
             }
             AtResult::Dial(target) => {
-                // Strip commas (pause characters) from the dial string.
-                let target = target.replace(',', "");
+                let parsed = parse_dial_string(&target, &state.s_regs);
                 // Hang up any existing connection before dialing.
                 state.active_connection = None;
                 state.last_dial = target.clone();
-                handle_dial(state, &target);
+                if parsed.pre_delay > Duration::ZERO {
+                    std::thread::sleep(parsed.pre_delay);
+                }
+                if parsed.target.is_empty() {
+                    // Empty after stripping modifiers — OK with no dial.
+                    send_result(state, "OK");
+                    return;
+                }
+                handle_dial_with_modifiers(state, &parsed);
                 return; // dial takes over the session
             }
             AtResult::Redial => {
@@ -515,7 +705,15 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
                 } else {
                     state.active_connection = None;
                     let target = state.last_dial.clone();
-                    handle_dial(state, &target);
+                    let parsed = parse_dial_string(&target, &state.s_regs);
+                    if parsed.pre_delay > Duration::ZERO {
+                        std::thread::sleep(parsed.pre_delay);
+                    }
+                    if parsed.target.is_empty() {
+                        send_result(state, "OK");
+                        return;
+                    }
+                    handle_dial_with_modifiers(state, &parsed);
                     return;
                 }
             }
@@ -528,12 +726,16 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
                 send_result(state, "OK");
             }
             AtResult::Reset => {
-                // AT&F — factory defaults
+                // AT&F — reset to gateway-friendly factory defaults
                 state.echo = true;
                 state.verbose = true;
                 state.quiet = false;
                 state.active_connection = None;
                 state.s_regs = S_REG_DEFAULTS;
+                state.x_code = DEFAULT_X_CODE;
+                state.dtr_mode = DEFAULT_DTR_MODE;
+                state.flow_mode = DEFAULT_FLOW_MODE;
+                state.dcd_mode = DEFAULT_DCD_MODE;
                 send_result(state, "OK");
             }
             AtResult::ResetStored => {
@@ -543,6 +745,11 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
                 state.verbose = cfg.serial_verbose;
                 state.quiet = cfg.serial_quiet;
                 state.s_regs = parse_s_regs(&cfg.serial_s_regs);
+                state.x_code = cfg.serial_x_code;
+                state.dtr_mode = cfg.serial_dtr_mode;
+                state.flow_mode = cfg.serial_flow_mode;
+                state.dcd_mode = cfg.serial_dcd_mode;
+                state.stored_numbers = cfg.serial_stored_numbers.clone();
                 state.active_connection = None;
                 send_result(state, "OK");
             }
@@ -553,13 +760,61 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
                     ("serial_verbose", if state.verbose { "true" } else { "false" }),
                     ("serial_quiet", if state.quiet { "true" } else { "false" }),
                     ("serial_s_regs", &format_s_regs(&state.s_regs)),
+                    ("serial_x_code", &state.x_code.to_string()),
+                    ("serial_dtr_mode", &state.dtr_mode.to_string()),
+                    ("serial_flow_mode", &state.flow_mode.to_string()),
+                    ("serial_dcd_mode", &state.dcd_mode.to_string()),
+                    ("serial_stored_0", &state.stored_numbers[0]),
+                    ("serial_stored_1", &state.stored_numbers[1]),
+                    ("serial_stored_2", &state.stored_numbers[2]),
+                    ("serial_stored_3", &state.stored_numbers[3]),
                 ]);
                 send_result(state, "OK");
+            }
+            AtResult::XSet(n) => {
+                state.x_code = n;
+                send_result(state, "OK");
+            }
+            AtResult::DcdSet(n) => {
+                state.dcd_mode = n;
+                send_result(state, "OK");
+            }
+            AtResult::DtrSet(n) => {
+                state.dtr_mode = n;
+                send_result(state, "OK");
+            }
+            AtResult::FlowSet(n) => {
+                state.flow_mode = n;
+                send_result(state, "OK");
+            }
+            AtResult::StoreNumber(slot, value) => {
+                state.stored_numbers[slot] = value;
+                send_result(state, "OK");
+            }
+            AtResult::DialStored(slot) => {
+                let stored = state.stored_numbers[slot].clone();
+                if stored.is_empty() {
+                    send_result(state, "NO CARRIER");
+                } else {
+                    let parsed = parse_dial_string(&stored, &state.s_regs);
+                    state.active_connection = None;
+                    state.last_dial = stored;
+                    if parsed.pre_delay > Duration::ZERO {
+                        std::thread::sleep(parsed.pre_delay);
+                    }
+                    if parsed.target.is_empty() {
+                        send_result(state, "OK");
+                        return;
+                    }
+                    handle_dial_with_modifiers(state, &parsed);
+                    return;
+                }
             }
             AtResult::SRegQuery(reg) => {
                 if !state.quiet {
                     let val = state.s_regs[reg];
-                    send_response(&mut state.port, &format!("{:03}", val));
+                    let formatted = format!("{:03}", val);
+                    send_response(state, &formatted);
                 }
             }
             AtResult::SRegSet(reg, val) => {
@@ -572,16 +827,19 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
                         "AT Commands:",
                         "AT     OK             ATZ   Reset (stored)",
                         "AT&F   Factory reset   AT&W  Save settings",
-                        "AT&V   Show config     ATI   Identification",
+                        "AT&V   Show config     ATI0-7 Identification",
                         "ATE0/1 Echo off/on     ATV0/1 Verbose/numeric",
                         "ATQ0/1 Quiet off/on    ATH   Hang up",
                         "ATO    Return online   ATA   Answer",
                         "ATDT   Dial host:port  ATDL  Redial",
+                        "ATDSn  Dial stored n   AT&Zn=s Store in slot n",
                         "ATSn?  Query register  ATSn=v Set register",
                         "ATS?   Register help   +++   Escape to cmd",
-                        "AT?    This help",
+                        "ATX0-4 Result verbosity AT&C  DCD mode",
+                        "AT&D   DTR mode        AT&K  Flow control",
+                        "A/     Repeat last cmd AT?   This help",
                     ].join("\r\n");
-                    send_response(&mut state.port, &text);
+                    send_response(state, &text);
                 }
             }
             AtResult::SRegHelp => {
@@ -595,14 +853,20 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
                         "S04  Line feed char (10)",
                         "S05  Backspace char (8)",
                         "S06  Wait for dial tone (sec)",
-                        "S07  Wait for carrier (sec)",
+                        "S07  Wait for carrier (sec, gateway default 15)",
                         "S08  Comma pause time (sec)",
                         "S09  Carrier detect time (1/10s)",
                         "S10  Carrier loss time (1/10s)",
                         "S11  DTMF tone duration (ms)",
                         "S12  Escape guard time (1/50s)",
-                    ].join("\r\n");
-                    send_response(&mut state.port, &text);
+                        "S13-S24  Reserved (stored for AT&W/ATZ)",
+                        "S25  DTR detect time (1/100s)",
+                        "S26  RTS/CTS delay (1/100s)",
+                        "Note: keep S3/S4/S5 distinct -- if they share a",
+                        "      value, command-line editing collides (CR",
+                        "      branch wins over BS, etc.).",
+                    ].join("\n");
+                    send_response(state, &text);
                 }
             }
             AtResult::ShowConfig => {
@@ -611,13 +875,28 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
                     let echo_str = if state.echo { "E1" } else { "E0" };
                     let verbose_str = if state.verbose { "V1" } else { "V0" };
                     let quiet_str = if state.quiet { "Q1" } else { "Q0" };
-                    send_response(&mut state.port,
-                        &format!("{} {} {} B{}", echo_str, verbose_str, quiet_str, state.baud));
+                    let header = format!(
+                        "{} {} {} X{} &C{} &D{} &K{} B{}",
+                        echo_str, verbose_str, quiet_str,
+                        state.x_code, state.dcd_mode, state.dtr_mode,
+                        state.flow_mode, state.baud,
+                    );
                     let s_line = state.s_regs.iter().enumerate()
                         .map(|(i, v)| format!("S{:02}={:03}", i, v))
                         .collect::<Vec<_>>()
                         .join(" ");
-                    send_response(&mut state.port, &s_line);
+                    let stored_lines = state.stored_numbers.iter().enumerate()
+                        .map(|(i, n)| {
+                            if n.is_empty() {
+                                format!("&Z{}=(unset)", i)
+                            } else {
+                                format!("&Z{}={}", i, n)
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let body = format!("{}\n{}\n{}", header, s_line, stored_lines);
+                    send_response(state, &body);
                     send_result(state, "OK");
                 }
             }
@@ -631,7 +910,7 @@ fn handle_return_online(state: &mut ModemState) {
         send_result(state, "NO CARRIER");
         return;
     };
-    send_result(state, &format!("CONNECT {}", state.baud));
+    send_result(state, "CONNECT");
     state.mode = ModemMode::Online;
     match conn {
         ActiveConnection::Tcp(mut tcp) => {
@@ -668,6 +947,113 @@ fn handle_return_online(state: &mut ModemState) {
 
 /// Built-in phone number that dials the local XMODEM Gateway menu.
 const GATEWAY_PHONE_NUMBER: &str = "1001000";
+
+/// Parsed representation of an ATDT/ATDP dial string with Hayes modifiers
+/// applied.
+#[derive(Debug, PartialEq)]
+struct ParsedDial {
+    /// The clean dial target (host[:port] or phone number) with all
+    /// modifiers stripped.
+    target: String,
+    /// Total time to sleep before the TCP connect: sum of S8×(commas) plus
+    /// S6 seconds if `W` (wait for dial tone) appeared.  Capped at
+    /// `MAX_COMMA_PAUSE`.
+    pre_delay: Duration,
+    /// If true, `;` was present — after the "connect" report the modem
+    /// stays in command mode rather than entering online data mode.
+    stay_in_command: bool,
+}
+
+/// Parse Hayes dial-string modifiers out of `raw` into a `ParsedDial`.
+///
+/// Hayes modifiers are only meaningful on phone-number dial strings (digits,
+/// spaces, `-`, `()`, `+`, `*`, `#`) plus the modifier characters `,W;@!`.
+/// If the string contains any other character it is treated as a hostname
+/// and only the trailing `;` modifier is applied — this avoids stripping P,
+/// T, or W from names like `pine.example.com` or `www.example.com`.
+///
+/// Recognized modifiers (phone-number context only):
+/// - `,` — pause for S8 seconds (each comma adds S8 seconds)
+/// - `W` — wait for dial tone (adds S6 seconds; virtual modem has no tone)
+/// - `;` — stay in command mode after connect (applies to hostnames too)
+/// - `P` / `T` — pulse / tone selector; both ignored (virtual)
+/// - `@` / `!` — quiet-answer / hookflash; ignored (virtual)
+/// - `*` / `#` — DTMF digits, preserved in the target for lookup
+fn parse_dial_string(raw: &str, s_regs: &[u8; NUM_S_REGS]) -> ParsedDial {
+    let trimmed = raw.trim();
+    // Trailing `;` always applies, even to hostnames.
+    let (body, stay_in_command) = match trimmed.strip_suffix(';') {
+        Some(b) => (b, true),
+        None => (trimmed, false),
+    };
+
+    if looks_like_phone_dial_string(body) {
+        let s6 = s_regs[6] as u64;
+        let s8 = s_regs[8] as u64;
+        let mut pre_delay_secs: u64 = 0;
+        let mut target = String::with_capacity(body.len());
+        for ch in body.chars() {
+            match ch {
+                ',' => {
+                    pre_delay_secs = pre_delay_secs.saturating_add(s8);
+                }
+                'W' | 'w' => {
+                    pre_delay_secs = pre_delay_secs.saturating_add(s6);
+                }
+                'P' | 'p' | 'T' | 't' | '@' | '!' => {}
+                _ => target.push(ch),
+            }
+        }
+        let mut pre_delay = Duration::from_secs(pre_delay_secs);
+        if pre_delay > MAX_COMMA_PAUSE {
+            pre_delay = MAX_COMMA_PAUSE;
+        }
+        return ParsedDial {
+            target: target.trim().to_string(),
+            pre_delay,
+            stay_in_command,
+        };
+    }
+
+    // Hostname branch: apply only `;`.
+    ParsedDial {
+        target: body.trim().to_string(),
+        pre_delay: Duration::ZERO,
+        stay_in_command,
+    }
+}
+
+/// Return true if `s` contains only characters that can appear in a Hayes
+/// phone-number dial string (including modifiers).  Used to decide whether
+/// to apply dial modifiers or treat the string as a hostname.
+fn looks_like_phone_dial_string(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    let has_digit = s.chars().any(|c| c.is_ascii_digit());
+    let all_phone_chars = s.chars().all(|c| {
+        c.is_ascii_digit()
+            || matches!(
+                c,
+                '-' | ' ' | '(' | ')' | '+' | '*' | '#'
+                    | ',' | 'W' | 'w' | 'P' | 'p' | 'T' | 't' | '@' | '!'
+            )
+    });
+    has_digit && all_phone_chars
+}
+
+/// Dial using a pre-parsed ParsedDial.  Applies the `;` modifier after
+/// connection by hanging up immediately and staying in command mode.
+fn handle_dial_with_modifiers(state: &mut ModemState, parsed: &ParsedDial) {
+    if parsed.stay_in_command {
+        // `;` — report OK without entering online mode.  We still validate
+        // that the target resolves, matching Hayes behavior where `;`
+        // returns OK even if the call would have failed.
+        send_result(state, "OK");
+        return;
+    }
+    handle_dial(state, &parsed.target);
+}
 
 fn handle_dial(state: &mut ModemState, target: &str) {
     let lower = target.to_ascii_lowercase();
@@ -724,16 +1110,24 @@ fn is_phone_number(s: &str) -> bool {
     }
     // Must contain at least one digit
     let has_digit = s.chars().any(|c| c.is_ascii_digit());
-    // Must contain only phone-number characters (no dots or colons)
+    // Must contain only phone-number characters (no dots or colons).
+    // `*` and `#` are valid DTMF tones for PBX extensions.
     let all_phone = s.chars().all(|c| {
-        c.is_ascii_digit() || c == '-' || c == ' ' || c == '(' || c == ')' || c == '+'
+        c.is_ascii_digit()
+            || c == '-'
+            || c == ' '
+            || c == '('
+            || c == ')'
+            || c == '+'
+            || c == '*'
+            || c == '#'
     });
     has_digit && all_phone
 }
 
 /// Dial into the local XMODEM Gateway menu via an in-memory duplex bridge.
 fn dial_xmodem_gateway(state: &mut ModemState) {
-    send_result(state, &format!("CONNECT {}", state.baud));
+    send_result(state, "CONNECT");
     state.mode = ModemMode::Online;
 
     // Create a duplex pair: one end for TelnetSession, the other for this thread.
@@ -803,8 +1197,17 @@ fn dial_tcp(state: &mut ModemState, host: &str, port: u16) {
         }
     };
 
+    // S7 controls the carrier-wait timeout.  Capped at MAX_CONNECT_TIMEOUT
+    // so a mistyped S7 can't tie up the serial thread for minutes.
+    let mut s7_timeout = Duration::from_secs(state.s_regs[7] as u64);
+    if s7_timeout.is_zero() {
+        s7_timeout = Duration::from_secs(1);
+    }
+    if s7_timeout > MAX_CONNECT_TIMEOUT {
+        s7_timeout = MAX_CONNECT_TIMEOUT;
+    }
     let mut stream =
-        match std::net::TcpStream::connect_timeout(&socket_addr, TCP_CONNECT_TIMEOUT) {
+        match std::net::TcpStream::connect_timeout(&socket_addr, s7_timeout) {
             Ok(s) => s,
             Err(_) => {
                 send_result(state, "NO CARRIER");
@@ -814,7 +1217,7 @@ fn dial_tcp(state: &mut ModemState, host: &str, port: u16) {
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(SERIAL_READ_TIMEOUT));
 
-    send_result(state, &format!("CONNECT {}", state.baud));
+    send_result(state, "CONNECT");
     state.mode = ModemMode::Online;
 
     let exit = online_mode_tcp(state, &mut stream);
@@ -1137,34 +1540,109 @@ fn format_s_regs(regs: &[u8; NUM_S_REGS]) -> String {
 
 // ─── Helpers ───────────────────────────────────────────────
 
-fn send_response(port: &mut Box<dyn serialport::SerialPort>, msg: &str) {
-    let response = format!("\r\n{}\r\n", msg);
-    let _ = port.write_all(response.as_bytes());
-    let _ = port.flush();
+/// Write an informational message framed by the configured CR (S3) and LF
+/// (S4).  Internal `\r\n` or `\n` line breaks within `msg` are rewritten to
+/// use S3/S4 too, so every newline the modem produces honors the registers.
+fn send_response(state: &mut ModemState, msg: &str) {
+    let cr = state.s_regs[3];
+    let lf = state.s_regs[4];
+    let _ = state.port.write_all(&[cr, lf]);
+    let mut first = true;
+    for line in msg.split('\n') {
+        if !first {
+            let _ = state.port.write_all(&[cr, lf]);
+        }
+        // Trim a trailing '\r' from "\r\n" splits so we don't double-emit CR.
+        let trimmed = line.strip_suffix('\r').unwrap_or(line);
+        let _ = state.port.write_all(trimmed.as_bytes());
+        first = false;
+    }
+    let _ = state.port.write_all(&[cr, lf]);
+    let _ = state.port.flush();
 }
 
-/// Send a result code, respecting verbose/quiet settings.
+/// Numeric result code for a verbose message, honoring the current ATX level.
+/// CONNECT mapping depends on baud (ATX>=1 picks a baud-specific code; ATX0
+/// always returns 1).  BUSY (7), NO DIALTONE (6), and NO ANSWER (8) are
+/// suppressed (remapped to NO CARRIER = 3) when ATX < 3.
+fn numeric_code(msg: &str, x_code: u8, baud: u32) -> &'static str {
+    if msg.starts_with("CONNECT") {
+        if x_code == 0 {
+            return "1";
+        }
+        return match baud {
+            300 => "1",
+            1200 => "5",
+            600 => "9",
+            2400 => "10",
+            4800 => "11",
+            9600 => "12",
+            7200 => "13",
+            12000 => "14",
+            14400 => "15",
+            19200 => "16",
+            38400 => "28",
+            57600 => "18",
+            115200 => "87",
+            _ => "1",
+        };
+    }
+    match msg {
+        "OK" => "0",
+        "RING" => "2",
+        "NO CARRIER" => "3",
+        "ERROR" => "4",
+        "NO DIALTONE" => if x_code >= 2 { "6" } else { "3" },
+        "BUSY" => if x_code >= 3 { "7" } else { "3" },
+        "NO ANSWER" => if x_code >= 3 { "8" } else { "3" },
+        _ => "4",
+    }
+}
+
+/// Remap a verbose message according to ATX level.  Callers pass the bare
+/// result keyword (e.g. `"CONNECT"`, `"BUSY"`); this function decides the
+/// final text:
+///
+/// - `CONNECT` is rendered as `"CONNECT"` at X0 and `"CONNECT <baud>"` at
+///   X>=1, regardless of whether the caller appended a baud.
+/// - `BUSY`, `NO DIALTONE`, `NO ANSWER` collapse to `NO CARRIER` when the
+///   ATX level is too low to emit them.
+fn verbose_message(msg: &str, x_code: u8, baud: u32) -> String {
+    if msg.starts_with("CONNECT") {
+        return if x_code == 0 {
+            "CONNECT".into()
+        } else {
+            format!("CONNECT {}", baud)
+        };
+    }
+    if x_code < 2 && msg == "NO DIALTONE" {
+        return "NO CARRIER".into();
+    }
+    if x_code < 3 && (msg == "BUSY" || msg == "NO ANSWER") {
+        return "NO CARRIER".into();
+    }
+    msg.into()
+}
+
+/// Send a result code, respecting verbose/quiet/ATX settings and honoring
+/// S3/S4 for line framing.
 fn send_result(state: &mut ModemState, msg: &str) -> bool {
     if state.quiet {
         return true;
     }
+    let cr = state.s_regs[3];
+    let lf = state.s_regs[4];
+    let x = state.x_code;
+    let baud = state.baud;
     let ok = if state.verbose {
-        let response = format!("\r\n{}\r\n", msg);
-        state.port.write_all(response.as_bytes()).is_ok()
+        let rendered = verbose_message(msg, x, baud);
+        state.port.write_all(&[cr, lf]).is_ok()
+            && state.port.write_all(rendered.as_bytes()).is_ok()
+            && state.port.write_all(&[cr, lf]).is_ok()
     } else {
-        let code = match msg {
-            "OK" => "0",
-            _ if msg.starts_with("CONNECT") => "1",
-            "RING" => "2",
-            "NO CARRIER" => "3",
-            "ERROR" => "4",
-            "NO DIALTONE" => "6",
-            "BUSY" => "7",
-            "NO ANSWER" => "8",
-            _ => msg,
-        };
-        let response = format!("{}\r", code);
-        state.port.write_all(response.as_bytes()).is_ok()
+        let code = numeric_code(msg, x, baud);
+        state.port.write_all(code.as_bytes()).is_ok()
+            && state.port.write_all(&[cr]).is_ok()
     };
     let flushed = state.port.flush().is_ok();
     ok && flushed
@@ -1314,10 +1792,13 @@ mod tests {
     #[test]
     fn test_unknown_at_command_accepted() {
         let mut echo = true;
-        // These are NOT recognized commands, so they hit the catch-all OK
-        assert_eq!(parse("AT&C", &mut echo), vec![AtResult::Ok]);
+        // ATL (speaker loudness) and ATM (speaker mode) have no meaning for
+        // a virtual modem but are accepted so legacy clients don't error.
         assert_eq!(parse("ATL2", &mut echo), vec![AtResult::Ok]);
         assert_eq!(parse("ATM1", &mut echo), vec![AtResult::Ok]);
+        // ATB (bell mode) and ATC (carrier on/off) likewise.
+        assert_eq!(parse("ATB0", &mut echo), vec![AtResult::Ok]);
+        assert_eq!(parse("ATC1", &mut echo), vec![AtResult::Ok]);
     }
 
     #[test]
@@ -1431,7 +1912,7 @@ mod tests {
     #[test]
     fn test_s_reg_defaults_count() {
         assert_eq!(S_REG_DEFAULTS.len(), NUM_S_REGS);
-        assert_eq!(NUM_S_REGS, 13);
+        assert_eq!(NUM_S_REGS, 27);
     }
 
     #[test]
@@ -1462,10 +1943,20 @@ mod tests {
     #[test]
     fn test_s_reg_query_out_of_range() {
         let mut echo = true;
-        // S13 and above are out of range
-        assert_eq!(parse("ATS13?", &mut echo), vec![AtResult::Error]);
+        // S27 and above are out of range.
+        assert_eq!(parse("ATS27?", &mut echo), vec![AtResult::Error]);
         assert_eq!(parse("ATS99?", &mut echo), vec![AtResult::Error]);
         assert_eq!(parse("ATS255?", &mut echo), vec![AtResult::Error]);
+    }
+
+    #[test]
+    fn test_s_reg_query_extended_range_accepted() {
+        // S13 through S26 must parse even though several are reserved.
+        let mut echo = true;
+        for reg in 13..=26 {
+            let q = format!("ATS{}?", reg);
+            assert_eq!(parse(&q, &mut echo), vec![AtResult::SRegQuery(reg)]);
+        }
     }
 
     #[test]
@@ -1493,7 +1984,11 @@ mod tests {
     #[test]
     fn test_s_reg_set_out_of_range() {
         let mut echo = true;
-        assert_eq!(parse("ATS13=0", &mut echo), vec![AtResult::Error]);
+        // S27 and up are out of range; S13-S26 must accept assignment so
+        // legacy init strings that poke reserved registers don't ERROR.
+        assert_eq!(parse("ATS27=0", &mut echo), vec![AtResult::Error]);
+        assert_eq!(parse("ATS25=5", &mut echo), vec![AtResult::SRegSet(25, 5)]);
+        assert_eq!(parse("ATS26=1", &mut echo), vec![AtResult::SRegSet(26, 1)]);
     }
 
     #[test]
@@ -1750,8 +2245,16 @@ mod tests {
     }
 
     #[test]
-    fn test_tcp_connect_timeout_constant() {
-        assert_eq!(TCP_CONNECT_TIMEOUT, Duration::from_secs(15));
+    fn test_max_connect_timeout_constant() {
+        // The S7-controlled connect timeout is bounded by this hard cap.
+        assert_eq!(MAX_CONNECT_TIMEOUT, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_default_carrier_wait_is_gateway_friendly() {
+        // S7 default is 15 seconds (not the Hayes 50) to keep failed dials
+        // responsive for gateway users.
+        assert_eq!(S_REG_DEFAULTS[7], 15);
     }
 
     #[test]
@@ -1953,14 +2456,28 @@ mod tests {
 
     #[test]
     fn test_parse_s_regs_default() {
-        let regs = parse_s_regs("5,0,43,13,10,8,2,50,2,6,14,95,50");
+        // Full 27-value string round-trips to defaults.
+        let regs = parse_s_regs(
+            "5,0,43,13,10,8,2,15,2,6,14,95,50,0,0,0,0,0,0,0,0,0,0,0,0,5,1",
+        );
+        assert_eq!(regs, S_REG_DEFAULTS);
+    }
+
+    #[test]
+    fn test_parse_s_regs_legacy_13_value_config() {
+        // Older config files written before S13+ support have only 13
+        // values; missing indices must fall back to the defaults.
+        let regs = parse_s_regs("5,0,43,13,10,8,2,15,2,6,14,95,50");
         assert_eq!(regs, S_REG_DEFAULTS);
     }
 
     #[test]
     fn test_format_s_regs_default() {
         let s = format_s_regs(&S_REG_DEFAULTS);
-        assert_eq!(s, "5,0,43,13,10,8,2,50,2,6,14,95,50");
+        assert_eq!(
+            s,
+            "5,0,43,13,10,8,2,15,2,6,14,95,50,0,0,0,0,0,0,0,0,0,0,0,0,5,1"
+        );
     }
 
     #[test]
@@ -2071,6 +2588,329 @@ mod tests {
         assert_eq!(
             config::normalize_phone_number(input),
             GATEWAY_PHONE_NUMBER
+        );
+    }
+
+    // ─── ATX / AT&C / AT&D / AT&K ─────────────────────────
+
+    #[test]
+    fn test_atx_parsing() {
+        let mut echo = true;
+        assert_eq!(parse("ATX0", &mut echo), vec![AtResult::XSet(0)]);
+        assert_eq!(parse("ATX1", &mut echo), vec![AtResult::XSet(1)]);
+        assert_eq!(parse("ATX2", &mut echo), vec![AtResult::XSet(2)]);
+        assert_eq!(parse("ATX3", &mut echo), vec![AtResult::XSet(3)]);
+        assert_eq!(parse("ATX4", &mut echo), vec![AtResult::XSet(4)]);
+        assert_eq!(parse("ATX", &mut echo), vec![AtResult::XSet(0)]);
+    }
+
+    #[test]
+    fn test_at_ampersand_c_parsing() {
+        let mut echo = true;
+        assert_eq!(parse("AT&C", &mut echo), vec![AtResult::DcdSet(0)]);
+        assert_eq!(parse("AT&C0", &mut echo), vec![AtResult::DcdSet(0)]);
+        assert_eq!(parse("AT&C1", &mut echo), vec![AtResult::DcdSet(1)]);
+    }
+
+    #[test]
+    fn test_at_ampersand_d_parsing() {
+        let mut echo = true;
+        assert_eq!(parse("AT&D", &mut echo), vec![AtResult::DtrSet(0)]);
+        assert_eq!(parse("AT&D0", &mut echo), vec![AtResult::DtrSet(0)]);
+        assert_eq!(parse("AT&D1", &mut echo), vec![AtResult::DtrSet(1)]);
+        assert_eq!(parse("AT&D2", &mut echo), vec![AtResult::DtrSet(2)]);
+        assert_eq!(parse("AT&D3", &mut echo), vec![AtResult::DtrSet(3)]);
+    }
+
+    #[test]
+    fn test_at_ampersand_k_parsing() {
+        let mut echo = true;
+        assert_eq!(parse("AT&K", &mut echo), vec![AtResult::FlowSet(0)]);
+        assert_eq!(parse("AT&K0", &mut echo), vec![AtResult::FlowSet(0)]);
+        assert_eq!(parse("AT&K1", &mut echo), vec![AtResult::FlowSet(1)]);
+        assert_eq!(parse("AT&K3", &mut echo), vec![AtResult::FlowSet(3)]);
+        assert_eq!(parse("AT&K4", &mut echo), vec![AtResult::FlowSet(4)]);
+    }
+
+    #[test]
+    fn test_hayes_extended_commands_case_insensitive() {
+        let mut echo = true;
+        assert_eq!(parse("atx4", &mut echo), vec![AtResult::XSet(4)]);
+        assert_eq!(parse("at&c1", &mut echo), vec![AtResult::DcdSet(1)]);
+        assert_eq!(parse("at&d2", &mut echo), vec![AtResult::DtrSet(2)]);
+        assert_eq!(parse("at&k3", &mut echo), vec![AtResult::FlowSet(3)]);
+    }
+
+    // ─── Numeric result code mapping ──────────────────────
+
+    #[test]
+    fn test_numeric_code_x0_basic_set() {
+        // ATX0: CONNECT always 1; extended codes collapse to NO CARRIER (3).
+        assert_eq!(numeric_code("CONNECT", 0, 9600), "1");
+        assert_eq!(numeric_code("CONNECT", 0, 1200), "1");
+        assert_eq!(numeric_code("BUSY", 0, 9600), "3");
+        assert_eq!(numeric_code("NO DIALTONE", 0, 9600), "3");
+        assert_eq!(numeric_code("NO ANSWER", 0, 9600), "3");
+        assert_eq!(numeric_code("OK", 0, 9600), "0");
+        assert_eq!(numeric_code("ERROR", 0, 9600), "4");
+    }
+
+    #[test]
+    fn test_numeric_code_x4_extended_set() {
+        // ATX4: full extended set, CONNECT varies with baud.
+        assert_eq!(numeric_code("CONNECT", 4, 300), "1");
+        assert_eq!(numeric_code("CONNECT", 4, 1200), "5");
+        assert_eq!(numeric_code("CONNECT", 4, 2400), "10");
+        assert_eq!(numeric_code("CONNECT", 4, 9600), "12");
+        assert_eq!(numeric_code("CONNECT", 4, 19200), "16");
+        assert_eq!(numeric_code("CONNECT", 4, 115200), "87");
+        assert_eq!(numeric_code("BUSY", 4, 9600), "7");
+        assert_eq!(numeric_code("NO DIALTONE", 4, 9600), "6");
+        assert_eq!(numeric_code("NO ANSWER", 4, 9600), "8");
+    }
+
+    #[test]
+    fn test_numeric_code_unknown_baud_falls_back_to_1() {
+        assert_eq!(numeric_code("CONNECT", 4, 1234), "1");
+    }
+
+    #[test]
+    fn test_verbose_message_x0_collapses_extended() {
+        assert_eq!(verbose_message("CONNECT", 0, 9600), "CONNECT");
+        assert_eq!(verbose_message("CONNECT 9600", 0, 9600), "CONNECT");
+        assert_eq!(verbose_message("BUSY", 0, 9600), "NO CARRIER");
+        assert_eq!(verbose_message("NO DIALTONE", 0, 9600), "NO CARRIER");
+        assert_eq!(verbose_message("NO ANSWER", 0, 9600), "NO CARRIER");
+    }
+
+    #[test]
+    fn test_verbose_message_x4_passes_through() {
+        assert_eq!(verbose_message("CONNECT", 4, 9600), "CONNECT 9600");
+        assert_eq!(verbose_message("CONNECT 9600", 4, 9600), "CONNECT 9600");
+        assert_eq!(verbose_message("BUSY", 4, 9600), "BUSY");
+        assert_eq!(verbose_message("NO DIALTONE", 4, 9600), "NO DIALTONE");
+        assert_eq!(verbose_message("NO ANSWER", 4, 9600), "NO ANSWER");
+    }
+
+    #[test]
+    fn test_verbose_message_bare_connect_gets_baud_at_x1_plus() {
+        // Callers pass bare "CONNECT"; verbose_message owns baud rendering.
+        assert_eq!(verbose_message("CONNECT", 1, 2400), "CONNECT 2400");
+        assert_eq!(verbose_message("CONNECT", 2, 9600), "CONNECT 9600");
+        assert_eq!(verbose_message("CONNECT", 4, 115200), "CONNECT 115200");
+    }
+
+    #[test]
+    fn test_verbose_message_connect_baud_reflects_current_baud() {
+        // If a caller does pass "CONNECT <old>", we still use the current baud.
+        assert_eq!(verbose_message("CONNECT 300", 4, 9600), "CONNECT 9600");
+    }
+
+    // ─── Dial string modifier parsing ─────────────────────
+
+    #[test]
+    fn test_parse_dial_plain_hostname() {
+        let p = parse_dial_string("xmodem-gateway", &S_REG_DEFAULTS);
+        assert_eq!(p.target, "xmodem-gateway");
+        assert_eq!(p.pre_delay, Duration::ZERO);
+        assert!(!p.stay_in_command);
+    }
+
+    #[test]
+    fn test_parse_dial_hostname_with_semicolon() {
+        let p = parse_dial_string("example.com:23;", &S_REG_DEFAULTS);
+        assert_eq!(p.target, "example.com:23");
+        assert!(p.stay_in_command);
+    }
+
+    #[test]
+    fn test_parse_dial_hostname_preserves_letters() {
+        // Hostnames contain 'p', 't', 'w' — these must NOT be stripped.
+        let p = parse_dial_string("pine.telnetbible.www", &S_REG_DEFAULTS);
+        assert_eq!(p.target, "pine.telnetbible.www");
+    }
+
+    #[test]
+    fn test_parse_dial_phone_with_commas_pauses() {
+        // Each comma = S8 seconds. S8 default is 2.
+        let p = parse_dial_string("9,,5551234", &S_REG_DEFAULTS);
+        assert_eq!(p.target, "95551234");
+        assert_eq!(p.pre_delay, Duration::from_secs(4));
+    }
+
+    #[test]
+    fn test_parse_dial_phone_with_wait_modifier() {
+        // W = S6 seconds. S6 default is 2.
+        let p = parse_dial_string("9W5551234", &S_REG_DEFAULTS);
+        assert_eq!(p.target, "95551234");
+        assert_eq!(p.pre_delay, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn test_parse_dial_phone_strips_pulse_tone_selectors() {
+        let p = parse_dial_string("T5551234", &S_REG_DEFAULTS);
+        assert_eq!(p.target, "5551234");
+        let p = parse_dial_string("P5551234", &S_REG_DEFAULTS);
+        assert_eq!(p.target, "5551234");
+    }
+
+    #[test]
+    fn test_parse_dial_phone_with_dtmf_stars_and_pounds() {
+        let p = parse_dial_string("5551234*99#", &S_REG_DEFAULTS);
+        assert_eq!(p.target, "5551234*99#");
+    }
+
+    #[test]
+    fn test_parse_dial_phone_with_semicolon() {
+        let p = parse_dial_string("5551234;", &S_REG_DEFAULTS);
+        assert_eq!(p.target, "5551234");
+        assert!(p.stay_in_command);
+    }
+
+    #[test]
+    fn test_parse_dial_pause_honors_custom_s8() {
+        let mut s_regs = S_REG_DEFAULTS;
+        s_regs[8] = 5;
+        let p = parse_dial_string("9,5551234", &s_regs);
+        assert_eq!(p.pre_delay, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn test_parse_dial_pause_capped_at_max() {
+        let mut s_regs = S_REG_DEFAULTS;
+        s_regs[8] = 255;
+        // 60 commas × 255s = 15300s, clamped to MAX_COMMA_PAUSE (60s).
+        let raw = ",".repeat(60);
+        let p = parse_dial_string(&format!("{}5551234", raw), &s_regs);
+        assert_eq!(p.pre_delay, MAX_COMMA_PAUSE);
+    }
+
+    // ─── S-register timing registers ──────────────────────
+
+    #[test]
+    fn test_s_reg_default_s7_is_15() {
+        // Gateway-friendly default, not the Hayes 50.
+        assert_eq!(S_REG_DEFAULTS[7], 15);
+    }
+
+    #[test]
+    fn test_s_reg_s6_s8_defaults() {
+        assert_eq!(S_REG_DEFAULTS[6], 2); // dial tone wait
+        assert_eq!(S_REG_DEFAULTS[8], 2); // comma pause
+    }
+
+    // ─── Hayes-extended defaults ──────────────────────────
+
+    #[test]
+    fn test_gateway_friendly_defaults() {
+        assert_eq!(DEFAULT_X_CODE, 4); // full extended codes
+        assert_eq!(DEFAULT_DTR_MODE, 0); // ignore DTR (not Hayes &D2)
+        assert_eq!(DEFAULT_FLOW_MODE, 0); // no flow ctrl (not Hayes &K3)
+        assert_eq!(DEFAULT_DCD_MODE, 1); // DCD tracks carrier (Hayes default)
+    }
+
+    // ─── ATI variants ─────────────────────────────────────
+
+    #[test]
+    fn test_ati_variants_all_return_info_plus_ok() {
+        // ATI / ATI0-ATI7 must all terminate with OK (never ERROR) so legacy
+        // init strings that probe identity don't abort mid-setup.
+        let mut echo = true;
+        for cmd in &[
+            "ATI", "ATI0", "ATI1", "ATI2", "ATI3", "ATI4", "ATI5", "ATI6", "ATI7",
+        ] {
+            let results = parse(cmd, &mut echo);
+            assert!(
+                !results.is_empty(),
+                "{} produced no results",
+                cmd
+            );
+            assert_eq!(
+                results.last(),
+                Some(&AtResult::Ok),
+                "{} should end with OK (got {:?})",
+                cmd,
+                results
+            );
+            // ATI2 is the ROM-test variant and returns just OK in Hayes.
+            if *cmd != "ATI2" {
+                assert!(
+                    matches!(results[0], AtResult::Info(_)),
+                    "{} first result should be Info",
+                    cmd
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_ati2_is_just_ok() {
+        // ATI2 "ROM test" — Hayes returns OK for the pass case.
+        let mut echo = true;
+        assert_eq!(parse("ATI2", &mut echo), vec![AtResult::Ok]);
+    }
+
+    // ─── Stored-number slots ──────────────────────────────
+
+    #[test]
+    fn test_at_ampersand_z_stores_number() {
+        let mut echo = true;
+        assert_eq!(
+            parse("AT&Z0=5551234", &mut echo),
+            vec![AtResult::StoreNumber(0, "5551234".into())]
+        );
+        assert_eq!(
+            parse("AT&Z3=example.com:23", &mut echo),
+            vec![AtResult::StoreNumber(3, "example.com:23".into())]
+        );
+    }
+
+    #[test]
+    fn test_at_ampersand_z_preserves_hostname_case() {
+        // The slot value must come from the original `cmd`, not the
+        // uppercased copy — otherwise hostnames get mangled.
+        let mut echo = true;
+        assert_eq!(
+            parse("AT&Z1=Pine.Example.com", &mut echo),
+            vec![AtResult::StoreNumber(1, "Pine.Example.com".into())]
+        );
+    }
+
+    #[test]
+    fn test_at_ampersand_z_invalid_slot_errors() {
+        let mut echo = true;
+        assert_eq!(parse("AT&Z4=x", &mut echo), vec![AtResult::Error]);
+        assert_eq!(parse("AT&Z9=x", &mut echo), vec![AtResult::Error]);
+        assert_eq!(parse("AT&Z=x", &mut echo), vec![AtResult::Error]);
+    }
+
+    #[test]
+    fn test_atds_parses_slot_number() {
+        let mut echo = true;
+        assert_eq!(parse("ATDS", &mut echo), vec![AtResult::DialStored(0)]);
+        assert_eq!(parse("ATDS0", &mut echo), vec![AtResult::DialStored(0)]);
+        assert_eq!(parse("ATDS3", &mut echo), vec![AtResult::DialStored(3)]);
+    }
+
+    #[test]
+    fn test_atds_invalid_slot_errors() {
+        let mut echo = true;
+        assert_eq!(parse("ATDS4", &mut echo), vec![AtResult::Error]);
+        assert_eq!(parse("ATDS9", &mut echo), vec![AtResult::Error]);
+    }
+
+    #[test]
+    fn test_atd_hostname_starting_with_s_is_not_eaten_by_ds() {
+        // Regression guard: `ATDsomething` with no space after D must route
+        // to the generic D-dial branch, not the new DS stored-slot branch.
+        let mut echo = true;
+        assert_eq!(
+            parse("ATDserver.example.com", &mut echo),
+            vec![AtResult::Dial("server.example.com".into())]
+        );
+        assert_eq!(
+            parse("ATDsomething", &mut echo),
+            vec![AtResult::Dial("something".into())]
         );
     }
 
