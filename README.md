@@ -216,6 +216,73 @@ cargo build --release
 
 The binary will be at `target/release/xmodem-gateway`.
 
+## Verifying Releases
+
+Pre-built binaries are published to the [GitHub Releases][releases] page
+for Linux (x86_64), macOS (aarch64), and Windows (x86_64). Every release
+ships with:
+
+- The binary archive (`xmodem-gateway-vX.Y.Z-<target>.tar.gz` or `.zip`).
+- A SHA-256 checksum (`<archive>.sha256`).
+- Optionally a detached GPG signature (`<archive>.asc`) — produced if the
+  release signer has a GPG key configured.
+- A [Sigstore][sigstore] keyless signature (`<archive>.sig` +
+  `<archive>.pem`) bound to the publisher's GitHub identity. Produced on
+  every release automatically; no key management required.
+
+[releases]: https://github.com/rbryce/xmodem-gateway/releases
+[sigstore]: https://www.sigstore.dev/
+
+### Verifying the checksum
+
+```sh
+sha256sum -c xmodem-gateway-v0.3.3-x86_64-unknown-linux-gnu.tar.gz.sha256
+```
+
+### Verifying the GPG signature (if present)
+
+```sh
+gpg --keyserver keys.openpgp.org --recv-keys <KEY_FINGERPRINT>
+gpg --verify \
+    xmodem-gateway-v0.3.3-x86_64-unknown-linux-gnu.tar.gz.asc \
+    xmodem-gateway-v0.3.3-x86_64-unknown-linux-gnu.tar.gz
+```
+
+### Verifying the Sigstore signature
+
+[`cosign`](https://github.com/sigstore/cosign) is required (one-time install,
+free):
+
+```sh
+cosign verify-blob \
+    --certificate xmodem-gateway-v0.3.3-x86_64-unknown-linux-gnu.tar.gz.pem \
+    --signature   xmodem-gateway-v0.3.3-x86_64-unknown-linux-gnu.tar.gz.sig \
+    --certificate-identity-regexp "https://github.com/rbryce/xmodem-gateway/.*" \
+    --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+    xmodem-gateway-v0.3.3-x86_64-unknown-linux-gnu.tar.gz
+```
+
+This ties the binary to a specific GitHub Actions workflow run on
+this repository.
+
+### OS-level trust prompts
+
+Neither Windows `.exe` nor macOS `.app` bundles ship with commercial
+code-signing certificates (those cost $100–400/year and aren't in scope
+for a hobby project). As a result:
+
+- **Windows**: SmartScreen shows "Windows protected your PC"; click
+  *More info* → *Run anyway*. Verify the SHA-256 and GPG/Sigstore
+  signature first.
+- **macOS**: Gatekeeper shows "cannot be opened because the developer
+  cannot be verified"; right-click → *Open* → *Open*, or remove the
+  quarantine attribute with `xattr -d com.apple.quarantine <path>`.
+- **Linux**: no equivalent prompt; just verify and run.
+
+If this causes friction in your environment, build from source
+(`cargo build --release`) — the result is identical modulo build
+reproducibility.
+
 ## Running
 
 ```sh

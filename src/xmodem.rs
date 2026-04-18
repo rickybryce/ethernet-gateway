@@ -14,6 +14,8 @@ use crate::telnet::is_esc_key;
 
 // XMODEM protocol constants
 const SOH: u8 = 0x01;
+/// XMODEM-1K block header: the next block is 1024 bytes of payload.
+const STX: u8 = 0x02;
 const EOT: u8 = 0x04;
 const ACK: u8 = 0x06;
 const NAK: u8 = 0x15;
@@ -31,6 +33,9 @@ const DO_CMD: u8 = 253;
 const DONT: u8 = 254;
 
 pub(crate) const XMODEM_BLOCK_SIZE: usize = 128;
+/// XMODEM-1K block size.  The sender chooses per-block; the receiver
+/// branches on the `SOH` / `STX` header byte to know which one arrived.
+pub(crate) const XMODEM_1K_BLOCK_SIZE: usize = 1024;
 
 const MAX_FILE_SIZE: usize = 8 * 1024 * 1024;
 /// Time allowed for the full 131-byte block body (after SOH) to arrive.
@@ -101,11 +106,29 @@ pub(crate) async fn xmodem_receive(
                 if is_esc_key(byte, is_petscii) {
                     return Err("Transfer cancelled".into());
                 }
-                if byte == SOH {
-                    if verbose { glog!("XMODEM recv: SOH received, reading block #1"); }
+                if byte == SOH || byte == STX {
+                    let block_size = if byte == STX {
+                        XMODEM_1K_BLOCK_SIZE
+                    } else {
+                        XMODEM_BLOCK_SIZE
+                    };
+                    if verbose {
+                        glog!(
+                            "XMODEM recv: {} received, reading block #1 ({}-byte)",
+                            if byte == STX { "STX" } else { "SOH" },
+                            block_size,
+                        );
+                    }
                     match tokio::time::timeout(
                         std::time::Duration::from_secs(BLOCK_BODY_TIMEOUT_SECS),
-                        receive_block(reader, &mut expected_block, mode, is_tcp, verbose),
+                        receive_block(
+                            reader,
+                            &mut expected_block,
+                            mode,
+                            is_tcp,
+                            verbose,
+                            block_size,
+                        ),
                     )
                     .await
                     {
@@ -163,29 +186,43 @@ pub(crate) async fn xmodem_receive(
         };
 
         match byte {
-            SOH => match tokio::time::timeout(
-                std::time::Duration::from_secs(BLOCK_BODY_TIMEOUT_SECS),
-                receive_block(reader, &mut expected_block, mode, is_tcp, verbose),
-            )
-            .await
-            {
-                Ok(Ok(data)) => {
-                    file_data.extend_from_slice(&data);
-                    raw_write_byte(writer, ACK, is_tcp).await?;
-                    error_count = 0;
-                }
-                Ok(Err(ref e)) if e == "Duplicate block" => {
-                    raw_write_byte(writer, ACK, is_tcp).await?;
-                }
-                Ok(Err(_)) | Err(_) => {
-                    error_count += 1;
-                    if error_count > max_retries {
-                        raw_write_bytes(writer, &[CAN, CAN, CAN], is_tcp).await?;
-                        return Err("Too many block errors".into());
+            SOH | STX => {
+                let block_size = if byte == STX {
+                    XMODEM_1K_BLOCK_SIZE
+                } else {
+                    XMODEM_BLOCK_SIZE
+                };
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(BLOCK_BODY_TIMEOUT_SECS),
+                    receive_block(
+                        reader,
+                        &mut expected_block,
+                        mode,
+                        is_tcp,
+                        verbose,
+                        block_size,
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok(data)) => {
+                        file_data.extend_from_slice(&data);
+                        raw_write_byte(writer, ACK, is_tcp).await?;
+                        error_count = 0;
                     }
-                    raw_write_byte(writer, NAK, is_tcp).await?;
+                    Ok(Err(ref e)) if e == "Duplicate block" => {
+                        raw_write_byte(writer, ACK, is_tcp).await?;
+                    }
+                    Ok(Err(_)) | Err(_) => {
+                        error_count += 1;
+                        if error_count > max_retries {
+                            raw_write_bytes(writer, &[CAN, CAN, CAN], is_tcp).await?;
+                            return Err("Too many block errors".into());
+                        }
+                        raw_write_byte(writer, NAK, is_tcp).await?;
+                    }
                 }
-            },
+            }
             EOT => {
                 raw_write_byte(writer, ACK, is_tcp).await?;
                 break;
@@ -207,22 +244,26 @@ pub(crate) async fn xmodem_receive(
     Ok(file_data)
 }
 
-/// Receive and validate a single XMODEM block (after SOH was already read).
+/// Receive and validate a single XMODEM block (after SOH or STX was
+/// already read).  `block_size` is 128 for SOH blocks, 1024 for STX
+/// (XMODEM-1K) blocks — within a single transfer the sender may mix
+/// block sizes, so each call picks up the right size from its header.
 async fn receive_block(
     reader: &mut (impl AsyncRead + Unpin),
     expected_block: &mut u8,
     mode: TransferMode,
     is_tcp: bool,
     verbose: bool,
-) -> Result<[u8; XMODEM_BLOCK_SIZE], String> {
+    block_size: usize,
+) -> Result<Vec<u8>, String> {
     let block_num = raw_read_byte(reader, is_tcp).await?;
     let block_complement = raw_read_byte(reader, is_tcp).await?;
 
-    if verbose { glog!("XMODEM recv block: num=0x{:02X} complement=0x{:02X} expected=0x{:02X} mode={}",
-        block_num, block_complement, *expected_block,
+    if verbose { glog!("XMODEM recv block: num=0x{:02X} complement=0x{:02X} expected=0x{:02X} size={} mode={}",
+        block_num, block_complement, *expected_block, block_size,
         match mode { TransferMode::Crc16 => "CRC16", TransferMode::Checksum => "Checksum" }); }
 
-    let mut data = [0u8; XMODEM_BLOCK_SIZE];
+    let mut data = vec![0u8; block_size];
     for byte in data.iter_mut() {
         *byte = raw_read_byte(reader, is_tcp).await?;
     }
@@ -275,6 +316,7 @@ pub(crate) async fn xmodem_send(
     is_tcp: bool,
     is_petscii: bool,
     verbose: bool,
+    use_1k: bool,
 ) -> Result<(), String> {
     let cfg = config::get_config();
     let negotiation_timeout = cfg.xmodem_negotiation_timeout;
@@ -338,7 +380,9 @@ pub(crate) async fn xmodem_send(
         if verbose { glog!("XMODEM send: drained negotiation byte 0x{:02X}", b); }
     }
 
-    // Pad data to block boundary
+    // Pad data to a 128-byte boundary (the minimum granularity).  When
+    // 1K mode is active we consume 1024 bytes per block for full
+    // chunks and fall back to 128 for the final partial chunk.
     let mut padded = data.to_vec();
     if padded.is_empty() {
         padded.push(SUB);
@@ -347,13 +391,27 @@ pub(crate) async fn xmodem_send(
         padded.push(SUB);
     }
 
-    let total_blocks = padded.len() / XMODEM_BLOCK_SIZE;
     let mut block_num: u8 = 1;
-    if verbose { glog!("XMODEM send: {} total blocks", total_blocks); }
+    // Tracks the runtime 1K preference.  Starts from the caller's
+    // intent and flips to false if the first STX block is rejected by
+    // the receiver — from then on we stay with SOH for the rest of
+    // the transfer.
+    let mut use_1k_runtime = use_1k;
+    let mut offset = 0usize;
+    let mut block_idx = 0usize;
+    if verbose { glog!("XMODEM send: data_len={} padded_len={} use_1k={}",
+        data.len(), padded.len(), use_1k); }
 
-    for block_idx in 0..total_blocks {
-        let block_offset = block_idx * XMODEM_BLOCK_SIZE;
-        let block = &padded[block_offset..block_offset + XMODEM_BLOCK_SIZE];
+    while offset < padded.len() {
+        // Choose the block size for this iteration: STX (1024) if the
+        // runtime flag still permits and we have a full 1024 bytes
+        // left; otherwise SOH (128).  This naturally degrades to a
+        // partial final SOH block when the file doesn't divide evenly.
+        let use_stx = use_1k_runtime
+            && padded.len() - offset >= XMODEM_1K_BLOCK_SIZE;
+        let block_size = if use_stx { XMODEM_1K_BLOCK_SIZE } else { XMODEM_BLOCK_SIZE };
+        let header = if use_stx { STX } else { SOH };
+        let block = &padded[offset..offset + block_size];
 
         let mut retries = 0;
         loop {
@@ -362,9 +420,8 @@ pub(crate) async fn xmodem_send(
                 return Err("Too many retries, transfer aborted".into());
             }
 
-            // Build packet
-            let mut packet = Vec::with_capacity(3 + XMODEM_BLOCK_SIZE + 2);
-            packet.push(SOH);
+            let mut packet = Vec::with_capacity(3 + block_size + 2);
+            packet.push(header);
             packet.push(block_num);
             packet.push(!block_num);
             packet.extend_from_slice(block);
@@ -381,10 +438,11 @@ pub(crate) async fn xmodem_send(
                 }
             }
 
-            if block_idx == 0 && retries == 0 {
-                if verbose { glog!("XMODEM send: block #1 header: SOH=0x{:02X} num=0x{:02X} complement=0x{:02X} packet_len={}",
-                    SOH, block_num, !block_num, packet.len()); }
-                if verbose { glog!("XMODEM send: block #1 first 8 data bytes: {:02X?}", &block[..8.min(block.len())]); }
+            if block_idx == 0 && retries == 0 && verbose {
+                glog!(
+                    "XMODEM send: block #1 header=0x{:02X} size={} num=0x{:02X} complement=0x{:02X} packet_len={}",
+                    header, block_size, block_num, !block_num, packet.len(),
+                );
             }
 
             raw_write_bytes(writer, &packet, is_tcp).await?;
@@ -398,7 +456,8 @@ pub(crate) async fn xmodem_send(
             {
                 Ok(Ok(ACK)) => {
                     if verbose && (block_idx < 3 || retries > 0) {
-                        glog!("XMODEM send: block #{} ACK (retries={})", block_idx + 1, retries);
+                        glog!("XMODEM send: block #{} ACK (retries={}, size={})",
+                            block_idx + 1, retries, block_size);
                     }
                     break;
                 }
@@ -408,6 +467,19 @@ pub(crate) async fn xmodem_send(
                 }
                 Ok(Ok(NAK)) => {
                     if verbose { glog!("XMODEM send: block #{} NAK (retry {})", block_idx + 1, retries + 1); }
+                    // Opportunistic fallback: if the very first block
+                    // we sent used STX and the receiver rejected it,
+                    // the receiver probably doesn't support 1K.  Drop
+                    // to SOH for the rest of the transfer and retry
+                    // with a 128-byte block from the same offset.
+                    if use_stx && block_idx == 0 && retries == 0 {
+                        if verbose { glog!(
+                            "XMODEM send: STX rejected on first block, \
+                             falling back to 128-byte SOH"
+                        ); }
+                        use_1k_runtime = false;
+                        break;
+                    }
                     retries += 1;
                     continue;
                 }
@@ -426,7 +498,14 @@ pub(crate) async fn xmodem_send(
             }
         }
 
-        block_num = block_num.wrapping_add(1);
+        // Advance.  If we just fell back from STX to SOH we leave the
+        // offset alone and the next loop iteration sends the same
+        // payload bytes in a 128-byte SOH block.
+        if use_1k_runtime || !use_stx {
+            offset += block_size;
+            block_idx += 1;
+            block_num = block_num.wrapping_add(1);
+        }
     }
 
     // Send EOT and wait for ACK
@@ -619,15 +698,29 @@ mod tests {
 
     /// Run an xmodem_send / xmodem_receive pair over a DuplexStream.
     async fn xmodem_round_trip(original: &[u8]) -> Vec<u8> {
+        xmodem_round_trip_mode(original, false).await
+    }
+
+    /// Round-trip with the sender's 1K preference controllable.  The
+    /// receiver is always prepared to accept both SOH and STX blocks.
+    async fn xmodem_round_trip_mode(original: &[u8], use_1k: bool) -> Vec<u8> {
         let (sender_half, receiver_half) = tokio::io::duplex(16384);
         let (mut send_read, mut send_write) = tokio::io::split(sender_half);
         let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
 
         let data = original.to_vec();
         let send_task = tokio::spawn(async move {
-            xmodem_send(&mut send_read, &mut send_write, &data, false, false, false)
-                .await
-                .unwrap();
+            xmodem_send(
+                &mut send_read,
+                &mut send_write,
+                &data,
+                false,
+                false,
+                false,
+                use_1k,
+            )
+            .await
+            .unwrap();
         });
         let recv_task = tokio::spawn(async move {
             xmodem_receive(&mut recv_read, &mut recv_write, false, false, false)
@@ -696,6 +789,133 @@ mod tests {
         assert_eq!(received, original);
     }
 
+    // ─── XMODEM-1K (STX) round-trips ──────────────────────
+
+    #[tokio::test]
+    async fn test_xmodem_1k_round_trip_exact_1024() {
+        let original: Vec<u8> = (0..XMODEM_1K_BLOCK_SIZE).map(|i| (i & 0xFF) as u8).collect();
+        let received = xmodem_round_trip_mode(&original, true).await;
+        assert_eq!(received, original);
+    }
+
+    #[tokio::test]
+    async fn test_xmodem_1k_round_trip_mixed_stx_and_final_soh() {
+        // 1024 + 128 partial + few spare bytes to force a mix: one STX
+        // block followed by one SOH block.  The receiver transparently
+        // handles both headers; the sender degrades to SOH for the
+        // sub-1K remainder.
+        let original: Vec<u8> = (0..(XMODEM_1K_BLOCK_SIZE + 200))
+            .map(|i| ((i * 7) & 0xFF) as u8)
+            .collect();
+        let received = xmodem_round_trip_mode(&original, true).await;
+        assert_eq!(received, original);
+    }
+
+    #[tokio::test]
+    async fn test_xmodem_1k_round_trip_multi_1k_blocks() {
+        // 3 full 1K blocks, no partial.
+        let original: Vec<u8> = (0..(3 * XMODEM_1K_BLOCK_SIZE))
+            .map(|i| (i & 0xFF) as u8)
+            .collect();
+        let received = xmodem_round_trip_mode(&original, true).await;
+        assert_eq!(received, original);
+    }
+
+    #[tokio::test]
+    async fn test_xmodem_1k_small_file_still_uses_soh() {
+        // Under 1024 bytes: even with use_1k=true, the sender must
+        // emit an SOH block (one partial) because STX requires a full
+        // 1024-byte payload.
+        let original = b"Hello, XMODEM-1K on a short file!";
+        let received = xmodem_round_trip_mode(original, true).await;
+        assert_eq!(received, original);
+    }
+
+    #[tokio::test]
+    async fn test_xmodem_1k_round_trip_protocol_bytes_in_data() {
+        // Payload contains every protocol byte (SOH/STX/ACK/NAK/CAN/EOT
+        // etc.) to verify the 1K path is byte-transparent.
+        let mut original: Vec<u8> = Vec::with_capacity(XMODEM_1K_BLOCK_SIZE);
+        for i in 0..XMODEM_1K_BLOCK_SIZE {
+            original.push((i & 0xFF) as u8);
+        }
+        let received = xmodem_round_trip_mode(&original, true).await;
+        assert_eq!(received, original);
+    }
+
+    #[tokio::test]
+    async fn test_xmodem_1k_opportunistic_fallback() {
+        // Simulate a receiver that doesn't support STX: it reads the
+        // STX header byte and NAKs.  Our sender should fall back to
+        // SOH for the same offset and complete the transfer with
+        // 128-byte blocks.
+        //
+        // We drive the sender against a handwritten "minimal receiver"
+        // that NAKs on STX and ACKs on SOH.  The test just verifies
+        // the sender completes without a Too-Many-Retries error.
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+
+        // 1024-byte file so the sender's first attempt is STX.
+        let data: Vec<u8> = (0..XMODEM_1K_BLOCK_SIZE).map(|i| (i & 0xFF) as u8).collect();
+        let data_clone = data.clone();
+
+        let send_task = tokio::spawn(async move {
+            xmodem_send(
+                &mut send_read,
+                &mut send_write,
+                &data_clone,
+                false,
+                false,
+                false,
+                true, // use_1k
+            )
+            .await
+        });
+
+        // Fake receiver: request CRC mode ('C'), then:
+        //   - on STX: NAK (rejects XMODEM-1K).
+        //   - on SOH: read the rest of the 128-byte block + 2-byte CRC,
+        //     ACK.
+        //   - on EOT: ACK, done.
+        let recv_task = tokio::spawn(async move {
+            // Kick off with 'C' for CRC mode.
+            raw_write_byte(&mut recv_write, CRC_REQUEST, false).await.unwrap();
+
+            // Block 1 first try: expect STX.
+            let hdr1 = raw_read_byte(&mut recv_read, false).await.unwrap();
+            assert_eq!(hdr1, STX, "sender should try STX first when use_1k=true");
+            // Drain the rest of the 1K packet: num + !num + 1024 bytes + 2 CRC.
+            for _ in 0..(2 + XMODEM_1K_BLOCK_SIZE + 2) {
+                raw_read_byte(&mut recv_read, false).await.unwrap();
+            }
+            // NAK the STX block → triggers fallback.
+            raw_write_byte(&mut recv_write, NAK, false).await.unwrap();
+
+            // All remaining blocks should be SOH (128-byte each).
+            // 1024 bytes / 128 = 8 SOH blocks to cover the same payload.
+            for _ in 0..8 {
+                let hdr = raw_read_byte(&mut recv_read, false).await.unwrap();
+                assert_eq!(hdr, SOH, "fallback should use SOH for the rest");
+                for _ in 0..(2 + XMODEM_BLOCK_SIZE + 2) {
+                    raw_read_byte(&mut recv_read, false).await.unwrap();
+                }
+                raw_write_byte(&mut recv_write, ACK, false).await.unwrap();
+            }
+
+            // EOT
+            let eot = raw_read_byte(&mut recv_read, false).await.unwrap();
+            assert_eq!(eot, EOT);
+            raw_write_byte(&mut recv_write, ACK, false).await.unwrap();
+        });
+
+        // Both tasks should succeed.
+        send_task.await.unwrap().unwrap();
+        recv_task.await.unwrap();
+        let _ = data; // silence unused warning
+    }
+
     #[tokio::test]
     async fn test_xmodem_round_trip_single_byte() {
         let received = xmodem_round_trip(&[0x42]).await;
@@ -759,7 +979,16 @@ mod tests {
         let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
 
         let send_task = tokio::spawn(async move {
-            let _ = xmodem_send(&mut send_read, &mut send_write, &oversized, false, false, false).await;
+            let _ = xmodem_send(
+                &mut send_read,
+                &mut send_write,
+                &oversized,
+                false,
+                false,
+                false,
+                false,
+            )
+            .await;
         });
         let recv_task = tokio::spawn(async move {
             xmodem_receive(&mut recv_read, &mut recv_write, false, false, false).await
