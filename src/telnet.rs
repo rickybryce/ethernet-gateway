@@ -2851,6 +2851,17 @@ impl TelnetSession {
             iac_status
         ))
         .await?;
+        let k_status = if config::get_config().xmodem_send_1k {
+            self.green("ON")
+        } else {
+            self.red("OFF")
+        };
+        self.send_line(&format!(
+            "  {}  1K blocks (download) [{}]",
+            self.cyan("K"),
+            k_status
+        ))
+        .await?;
         self.send_line("").await?;
         let footer = self.nav_footer();
         self.send_line(&footer).await?;
@@ -2885,6 +2896,14 @@ impl TelnetSession {
             "i" => {
                 self.xmodem_iac = !self.xmodem_iac;
             }
+            "k" => {
+                // Toggle XMODEM-1K send mode and persist the change.
+                let new_value = !config::get_config().xmodem_send_1k;
+                config::update_config_values(&[(
+                    "xmodem_send_1k",
+                    if new_value { "true" } else { "false" },
+                )]);
+            }
             "q" => {
                 self.current_menu = Menu::Main;
             }
@@ -2896,13 +2915,17 @@ impl TelnetSession {
                     "  C  Change to a subdirectory",
                     "  I  Toggle IAC escaping for",
                     "     binary file transfers",
+                    "  K  Toggle XMODEM-1K (1024-byte",
+                    "     blocks) on download.  Auto",
+                    "     falls back to 128 if the",
+                    "     remote client rejects 1K.",
                     "  R  Refresh the screen",
                     "  Q  Back to the main menu",
                 ]).await?;
             }
             "r" => {} // Refresh — just re-render
             _ => {
-                self.show_error("Press U, D, X, C, I, R, Q, or H.")
+                self.show_error("Press U, D, X, C, I, K, R, Q, or H.")
                     .await?;
             }
         }
@@ -3428,8 +3451,10 @@ impl TelnetSession {
         self.drain_input().await;
 
         let start = std::time::Instant::now();
+        let cfg = config::get_config();
+        let verbose = cfg.verbose;
+        let use_1k = cfg.xmodem_send_1k;
         let mut writer_guard = self.writer.lock().await;
-        let verbose = config::get_config().verbose;
         let result = crate::xmodem::xmodem_send(
             &mut self.reader,
             &mut *writer_guard,
@@ -3437,6 +3462,7 @@ impl TelnetSession {
             self.xmodem_iac,
             self.terminal_type == TerminalType::Petscii,
             verbose,
+            use_1k,
         )
         .await;
         drop(writer_guard);
@@ -11495,8 +11521,7 @@ mod tests {
         let (_, r2) = feed_all(&mut iac, &[IAC, WONT, OPT_ECHO]);
         assert_eq!(r2, vec![IAC, DONT, OPT_ECHO]);
     }
-
-    // ─── Q-method property-based fuzz harness ────────────
+    // ─── Gateway Q-method fuzz harness ────────────────────
 
     /// Property-based fuzzer for `GatewayTelnetIac`.  Generates random
     /// sequences of `Op`s and asserts structural invariants after every

@@ -4,6 +4,23 @@ version = "0.3.3"
 edition = "2024"
 authors = ["Ricky Bryce"]
 license = "GPL-3.0-or-later"
+description = "Telnet/SSH gateway and Hayes AT modem emulator for retro terminals — PETSCII, ANSI, and ASCII. Bridges Commodore 64, CP/M, and similar machines to modern networks with XMODEM file transfer, a web browser, AI chat, weather, SSH and telnet gateways."
+repository = "https://github.com/rbryce/xmodem-gateway"
+homepage = "https://github.com/rbryce/xmodem-gateway"
+readme = "README.md"
+keywords = ["telnet", "ssh", "xmodem", "bbs", "retrocomputing"]
+categories = ["command-line-utilities", "network-programming", "emulators"]
+rust-version = "1.87"
+# Exclude build artifacts and dev-only files from the published crate.
+exclude = [
+    "/target",
+    "/proptest-regressions",
+    "/.github",
+    "/index.html",
+    "*.AppImage",
+    "xmodem.conf",
+    "CLAUDE.md",
+]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }

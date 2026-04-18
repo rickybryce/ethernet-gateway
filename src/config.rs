@@ -51,6 +51,9 @@ const DEFAULT_SERIAL_FLOWCONTROL: &str = "none";
 const DEFAULT_XMODEM_NEGOTIATION_TIMEOUT: u64 = 45;
 const DEFAULT_XMODEM_BLOCK_TIMEOUT: u64 = 20;
 const DEFAULT_XMODEM_MAX_RETRIES: usize = 10;
+/// XMODEM-1K send mode off by default for maximum retro-client
+/// compatibility.  Users flip it on from the file-transfer menu.
+const DEFAULT_XMODEM_SEND_1K: bool = false;
 const DEFAULT_SERIAL_ECHO: bool = true;
 const DEFAULT_SERIAL_VERBOSE: bool = true;
 const DEFAULT_SERIAL_QUIET: bool = false;
@@ -115,6 +118,11 @@ pub struct Config {
     pub xmodem_block_timeout: u64,
     /// XMODEM maximum retries per block.
     pub xmodem_max_retries: usize,
+    /// Use XMODEM-1K (1024-byte `STX` blocks) when sending files to retro
+    /// clients.  Falls back to classic 128-byte `SOH` blocks if the first
+    /// 1K block is NAK'd by the receiver.  Default off for maximum
+    /// compatibility with vintage clients that only understand SOH.
+    pub xmodem_send_1k: bool,
     /// Enable serial modem emulation.
     pub serial_enabled: bool,
     /// Serial port device (e.g. /dev/ttyUSB0, COM3). Empty = not configured.
@@ -179,6 +187,7 @@ impl Default for Config {
             xmodem_negotiation_timeout: DEFAULT_XMODEM_NEGOTIATION_TIMEOUT,
             xmodem_block_timeout: DEFAULT_XMODEM_BLOCK_TIMEOUT,
             xmodem_max_retries: DEFAULT_XMODEM_MAX_RETRIES,
+            xmodem_send_1k: DEFAULT_XMODEM_SEND_1K,
             serial_enabled: DEFAULT_SERIAL_ENABLED,
             serial_port: DEFAULT_SERIAL_PORT.into(),
             serial_baud: DEFAULT_SERIAL_BAUD,
@@ -339,6 +348,10 @@ fn read_config_file(path: &str) -> Config {
             .and_then(|v| v.parse().ok())
             .filter(|&v: &usize| v >= 1)
             .unwrap_or(DEFAULT_XMODEM_MAX_RETRIES),
+        xmodem_send_1k: map
+            .get("xmodem_send_1k")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(DEFAULT_XMODEM_SEND_1K),
         serial_enabled: map
             .get("serial_enabled")
             .map(|v| v.eq_ignore_ascii_case("true"))
@@ -525,6 +538,13 @@ xmodem_negotiation_timeout = {}
 xmodem_block_timeout = {}
 xmodem_max_retries = {}
 
+# XMODEM-1K send mode: use 1024-byte STX blocks instead of 128-byte SOH.
+# Faster over fast links but not supported by some vintage clients.  If
+# the first 1K block is NAK'd the server automatically falls back to
+# 128-byte blocks for the rest of the transfer.  Toggleable live from
+# the File Transfer menu with the K key.
+xmodem_send_1k = {}
+
 # Serial modem emulation (Hayes AT commands)
 # Set serial_enabled = true and configure the port to activate.
 serial_enabled = {}
@@ -593,6 +613,7 @@ ssh_password = {}
         cfg.xmodem_negotiation_timeout,
         cfg.xmodem_block_timeout,
         cfg.xmodem_max_retries,
+        cfg.xmodem_send_1k,
         cfg.serial_enabled,
         sanitize_value(&cfg.serial_port),
         cfg.serial_baud,
@@ -714,6 +735,9 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
             if let Ok(v) = value.parse::<usize>() && v >= 1 {
                 cfg.xmodem_max_retries = v;
             }
+        }
+        "xmodem_send_1k" => {
+            cfg.xmodem_send_1k = value.eq_ignore_ascii_case("true");
         }
         "serial_enabled" => cfg.serial_enabled = value.eq_ignore_ascii_case("true"),
         "serial_port" => cfg.serial_port = value.to_string(),
@@ -927,6 +951,7 @@ mod tests {
         assert_eq!(cfg.xmodem_negotiation_timeout, 45);
         assert_eq!(cfg.xmodem_block_timeout, 20);
         assert_eq!(cfg.xmodem_max_retries, 10);
+        assert!(!cfg.xmodem_send_1k);
         assert!(!cfg.serial_enabled);
         assert_eq!(cfg.serial_port, "");
         assert_eq!(cfg.serial_baud, 9600);
@@ -1049,6 +1074,7 @@ mod tests {
             xmodem_negotiation_timeout: 120,
             xmodem_block_timeout: 30,
             xmodem_max_retries: 15,
+            xmodem_send_1k: true,
             serial_enabled: true,
             serial_port: "/dev/ttyUSB0".into(),
             serial_baud: 115200,
@@ -1099,6 +1125,7 @@ mod tests {
         assert_eq!(loaded.xmodem_negotiation_timeout, original.xmodem_negotiation_timeout);
         assert_eq!(loaded.xmodem_block_timeout, original.xmodem_block_timeout);
         assert_eq!(loaded.xmodem_max_retries, original.xmodem_max_retries);
+        assert_eq!(loaded.xmodem_send_1k, original.xmodem_send_1k);
         assert_eq!(loaded.serial_enabled, original.serial_enabled);
         assert_eq!(loaded.serial_port, original.serial_port);
         assert_eq!(loaded.serial_baud, original.serial_baud);
