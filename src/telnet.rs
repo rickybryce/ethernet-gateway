@@ -26,17 +26,34 @@ const SE: u8 = 0xF0;
 const BRK: u8 = 0xF3;
 const IP: u8 = 0xF4;
 const AYT: u8 = 0xF6;
+/// Erase Character (RFC 854): delete the last received character.
+const EC: u8 = 0xF7;
+/// Erase Line (RFC 854): delete the current input line.
+const EL: u8 = 0xF8;
 const SB: u8 = 0xFA;
 const WILL: u8 = 0xFB;
 const WONT: u8 = 0xFC;
 const DO: u8 = 0xFD;
 const DONT: u8 = 0xFE;
 
+/// Synthetic byte returned by the IAC parser when it receives IAC EL.
+/// Upstream line-editors treat it as "erase the current line."  0x15 is
+/// ASCII NAK (Ctrl-U), the conventional line-kill key on Unix.
+const LINE_ERASE_BYTE: u8 = 0x15;
+
 // Telnet options
 const OPT_ECHO: u8 = 0x01;
 const OPT_SGA: u8 = 0x03;
+/// RFC 859 — Status.
+const OPT_STATUS: u8 = 0x05;
+/// RFC 860 — Timing Mark.
+const OPT_TIMING_MARK: u8 = 0x06;
 const OPT_TTYPE: u8 = 0x18;
 const OPT_NAWS: u8 = 0x1F;
+
+/// STATUS subnegotiation keywords (RFC 859).
+const STATUS_IS: u8 = 0x00;
+const STATUS_SEND: u8 = 0x01;
 
 // TTYPE subnegotiation (RFC 1091)
 const TTYPE_IS: u8 = 0x00;
@@ -1000,9 +1017,25 @@ impl TelnetSession {
                     };
                     return Ok(Some(esc));
                 }
+                EC => {
+                    // RFC 854: delete the last received character.  Our
+                    // architecture has no low-level input buffer, so
+                    // translate to DEL (0x7F); the line-input layer
+                    // already handles this as backspace.
+                    return Ok(Some(0x7F));
+                }
+                EL => {
+                    // RFC 854: delete everything on the current line.
+                    // Translate to NAK (0x15); the line-input loop
+                    // treats this as "erase-line."
+                    return Ok(Some(LINE_ERASE_BYTE));
+                }
                 _ => {
-                    // Other two-byte IAC commands (NOP, DM, AO, EC, EL, GA)
-                    // — nothing for us to do.
+                    // NOP (241), DM (242), AO (245), GA (249) — consumed.
+                    //
+                    // DM is the SYNCH marker (RFC 854 §3).  Proper SYNCH
+                    // requires reading TCP urgent-mode data; we do not
+                    // implement that, so DM is informational only.
                 }
             }
         }
@@ -1053,6 +1086,48 @@ impl TelnetSession {
         opt: u8,
     ) -> Result<(), std::io::Error> {
         match cmd {
+            DO if opt == OPT_TIMING_MARK => {
+                // RFC 860: DO TIMING-MARK is a one-shot synchronization
+                // request — reply with WILL TIMING-MARK *after* we have
+                // flushed whatever output was queued when the DO arrived.
+                // The WILL response is itself the mark; no persistent
+                // state (so we don't set neg_sent_will).
+                self.flush().await?;
+                self.send_telnet_protocol(&[IAC, WILL, OPT_TIMING_MARK]).await?;
+                self.flush().await?;
+            }
+            DONT if opt == OPT_TIMING_MARK => {
+                // RFC 860: DONT TIMING-MARK has no action to ack since
+                // we never maintain the option as enabled.
+            }
+            DO if opt == OPT_STATUS => {
+                // RFC 859: agree to act as the status sender.  Mark
+                // neg_sent_will so the peer's future DOs are treated as
+                // acks and we don't loop.  A later SB STATUS SEND will
+                // trigger the actual state dump.
+                if !self.neg_sent_will[OPT_STATUS as usize] {
+                    self.neg_sent_will[OPT_STATUS as usize] = true;
+                    self.send_telnet_protocol(&[IAC, WILL, OPT_STATUS]).await?;
+                    self.flush().await?;
+                }
+            }
+            DONT if opt == OPT_STATUS => {
+                // Peer withdraws the status-sender role.  Ack with WONT
+                // only if we had asserted WILL.
+                if self.neg_sent_will[OPT_STATUS as usize] {
+                    self.neg_sent_will[OPT_STATUS as usize] = false;
+                    self.send_telnet_protocol(&[IAC, WONT, OPT_STATUS]).await?;
+                    self.flush().await?;
+                }
+            }
+            WILL if opt == OPT_STATUS => {
+                // We don't request status from clients — refuse.
+                if !self.neg_sent_dont[OPT_STATUS as usize] {
+                    self.neg_sent_dont[OPT_STATUS as usize] = true;
+                    self.send_telnet_protocol(&[IAC, DONT, OPT_STATUS]).await?;
+                    self.flush().await?;
+                }
+            }
             DO => {
                 // If we already advertised WILL for opt, peer's DO is an
                 // acknowledgement — no reply needed.
@@ -1153,6 +1228,16 @@ impl TelnetSession {
                     }
                 }
             }
+            OPT_STATUS => {
+                // RFC 859: only the SEND request needs a response.  The
+                // IS variant (a peer dumping its state to us) is ignored
+                // — we don't maintain a model of peer options.
+                if body.first().copied() == Some(STATUS_SEND)
+                    && self.neg_sent_will[OPT_STATUS as usize]
+                {
+                    self.send_status_is().await?;
+                }
+            }
             OPT_NAWS => {
                 if body.len() >= 4 {
                     let w = u16::from_be_bytes([body[0], body[1]]);
@@ -1168,6 +1253,41 @@ impl TelnetSession {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Emit `IAC SB STATUS IS <state> IAC SE` in response to a peer's
+    /// `IAC SB STATUS SEND IAC SE` (RFC 859).
+    ///
+    /// The state body is a concatenation of `WILL opt` and `DO opt`
+    /// triplets for every option we have advertised and not had denied.
+    /// Any 0xFF byte inside the body (none of our opts are 0xFF, but the
+    /// RFC requires it) is doubled per IAC escaping rules.
+    async fn send_status_is(&mut self) -> Result<(), std::io::Error> {
+        let mut body = vec![IAC, SB, OPT_STATUS, STATUS_IS];
+        for opt in 0u8..=255u8 {
+            let idx = opt as usize;
+            if self.neg_sent_will[idx] && !self.neg_sent_wont[idx] {
+                body.push(WILL);
+                if opt == IAC {
+                    body.push(IAC);
+                }
+                body.push(opt);
+            }
+            if self.neg_sent_do[idx] && !self.neg_sent_dont[idx] {
+                body.push(DO);
+                if opt == IAC {
+                    body.push(IAC);
+                }
+                body.push(opt);
+            }
+            if opt == 255 {
+                break;
+            }
+        }
+        body.push(IAC);
+        body.push(SE);
+        self.send_telnet_protocol(&body).await?;
+        self.flush().await
     }
 
     /// Consume up to `max` immediately-queued CR/LF bytes left behind by a
@@ -1268,6 +1388,18 @@ impl TelnetSession {
                     self.echo_backspace().await?;
                     self.flush().await?;
                 }
+                continue;
+            }
+
+            if byte == LINE_ERASE_BYTE {
+                // RFC 854 EL (delivered by session_read_byte as 0x15).
+                // Erase the current line both in the buffer and on the
+                // user's terminal.
+                while !buf.is_empty() {
+                    buf.pop();
+                    self.echo_backspace().await?;
+                }
+                self.flush().await?;
                 continue;
             }
 
@@ -9748,6 +9880,209 @@ mod tests {
 
         let b = session.session_read_byte().await.unwrap();
         assert_eq!(b, Some(0x5F)); // C64 back-arrow used as PETSCII ESC
+    }
+
+    #[tokio::test]
+    async fn test_ec_surfaces_as_del() {
+        // RFC 854 EC (0xF7) should surface as DEL (0x7F) so upstream
+        // line-editors treat it as backspace.
+        let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
+        use tokio::io::AsyncWriteExt;
+        peer.write_all(&[IAC, EC]).await.unwrap();
+        let b = session.session_read_byte().await.unwrap();
+        assert_eq!(b, Some(0x7F));
+    }
+
+    #[tokio::test]
+    async fn test_el_surfaces_as_nak() {
+        // RFC 854 EL (0xF8) should surface as the LINE_ERASE_BYTE (0x15,
+        // NAK) so the line-input loop can erase the current buffer.
+        let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
+        use tokio::io::AsyncWriteExt;
+        peer.write_all(&[IAC, EL]).await.unwrap();
+        let b = session.session_read_byte().await.unwrap();
+        assert_eq!(b, Some(LINE_ERASE_BYTE));
+    }
+
+    #[tokio::test]
+    async fn test_do_timing_mark_gets_will() {
+        // RFC 860: DO TIMING-MARK must be answered with WILL TIMING-MARK.
+        let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        peer.write_all(&[IAC, DO, OPT_TIMING_MARK, b'X']).await.unwrap();
+        let b = session.session_read_byte().await.unwrap();
+        assert_eq!(b, Some(b'X'));
+        drop(session);
+        let mut out = Vec::new();
+        peer.read_to_end(&mut out).await.unwrap();
+        let will_tm = [IAC, WILL, OPT_TIMING_MARK];
+        assert!(
+            out.windows(3).any(|w| w == will_tm),
+            "expected IAC WILL TIMING-MARK, got {:?}",
+            out
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dont_timing_mark_is_silent() {
+        // RFC 860: DONT TIMING-MARK is a no-op (we never keep persistent
+        // state for this option) so the server should NOT emit WONT.
+        let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        peer.write_all(&[IAC, DONT, OPT_TIMING_MARK, b'Y']).await.unwrap();
+        let b = session.session_read_byte().await.unwrap();
+        assert_eq!(b, Some(b'Y'));
+        drop(session);
+        let mut out = Vec::new();
+        peer.read_to_end(&mut out).await.unwrap();
+        let wont_tm = [IAC, WONT, OPT_TIMING_MARK];
+        assert!(
+            !out.windows(3).any(|w| w == wont_tm),
+            "expected no WONT TIMING-MARK, got {:?}",
+            out
+        );
+    }
+
+    #[tokio::test]
+    async fn test_do_status_gets_will() {
+        // RFC 859: DO STATUS → WILL STATUS.
+        let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        peer.write_all(&[IAC, DO, OPT_STATUS, b'X']).await.unwrap();
+        let b = session.session_read_byte().await.unwrap();
+        assert_eq!(b, Some(b'X'));
+        drop(session);
+        let mut out = Vec::new();
+        peer.read_to_end(&mut out).await.unwrap();
+        let will_status = [IAC, WILL, OPT_STATUS];
+        assert!(
+            out.windows(3).any(|w| w == will_status),
+            "expected IAC WILL STATUS, got {:?}",
+            out
+        );
+    }
+
+    #[tokio::test]
+    async fn test_do_status_not_repeated() {
+        // Two consecutive DO STATUS should yield exactly one WILL reply.
+        let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        peer.write_all(&[IAC, DO, OPT_STATUS, IAC, DO, OPT_STATUS, b'Y'])
+            .await
+            .unwrap();
+        let b = session.session_read_byte().await.unwrap();
+        assert_eq!(b, Some(b'Y'));
+        drop(session);
+        let mut out = Vec::new();
+        peer.read_to_end(&mut out).await.unwrap();
+        let will_status = [IAC, WILL, OPT_STATUS];
+        let count = out.windows(3).filter(|w| *w == will_status).count();
+        assert_eq!(count, 1, "expected exactly one WILL STATUS, got {:?}", out);
+    }
+
+    #[tokio::test]
+    async fn test_sb_status_send_emits_is_dump() {
+        // After enabling STATUS, SB STATUS SEND must produce SB STATUS IS
+        // <state> SE containing at least the handshake options.
+        let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
+        // The test-session factory skips send_telnet_handshake().  Seed
+        // the neg arrays so the dump has something to report beyond just
+        // STATUS itself.
+        session.neg_sent_will[OPT_ECHO as usize] = true;
+        session.neg_sent_will[OPT_SGA as usize] = true;
+        session.neg_sent_do[OPT_SGA as usize] = true;
+        session.neg_sent_do[OPT_TTYPE as usize] = true;
+        session.neg_sent_do[OPT_NAWS as usize] = true;
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        peer.write_all(&[
+            IAC, DO, OPT_STATUS,
+            IAC, SB, OPT_STATUS, STATUS_SEND, IAC, SE,
+            b'Z',
+        ])
+        .await
+        .unwrap();
+        let b = session.session_read_byte().await.unwrap();
+        assert_eq!(b, Some(b'Z'));
+        drop(session);
+        let mut out = Vec::new();
+        peer.read_to_end(&mut out).await.unwrap();
+
+        // Find the IS subnegotiation: IAC SB STATUS IS ... IAC SE.
+        let header = [IAC, SB, OPT_STATUS, STATUS_IS];
+        let start = out
+            .windows(4)
+            .position(|w| w == header)
+            .expect("no SB STATUS IS in output");
+        let body_and_tail = &out[start + 4..];
+        let se_rel = body_and_tail
+            .windows(2)
+            .position(|w| w == [IAC, SE])
+            .expect("no IAC SE terminator");
+        let body = &body_and_tail[..se_rel];
+
+        // Body should contain WILL ECHO, WILL SGA, WILL STATUS, DO SGA,
+        // DO TTYPE, DO NAWS — each as a verb+opt pair.
+        let expected_pairs: &[[u8; 2]] = &[
+            [WILL, OPT_ECHO],
+            [WILL, OPT_SGA],
+            [WILL, OPT_STATUS],
+            [DO, OPT_SGA],
+            [DO, OPT_TTYPE],
+            [DO, OPT_NAWS],
+        ];
+        for pair in expected_pairs {
+            assert!(
+                body.windows(2).any(|w| w == pair),
+                "STATUS IS body missing {:?}; body was {:?}",
+                pair,
+                body
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dont_status_withdraws() {
+        // After DO STATUS → WILL STATUS, a DONT STATUS must produce WONT.
+        let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        peer.write_all(&[
+            IAC, DO, OPT_STATUS,
+            IAC, DONT, OPT_STATUS,
+            b'Q',
+        ])
+        .await
+        .unwrap();
+        let b = session.session_read_byte().await.unwrap();
+        assert_eq!(b, Some(b'Q'));
+        drop(session);
+        let mut out = Vec::new();
+        peer.read_to_end(&mut out).await.unwrap();
+        let wont_status = [IAC, WONT, OPT_STATUS];
+        assert!(
+            out.windows(3).any(|w| w == wont_status),
+            "expected IAC WONT STATUS, got {:?}",
+            out
+        );
+    }
+
+    #[tokio::test]
+    async fn test_will_status_from_peer_refused() {
+        // The peer trying to be the status sender is refused with DONT.
+        let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        peer.write_all(&[IAC, WILL, OPT_STATUS, b'R']).await.unwrap();
+        let b = session.session_read_byte().await.unwrap();
+        assert_eq!(b, Some(b'R'));
+        drop(session);
+        let mut out = Vec::new();
+        peer.read_to_end(&mut out).await.unwrap();
+        let dont_status = [IAC, DONT, OPT_STATUS];
+        assert!(
+            out.windows(3).any(|w| w == dont_status),
+            "expected IAC DONT STATUS, got {:?}",
+            out
+        );
     }
 
     #[tokio::test]

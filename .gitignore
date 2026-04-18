@@ -4,3 +4,4 @@ xmodem.conf
 *.swo
 *~
 CLAUDE.md
+*.AppImage

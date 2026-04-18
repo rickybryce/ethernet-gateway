@@ -48,6 +48,36 @@ password. Even with security enabled, running this software on a public network
 is **not recommended** — telnet credentials are transmitted in cleartext and can
 be intercepted. Use the SSH interface for any non-local access.
 
+## Standards Compliance
+
+### Telnet RFCs
+
+The embedded telnet server and the client half of the Telnet Gateway implement
+the core parts of the telnet protocol suite that matter for interactive
+terminal and BBS use:
+
+| RFC | Title | Implementation notes |
+|-----|-------|----------------------|
+| **RFC 854** | Telnet Protocol Specification | IAC framing, IAC IAC data escaping, two-byte command handling. AYT replies with `[Yes]`; IP / BRK surface as ESC to the line-editor; EC translates to DEL (backspace) and EL to NAK (erase-line) so line-input honors them; NOP / DM / AO / GA are consumed. Full TCP urgent-mode SYNCH is not implemented — DM is informational. Outbound 0xFF bytes are escaped as IAC IAC; inbound IAC sequences are consumed transparently. |
+| **RFC 855** | Telnet Option Specifications | DO / DONT / WILL / WONT negotiation with per-option state. Options we don't support receive WONT / DONT so the peer doesn't wait. |
+| **RFC 857** | Telnet Echo Option | The server advertises WILL ECHO to become the echoing side and honors peer requests for ECHO. |
+| **RFC 858** | Suppress Go Ahead Option | WILL SGA / DO SGA to operate in full-duplex character-at-a-time mode (rather than half-duplex GA mode). |
+| **RFC 859** | Status Option | `DO STATUS` → `WILL STATUS`; `IAC SB STATUS SEND IAC SE` returns an `IAC SB STATUS IS <state> IAC SE` dump listing every option the server has advertised and not had denied. Usable via the Unix `telnet` client's `status` / `send status` subcommands. |
+| **RFC 860** | Timing Mark Option | `DO TIMING-MARK` is answered with `WILL TIMING-MARK` after flushing pending output, providing clients a processing-synchronization point. The response is one-shot — no persistent option state. |
+| **RFC 1073** | Window Size Option (NAWS) | Client-reported window dimensions are captured via `IAC SB NAWS <w16><h16> IAC SE` and exposed to the session for layout decisions. |
+| **RFC 1091** | Terminal-Type Option (TTYPE) | On client WILL TTYPE the server replies DO, then issues `IAC SB TTYPE SEND IAC SE` and records the first `IS` response. Used as a hint for PETSCII / ANSI / ASCII detection. |
+| **RFC 1143** | Q-Method of Option Negotiation | Per-option tracking of advertised DO / WILL / DONT prevents the classic negotiation loop. |
+
+Options not negotiated (BINARY, LINEMODE, ENVIRON, NEW-ENVIRON, TSPEED,
+COM-PORT, CHARSET) are explicitly refused with WONT / DONT so the peer
+doesn't stall waiting for an answer.
+
+### Hayes AT Command Set
+
+See [Hayes Compliance Summary](#hayes-compliance-summary) in the Modem
+Emulator section for a full command inventory and the three gateway-friendly
+default deviations (`AT&D0`, `AT&K0`, `S7=15`).
+
 ## Prerequisites
 
 ### Debian 13 / Ubuntu
@@ -264,7 +294,25 @@ serial_flowcontrol = none
 serial_echo = true
 serial_verbose = true
 serial_quiet = false
-serial_s_regs = 5,0,43,13,10,8,2,50,2,6,14,95,50
+serial_s_regs = 5,0,43,13,10,8,2,15,2,6,14,95,50,0,0,0,0,0,0,0,0,0,0,0,0,5,1
+
+# Hayes extended command state (written by AT&W, restored by ATZ)
+# serial_x_code:    ATX level 0-4 (4 = all extended result codes, Hayes default)
+# serial_dtr_mode:  AT&D 0-3 (0 = ignore DTR, gateway-friendly default)
+# serial_flow_mode: AT&K 0-4 (0 = no flow control at modem layer,
+#                   gateway-friendly default; physical port flow control
+#                   is still controlled by serial_flowcontrol above)
+# serial_dcd_mode:  AT&C 0-1 (1 = DCD reflects carrier, Hayes default)
+serial_x_code = 4
+serial_dtr_mode = 0
+serial_flow_mode = 0
+serial_dcd_mode = 1
+
+# Hayes stored phone-number slots (AT&Zn=s sets, ATDSn dials).  Empty = unset.
+serial_stored_0 =
+serial_stored_1 =
+serial_stored_2 =
+serial_stored_3 =
 
 # SSH server interface (encrypted access to the gateway)
 # Set ssh_enabled = true to activate. Uses its own credentials.
@@ -484,32 +532,71 @@ Or edit `xmodem.conf` directly and restart the server.
 | `AT`    | OK (attention) |
 | `AT?`   | Show AT command help |
 | `ATZ`   | Reset modem to stored settings (saved by AT&W) |
-| `AT&F`  | Reset modem to factory defaults |
-| `AT&W`  | Save current settings (echo, verbose, quiet, S-registers) to config |
+| `AT&F`  | Reset modem to factory defaults (gateway-friendly, see below) |
+| `AT&W`  | Save current modem settings to `xmodem.conf` |
 | `AT&V`  | Display current modem configuration |
 | `ATE0` / `ATE1` | Echo off / on |
 | `ATV0` / `ATV1` | Numeric / verbose result codes |
 | `ATQ0` / `ATQ1` | Result codes on / quiet mode (suppress results) |
-| `ATI`   | Show modem identification |
+| `ATI` / `ATI0`–`ATI7` | Identification variants (product ID, ROM checksum, ROM test, firmware, OEM, country, diag, product info) |
 | `ATH`   | Hang up (close any active connection) |
 | `ATA`   | Answer incoming ring |
 | `ATO`   | Return to online mode (resume after `+++` escape) |
+| `ATX0`–`ATX4` | Result code verbosity (see table below) |
+| `AT&C0` / `AT&C1` | DCD always on / DCD reflects carrier (default) |
+| `AT&D0`–`AT&D3` | DTR handling (0 = ignore, default; 1 = cmd mode on drop; 2 = hang up; 3 = hang up + reset) |
+| `AT&K0`–`AT&K4` | Modem-layer flow control (0 = none, default; 1 = reserved; 3 = RTS/CTS; 4 = XON/XOFF) |
 | `ATS?`  | Show S-register help |
 | `ATS`*n*`?` | Query S-register *n* (returns 3-digit value) |
-| `ATS`*n*`=`*v* | Set S-register *n* to value *v* (0–255) |
+| `ATS`*n*`=`*v* | Set S-register *n* to value *v* (0–255). Range S0–S26 |
 | `ATDL`  | Redial last number |
+| `ATDS` / `ATDS`*n* | Dial stored number from slot *n* (0–3; default 0) |
+| `AT&Z`*n*`=`*s* | Store phone number or host *s* in slot *n* (0–3) |
 | `ATDT xmodem-gateway` | Connect to this gateway's menus |
-| `ATDT host:port` | Dial a remote telnet host (commas in dial string are stripped) |
+| `ATDT host:port` | Dial a remote telnet host |
 | `ATDP host:port` | Pulse dial (same as ATDT — no distinction for TCP) |
+| `A/`    | Repeat the last command (no `AT` prefix, no CR required) |
 | `+++`   | Return to command mode (with guard time from S12) |
 
-**Result codes:** In verbose mode (default), results are text (`OK`, `CONNECT`,
-`NO CARRIER`, `ERROR`). In numeric mode (`ATV0`), results are digits (`0`, `1`,
-`3`, `4`). Quiet mode (`ATQ1`) suppresses all result codes.
+Unrecognized commands (`ATB`, `ATC`, `ATL`, `ATM`, `AT&B`, `AT&G`, `AT&J`,
+`AT&S`, `AT&T`, `AT&Y`, etc.) are accepted and return `OK` so that legacy
+init strings don't halt with `ERROR` on commands the emulator has no
+hardware to implement.
+
+**Dial modifiers** inside phone-number dial strings:
+
+| Modifier | Action |
+|----------|--------|
+| `,` | Pause for S8 seconds (default 2s) before continuing |
+| `W` | Wait for dial tone (adds S6 seconds, virtual) |
+| `;` | After dial, return to command mode instead of going online |
+| `*`, `#` | DTMF digits, preserved for phone-number lookup |
+| `P`, `T`, `@`, `!` | Pulse/tone/quiet/hookflash selectors, ignored |
+
+Modifiers are only honored when the dial string looks like a phone number.
+Hostnames like `pine.example.com` or `www.example.com` are not stripped.
+
+**Result codes and ATX levels:** In verbose mode (default) results are text
+(`OK`, `CONNECT`, `NO CARRIER`, `ERROR`). In numeric mode (`ATV0`) results are
+digits. Quiet mode (`ATQ1`) suppresses all result codes. The ATX level
+controls which codes the modem may emit and whether `CONNECT` includes the
+line speed:
+
+| Level | Extended codes | CONNECT format |
+|-------|----------------|----------------|
+| X0 | Basic only; BUSY / NO DIALTONE / NO ANSWER collapse to NO CARRIER | `CONNECT` (code 1) |
+| X1 | Basic + baud in CONNECT | `CONNECT <baud>` (code per baud) |
+| X2 | Adds NO DIALTONE detection | `CONNECT <baud>` |
+| X3 | Adds BUSY detection | `CONNECT <baud>` |
+| X4 | Full extended set (gateway default) | `CONNECT <baud>` |
+
+Numeric `CONNECT` codes follow Hayes conventions: 1 = 300, 5 = 1200,
+10 = 2400, 12 = 9600, 16 = 19200, 28 = 38400, 87 = 115200. Non-standard
+baud rates fall back to code 1.
 
 **S-registers:** Query with `ATSn?`, set with `ATSn=v`, or type `ATS?` for help.
 `AT&W` saves all registers to `xmodem.conf`; `ATZ` restores saved values;
-`AT&F` resets to factory defaults.
+`AT&F` resets to gateway-friendly factory defaults.
 
 | Register | Default | Description |
 |----------|---------|-------------|
@@ -520,12 +607,60 @@ Or edit `xmodem.conf` directly and restart the server.
 | S4  | 10  | Line feed character |
 | S5  | 8   | Backspace character |
 | S6  | 2   | Wait for dial tone (seconds) |
-| S7  | 50  | Wait for carrier (seconds) |
+| S7  | **15** | Wait for carrier (seconds) — Hayes default is 50; reduced here so failed dials return quickly. Capped internally at 60 s. |
 | S8  | 2   | Comma pause time (seconds) |
 | S9  | 6   | Carrier detect response time (1/10s) |
 | S10 | 14  | Carrier loss disconnect time (1/10s) |
 | S11 | 95  | DTMF tone duration (milliseconds) |
 | S12 | 50  | Escape guard time (1/50s; 50 = 1 second) |
+| S13–S24 | 0 | Reserved. Stored and persisted so legacy init strings that probe these registers don't halt with `ERROR`, but they have no effect on the emulator. |
+| S25 | 5   | DTR detect time (1/100s). Reserved — no DTR pin. |
+| S26 | 1   | RTS-to-CTS delay (1/100s). Reserved — no RTS/CTS pins. |
+
+Keep `S3`, `S4`, and `S5` at distinct values. Command-mode line editing
+dispatches on the raw byte: the CR branch is checked before BS, so setting
+`S3 = 8` would cause backspace to terminate the line. Leaving S3/S4/S5 at
+their Hayes defaults (13/10/8) avoids this.
+
+### Hayes Compliance Summary
+
+The emulator implements the Hayes Smartmodem AT command set: AT, ATZ, AT&F,
+AT&W, AT&V, ATE, ATV, ATQ, ATI (I0–I7), ATH, ATA, ATO, ATX, AT&C, AT&D,
+AT&K, AT&Z (stored numbers), ATD (with T/P/L/S variants), ATSn, S-registers
+S0–S26, the `A/` repeat-last-command shortcut, and the `+++` escape with
+S2/S12 guard-time semantics. `AT&W` persists every Hayes setting — echo,
+verbose, quiet, X, &C, &D, &K, all 27 S-registers, and four stored-number
+slots — to `xmodem.conf`; `ATZ` restores them. Numeric and verbose result
+codes honor the ATX level.
+
+Commands the emulator can't meaningfully implement over TCP (`ATB`, `ATC`,
+`ATL`, `ATM`, `AT&B`, `AT&G`, `AT&J`, `AT&S`, `AT&T`, `AT&Y`) are accepted
+and return `OK` so that legacy init strings run to completion.
+
+**Gateway-friendly default deviations:**
+
+| Setting | Gateway default | Hayes default | Why we differ |
+|---------|-----------------|---------------|---------------|
+| `AT&D` | `&D0` (ignore DTR) | `&D2` (hang up on DTR drop) | Many retro clients don't drive DTR correctly. `&D2` would cause spurious disconnects. |
+| `AT&K` | `&K0` (no modem-level flow control) | `&K3` (RTS/CTS) | C64, CP/M, and similar clients rarely implement hardware flow control. The physical port flow control is still set by `serial_flowcontrol` in `xmodem.conf`. |
+| `S7` | 15 seconds | 50 seconds | Keeps failed TCP dials responsive. Raising S7 is allowed up to an internal cap of 60 s. |
+
+All three deviations can be overridden interactively (e.g. `AT&D2`,
+`AT&K3`, `ATS7=50`) and persisted with `AT&W`.
+
+**Implementation notes:**
+
+- `AT&D`, `AT&K`, and `AT&C` are parsed, stored, displayed in `AT&V`, and
+  persisted — but their effects on RS-232 hardware signalling (DTR monitoring,
+  RTS/CTS handshake, DCD line) are not enforced by the emulator. See the
+  **Limitations** section below for why.
+- `ATX1`–`ATX4` all affect result codes and `CONNECT` formatting.
+- `ATS6` (wait-for-dial-tone) and `ATS8` (comma pause) sleep for the
+  configured number of seconds before the TCP connect, summed per modifier
+  and capped at 60 seconds total.
+- The `+++` escape follows the Hayes timing spec (one guard time of silence
+  before the `+` triple, then another guard time after). Setting `ATS12=0`
+  or `ATS2>127` disables escape detection.
 
 ### Escaping and Resuming
 
@@ -572,31 +707,35 @@ letters or dots).
 
 ### Limitations
 
-This is a software modem emulator, not a real modem. It does not control
-RS-232 hardware signal pins. Specifically:
+This is a software modem emulator, not a real modem. The Hayes command set
+(including `AT&C`, `AT&D`, `AT&K`) is fully parsed, stored, persisted via
+`AT&W`, and displayed in `AT&V`, but the emulator does not drive the RS-232
+hardware signal pins that those commands nominally control:
 
 - **DCD (Data Carrier Detect, pin 1)** -- A real modem asserts DCD when a
-  carrier signal is established with the remote modem. This emulator cannot
-  drive DCD, so the serial device has no hardware indication that a connection
-  is active.
+  carrier is established with the remote modem. `AT&C1` is accepted and
+  persisted, but this emulator does not drive DCD, so the serial device has
+  no hardware indication that a connection is active.
 - **RI (Ring Indicator, pin 9)** -- A real modem asserts RI when an incoming
-  call is ringing. The ring emulator sends `RING` result codes over the serial
-  data line, but the RI pin is never driven.
-- **DSR (Data Set Ready, pin 6)** -- A real modem asserts DSR when powered on
-  and ready. This emulator does not control DSR.
+  call is ringing. The ring emulator sends `RING` result codes over the
+  serial data line, but the RI pin is never driven.
+- **DSR (Data Set Ready, pin 6)** -- A real modem asserts DSR when powered
+  on and ready. This emulator does not control DSR.
 - **DTR (Data Terminal Ready, pin 4)** -- A real modem monitors DTR from the
-  terminal to detect hangup requests. This emulator does not read DTR; use the
-  `ATH` command or `+++` escape to hang up instead.
-- **CTS/RTS (Clear to Send / Request to Send, pins 8/7)** -- Hardware flow
-  control is handled by the serial port driver when `serial_flowcontrol` is set
-  to `hardware`, but the emulator itself does not manipulate these pins for
-  modem state signaling.
+  terminal to detect hangup requests. `AT&D2`/`AT&D3` is accepted and
+  persisted, but the emulator does not read DTR (semantics vary by
+  USB-to-serial adapter and platform). Use `ATH` or `+++` to hang up.
+- **CTS/RTS (Clear to Send / Request to Send, pins 8/7)** -- `AT&K3`/`AT&K4`
+  is accepted and persisted. Actual hardware or software flow control on the
+  wire is controlled by the `serial_flowcontrol` setting in `xmodem.conf`
+  (not by `AT&K`), so retro clients that can't do RTS/CTS keep working at
+  the default `serial_flowcontrol = none`.
 
-Most retro terminal software works fine without these signals, especially when
-configured to ignore DCD (sometimes labeled "Force DTR" or "Ignore Carrier" in
-the terminal program settings). If your software requires DCD to be asserted
-before it will communicate, check its configuration for an option to disable
-carrier detection.
+Most retro terminal software works fine without these signals, especially
+when configured to ignore DCD (sometimes labeled "Force DTR" or "Ignore
+Carrier" in the terminal program settings). If your software requires DCD to
+be asserted before it will communicate, check its configuration for an
+option to disable carrier detection.
 
 ## Web Browser
 
