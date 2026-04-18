@@ -575,6 +575,9 @@ pub(crate) struct TelnetSession {
     is_serial: bool,
     is_ssh: bool,
     idle_timeout: std::time::Duration,
+    // One-byte pushback used by drain_trailing_eol to safely return any
+    // non-CR/LF byte it reads back to the next real input call.
+    pushback: Option<u8>,
 }
 
 impl TelnetSession {
@@ -613,6 +616,7 @@ impl TelnetSession {
             is_serial: true,
             is_ssh: false,
             idle_timeout: std::time::Duration::from_secs(config::get_config().idle_timeout_secs),
+            pushback: None,
         }
     }
 
@@ -649,6 +653,7 @@ impl TelnetSession {
             is_serial: false,
             is_ssh: true,
             idle_timeout: std::time::Duration::from_secs(config::get_config().idle_timeout_secs),
+            pushback: None,
         }
     }
 
@@ -812,6 +817,9 @@ impl TelnetSession {
     }
 
     async fn read_byte_filtered(&mut self) -> Result<Option<u8>, std::io::Error> {
+        if let Some(b) = self.pushback.take() {
+            return Ok(Some(b));
+        }
         let filter_iac = !self.is_serial && !self.is_ssh;
         if self.idle_timeout.is_zero() {
             read_byte_iac_filtered(&mut self.reader, filter_iac).await
@@ -827,6 +835,33 @@ impl TelnetSession {
                     std::io::ErrorKind::TimedOut,
                     "idle timeout",
                 )),
+            }
+        }
+    }
+
+    /// Consume up to `max` immediately-queued CR/LF bytes left behind by a
+    /// linemode telnet client (e.g. the `\n` of a CRLF pair after a menu
+    /// selection or line submit). Uses a short read timeout so nothing is
+    /// eaten in char-at-a-time mode. Any non-CR/LF byte seen is pushed back
+    /// for the next real input call, so no keystrokes are lost.
+    async fn drain_trailing_eol(&mut self, max: usize) {
+        if self.pushback.is_some() {
+            return;
+        }
+        let filter_iac = !self.is_serial && !self.is_ssh;
+        for _ in 0..max {
+            let res = tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                read_byte_iac_filtered(&mut self.reader, filter_iac),
+            )
+            .await;
+            match res {
+                Ok(Ok(Some(b))) if b == b'\r' || b == b'\n' => continue,
+                Ok(Ok(Some(b))) => {
+                    self.pushback = Some(b);
+                    return;
+                }
+                _ => return,
             }
         }
     }
@@ -875,6 +910,9 @@ impl TelnetSession {
             if byte == b'\r' || byte == b'\n' {
                 self.send_raw(b"\r\n").await?;
                 self.flush().await?;
+                // Drain the paired byte of a CRLF (or LFCR) so the next
+                // prompt isn't silently satisfied by a leftover newline.
+                self.drain_trailing_eol(1).await;
                 let result: String = if self.terminal_type == TerminalType::Petscii {
                     buf.iter()
                         .map(|&b| petscii_to_ascii_byte(b) as char)
@@ -958,6 +996,9 @@ impl TelnetSession {
                 self.send_raw(&[byte]).await?;
                 self.send_raw(b"\r\n").await?;
                 self.flush().await?;
+                // Linemode clients send `letter\r\n`; drop the trailing
+                // CRLF so a follow-up prompt isn't auto-submitted.
+                self.drain_trailing_eol(2).await;
                 return Ok(Some(ch.to_string()));
             }
 
@@ -966,6 +1007,7 @@ impl TelnetSession {
                     self.send_raw(&[byte]).await?;
                     self.send_raw(b"\r\n").await?;
                     self.flush().await?;
+                    self.drain_trailing_eol(2).await;
                     return Ok(Some(ch.to_string()));
                 }
 
@@ -983,6 +1025,7 @@ impl TelnetSession {
                     if b2 == b'\r' || b2 == b'\n' {
                         self.send_raw(b"\r\n").await?;
                         self.flush().await?;
+                        self.drain_trailing_eol(1).await;
                         return Ok(Some(input));
                     }
 
@@ -1021,6 +1064,7 @@ impl TelnetSession {
             self.send_raw(&[byte]).await?;
             self.send_raw(b"\r\n").await?;
             self.flush().await?;
+            self.drain_trailing_eol(2).await;
             return Ok(Some(ch.to_string()));
         }
     }
@@ -6997,6 +7041,7 @@ pub fn start_server(shutdown: Arc<AtomicBool>, restart: Arc<AtomicBool>, shutdow
                                     is_serial: false,
                                     is_ssh: false,
                                     idle_timeout: std::time::Duration::from_secs(cfg.idle_timeout_secs),
+                                    pushback: None,
                                 };
                                 if let Err(e) = session.run().await {
                                     glog!("Telnet: session error from {}: {}", addr, e);
@@ -7376,6 +7421,7 @@ mod tests {
             is_serial: false,
             is_ssh: false,
             idle_timeout: std::time::Duration::ZERO,
+            pushback: None,
         }
     }
 

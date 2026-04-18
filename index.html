@@ -632,6 +632,11 @@
 
                 <div class="cat">Build from Source</div>
                 <div class="instructions">
+                    <h3>Prerequisites</h3>
+                    <p>A C toolchain and a few system libraries are required to build from source. On Debian/Ubuntu:</p>
+                    <pre><code>sudo apt install -y build-essential pkg-config cmake curl libudev-dev</code></pre>
+                    <p style="margin-top: 8px;">See the README for Fedora, Arch, macOS, and Windows instructions.</p>
+
                     <h3>Compiling</h3>
                     <ol>
                         <li>Install Rust: <a href="https://rustup.rs">rustup.rs</a></li>
