@@ -3800,6 +3800,52 @@ impl TelnetSession {
 
     /// Gather gateway connection details from the user (host, port, username, password).
     /// Returns None if the user cancelled (ESC or empty input).
+    /// Display the outgoing-SSH gateway's public key (OpenSSH format) so
+    /// the operator can paste it into a remote server's
+    /// `~/.ssh/authorized_keys`.  Waits for a keypress before returning.
+    async fn show_gateway_public_key(&mut self) -> Result<(), std::io::Error> {
+        self.send_line("").await?;
+        let sep = self.separator();
+        self.send_line(&sep).await?;
+        self.send_line(&format!(
+            "  {}",
+            self.yellow("Gateway Public Key")
+        ))
+        .await?;
+        self.send_line(&sep).await?;
+        self.send_line("").await?;
+        self.send_line(
+            "  Copy the line below into the remote server's",
+        )
+        .await?;
+        self.send_line(
+            "  ~/.ssh/authorized_keys to enable passwordless",
+        )
+        .await?;
+        self.send_line("  SSH login from this gateway.").await?;
+        self.send_line("").await?;
+        match crate::ssh::client_public_key_openssh() {
+            Ok(pub_line) => {
+                self.send_line(&format!("  {}", self.cyan(&pub_line)))
+                    .await?;
+            }
+            Err(e) => {
+                self.show_error(&format!(
+                    "Could not load/generate gateway key: {}",
+                    e,
+                ))
+                .await?;
+                return Ok(());
+            }
+        }
+        self.send_line("").await?;
+        self.send("  Press any key to continue.").await?;
+        self.flush().await?;
+        self.wait_for_key().await?;
+        self.send_line("").await?;
+        Ok(())
+    }
+
     async fn gateway_prompts(
         &mut self,
     ) -> Result<Option<(String, u16, String, String)>, std::io::Error> {
@@ -3869,6 +3915,34 @@ impl TelnetSession {
         ))
         .await?;
         self.send_line("").await?;
+
+        // Offer a quick prompt to display the gateway's public key so the
+        // operator can copy it into a remote server's authorized_keys.
+        // Pressing K shows the key and returns to this menu; any other
+        // key proceeds to the host prompt.
+        let is_petscii = self.terminal_type == TerminalType::Petscii;
+        loop {
+            self.send(&format!(
+                "  Press {} to show gateway public key, any other key to connect: ",
+                self.cyan("K"),
+            ))
+            .await?;
+            self.flush().await?;
+            let b = match self.read_byte_filtered().await? {
+                Some(b) => b,
+                None => return Ok(()),
+            };
+            self.send_line("").await?;
+            if is_esc_key(b, is_petscii) {
+                return Ok(());
+            }
+            let ch = if is_petscii { petscii_to_ascii_byte(b) } else { b };
+            if ch == b'k' || ch == b'K' {
+                self.show_gateway_public_key().await?;
+                continue;
+            }
+            break;
+        }
 
         let (host, port, username, password) = if idle_timeout.is_zero() {
             match self.gateway_prompts().await {
@@ -4082,23 +4156,83 @@ impl TelnetSession {
             }
         }
 
-        // Authenticate
-        match session.authenticate_password(&username, &password).await {
-            Ok(russh::client::AuthResult::Success) => {}
-            Ok(russh::client::AuthResult::Failure { .. }) => {
-                let _ = session
-                    .disconnect(russh::Disconnect::ByApplication, "auth failed", "")
-                    .await;
-                self.show_error("Authentication failed.").await?;
-                return Ok(());
+        // Authenticate: try pubkey first, fall back to password.  The
+        // gateway's own Ed25519 client key is auto-generated on first
+        // use; the operator copies its public half to any remote's
+        // `~/.ssh/authorized_keys` they want the gateway to reach.
+        let mut authed = false;
+        match crate::ssh::load_or_generate_client_key() {
+            Ok(key) => {
+                // best_supported_rsa_hash returns Result<Option<Option<HashAlg>>>:
+                //   outer Option = "server doesn't specify a preference",
+                //   inner Option = "preference is 'no hash' (i.e., not RSA)".
+                // Two flattens collapse both to Option<HashAlg>, which is
+                // what PrivateKeyWithHashAlg::new expects.
+                let hash_alg = session
+                    .best_supported_rsa_hash()
+                    .await
+                    .ok()
+                    .flatten()
+                    .flatten();
+                match session
+                    .authenticate_publickey(
+                        &username,
+                        russh::keys::PrivateKeyWithHashAlg::new(
+                            std::sync::Arc::new(key),
+                            hash_alg,
+                        ),
+                    )
+                    .await
+                {
+                    Ok(russh::client::AuthResult::Success) => {
+                        authed = true;
+                        glog!(
+                            "SSH gateway: authenticated to {}:{} as {} via pubkey",
+                            host, port, username,
+                        );
+                        self.send_line(&format!(
+                            "  {}",
+                            self.green("Authenticated (gateway key).")
+                        ))
+                        .await?;
+                    }
+                    Ok(russh::client::AuthResult::Failure { .. }) => {
+                        // Pubkey rejected by remote; password fallback.
+                    }
+                    Err(e) => {
+                        glog!("SSH gateway: pubkey auth error: {}", e);
+                    }
+                }
             }
             Err(e) => {
-                let _ = session
-                    .disconnect(russh::Disconnect::ByApplication, "auth error", "")
-                    .await;
-                self.show_error(&format!("Auth error: {}", e)).await?;
-                return Ok(());
+                glog!("SSH gateway: client key unavailable: {}", e);
             }
+        }
+        if !authed {
+            match session.authenticate_password(&username, &password).await {
+                Ok(russh::client::AuthResult::Success) => {
+                    authed = true;
+                    glog!(
+                        "SSH gateway: authenticated to {}:{} as {} via password",
+                        host, port, username,
+                    );
+                }
+                Ok(russh::client::AuthResult::Failure { .. }) => {}
+                Err(e) => {
+                    let _ = session
+                        .disconnect(russh::Disconnect::ByApplication, "auth error", "")
+                        .await;
+                    self.show_error(&format!("Auth error: {}", e)).await?;
+                    return Ok(());
+                }
+            }
+        }
+        if !authed {
+            let _ = session
+                .disconnect(russh::Disconnect::ByApplication, "auth failed", "")
+                .await;
+            self.show_error("Authentication failed.").await?;
+            return Ok(());
         }
 
         // Open channel and request PTY + shell

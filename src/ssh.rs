@@ -18,6 +18,12 @@ use crate::logger::glog;
 use crate::telnet;
 
 const SSH_HOST_KEY_FILE: &str = "xmodem_ssh_host_key";
+/// Client keypair used by the outgoing SSH gateway to authenticate
+/// against remote servers via public-key authentication.  Generated on
+/// first use and persisted for the lifetime of the deployment so that
+/// the operator can add the same public key to remote `authorized_keys`
+/// files once and reuse it across sessions.
+pub(crate) const GATEWAY_CLIENT_KEY_FILE: &str = "xmodem_gateway_ssh_key";
 
 // ─── Public API ────────────────────────────────────────────
 
@@ -131,6 +137,81 @@ fn load_or_generate_host_key() -> Result<russh::keys::PrivateKey, String> {
     }
 
     Ok(key)
+}
+
+/// Load or (on first use) generate the gateway's outgoing-SSH client
+/// keypair used for public-key authentication against remote servers.
+///
+/// Mirrors `load_or_generate_host_key`: Ed25519, OpenSSH-format PEM at
+/// `GATEWAY_CLIENT_KEY_FILE`, chmod 0o600 on Unix.  The file mode is
+/// the only at-rest protection; the private key itself has no
+/// passphrase because the gateway process needs to use it without user
+/// interaction.
+pub(crate) fn load_or_generate_client_key() -> Result<russh::keys::PrivateKey, String> {
+    use russh::keys::ssh_key::LineEnding;
+
+    if std::path::Path::new(GATEWAY_CLIENT_KEY_FILE).exists() {
+        match russh::keys::load_secret_key(GATEWAY_CLIENT_KEY_FILE, None) {
+            Ok(key) => {
+                return Ok(key);
+            }
+            Err(e) => {
+                glog!(
+                    "SSH gateway: could not read {}: {} (generating new key)",
+                    GATEWAY_CLIENT_KEY_FILE, e
+                );
+            }
+        }
+    }
+
+    let key = russh::keys::PrivateKey::random(
+        &mut rand::rng(),
+        russh::keys::Algorithm::Ed25519,
+    )
+    .map_err(|e| format!("client key generation failed: {}", e))?;
+
+    let pem = key
+        .to_openssh(LineEnding::LF)
+        .map_err(|e| format!("client key encoding failed: {}", e))?;
+    if let Err(e) = std::fs::write(GATEWAY_CLIENT_KEY_FILE, pem.as_bytes()) {
+        glog!(
+            "SSH gateway: warning: could not save client key to {}: {}",
+            GATEWAY_CLIENT_KEY_FILE, e,
+        );
+    } else {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(
+                GATEWAY_CLIENT_KEY_FILE,
+                std::fs::Permissions::from_mode(0o600),
+            );
+        }
+        glog!(
+            "SSH gateway: generated new client key, saved to {}",
+            GATEWAY_CLIENT_KEY_FILE,
+        );
+    }
+
+    Ok(key)
+}
+
+/// Return the gateway client's public key in OpenSSH one-line format
+/// (`<algorithm> <base64>`), suitable for pasting into a remote's
+/// `~/.ssh/authorized_keys`.  Generates the keypair on first call.
+pub(crate) fn client_public_key_openssh() -> Result<String, String> {
+    let key = load_or_generate_client_key()?;
+    let public = key.public_key();
+    let line = public.to_string();
+    // `PublicKey::to_string` produces `<algo> <b64> [comment]`.  We
+    // return just `<algo> <b64>` so operators don't paste a stray
+    // comment they didn't provide.
+    let parts: Vec<&str> = line.splitn(3, ' ').collect();
+    if parts.len() >= 2 {
+        Ok(format!("{} {}", parts[0], parts[1]))
+    } else {
+        Ok(line)
+    }
 }
 
 // ─── Server (connection factory) ───────────────────────────
@@ -441,6 +522,94 @@ mod tests {
             .expect("should load saved key");
         assert_eq!(loaded.algorithm(), russh::keys::Algorithm::Ed25519);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_gateway_client_key_file_constant() {
+        assert_eq!(GATEWAY_CLIENT_KEY_FILE, "xmodem_gateway_ssh_key");
+    }
+
+    /// The generator is expected to produce an Ed25519 keypair whose
+    /// OpenSSH PEM can be round-tripped through `load_secret_key`.
+    /// This test exercises the pure generate→encode→decode path so it
+    /// doesn't touch `GATEWAY_CLIENT_KEY_FILE` on disk.
+    #[test]
+    fn test_client_key_generation_shape() {
+        use russh::keys::ssh_key::LineEnding;
+        let key = russh::keys::PrivateKey::random(
+            &mut rand::rng(),
+            russh::keys::Algorithm::Ed25519,
+        )
+        .expect("Ed25519 generation should succeed");
+        assert_eq!(key.algorithm(), russh::keys::Algorithm::Ed25519);
+        let pem = key.to_openssh(LineEnding::LF).unwrap();
+        let decoded = russh::keys::decode_secret_key(&pem, None)
+            .expect("generated key should round-trip through OpenSSH PEM");
+        assert_eq!(decoded.algorithm(), russh::keys::Algorithm::Ed25519);
+    }
+
+    /// `client_public_key_openssh` should emit exactly `<algo> <b64>`
+    /// with no trailing comment.  Tested via a synthesized key.
+    #[test]
+    fn test_client_public_key_openssh_format() {
+        let key = russh::keys::PrivateKey::random(
+            &mut rand::rng(),
+            russh::keys::Algorithm::Ed25519,
+        )
+        .unwrap();
+        let line = key.public_key().to_string();
+        let parts: Vec<&str> = line.splitn(3, ' ').collect();
+        assert!(
+            parts.len() >= 2,
+            "public key string should be at least `<algo> <b64>`"
+        );
+        let trimmed = if parts.len() >= 2 {
+            format!("{} {}", parts[0], parts[1])
+        } else {
+            line.clone()
+        };
+        // Should start with the Ed25519 algorithm name.
+        assert!(
+            trimmed.starts_with("ssh-ed25519 "),
+            "expected ssh-ed25519 prefix, got {:?}",
+            trimmed,
+        );
+        // Should not contain a third space-separated field (comment).
+        assert_eq!(trimmed.split(' ').count(), 2);
+    }
+
+    /// Full `load_or_generate_client_key` loop: generate, save (via
+    /// temp file path), reload, verify algorithm and on Unix the mode.
+    /// We do NOT use `GATEWAY_CLIENT_KEY_FILE` itself because other
+    /// tests and the running binary may share the CWD.
+    #[test]
+    fn test_client_key_persists_with_restrictive_mode() {
+        use russh::keys::ssh_key::LineEnding;
+        let dir = std::env::temp_dir().join("xmodem_test_gateway_client_key");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("client_key");
+        let key = russh::keys::PrivateKey::random(
+            &mut rand::rng(),
+            russh::keys::Algorithm::Ed25519,
+        )
+        .unwrap();
+        let pem = key.to_openssh(LineEnding::LF).unwrap();
+        std::fs::write(&path, pem.as_bytes()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                &path,
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
+            let meta = std::fs::metadata(&path).unwrap();
+            assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        }
+        let loaded = russh::keys::load_secret_key(&path, None)
+            .expect("should load client key back");
+        assert_eq!(loaded.algorithm(), russh::keys::Algorithm::Ed25519);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
