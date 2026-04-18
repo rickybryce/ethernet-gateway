@@ -17,6 +17,19 @@ pub const CONFIG_FILE: &str = "xmodem.conf";
 // ─── Defaults ──────────────────────────────────────────────
 const DEFAULT_TELNET_ENABLED: bool = true;
 const DEFAULT_TELNET_PORT: u16 = 2323;
+/// Default for the outgoing Telnet Gateway's cooperative negotiation.
+/// Off by default so dialing raw-TCP-on-port-23 services (legacy MUDs,
+/// hand-rolled BBS software) still works — those services don't speak
+/// telnet and would see our IAC offers as garbage.  Enable when the
+/// destinations you dial are genuine telnet servers.
+const DEFAULT_TELNET_GATEWAY_NEGOTIATE: bool = false;
+/// Default for the outgoing Telnet Gateway's protocol-layer override.
+/// Off by default (smart mode) so the gateway parses telnet IAC in both
+/// directions.  When true, the gateway treats the remote as a raw TCP
+/// byte stream — no IAC escape on outbound, no IAC parse on inbound —
+/// which is the last-resort escape hatch for destinations that clearly
+/// aren't telnet at all.
+const DEFAULT_TELNET_GATEWAY_RAW: bool = false;
 const DEFAULT_ENABLE_CONSOLE: bool = true;
 const DEFAULT_SECURITY_ENABLED: bool = false;
 const DEFAULT_USERNAME: &str = "admin";
@@ -68,6 +81,18 @@ pub struct Config {
     /// Enable the telnet server. Set to false for SSH-only access.
     pub telnet_enabled: bool,
     pub telnet_port: u16,
+    /// When true, the outgoing Telnet Gateway proactively offers
+    /// `WILL TTYPE` / `WILL NAWS` at connect time and accepts
+    /// `DO TTYPE` / `DO NAWS` requests from the remote.  ECHO cooperation
+    /// is independent and always on.  Default false to preserve
+    /// compatibility with raw-TCP services on port 23.
+    pub telnet_gateway_negotiate: bool,
+    /// When true, the Telnet Gateway disables its telnet-IAC layer
+    /// entirely and treats the remote as raw TCP.  Intended for
+    /// destinations that clearly aren't telnet (some legacy MUDs, custom
+    /// BBS software).  Supersedes `telnet_gateway_negotiate` — when raw
+    /// is on, there is no negotiation to do.
+    pub telnet_gateway_raw: bool,
     /// Show the GUI configuration/console window on startup.
     pub enable_console: bool,
     pub security_enabled: bool,
@@ -138,6 +163,8 @@ impl Default for Config {
         Self {
             telnet_enabled: DEFAULT_TELNET_ENABLED,
             telnet_port: DEFAULT_TELNET_PORT,
+            telnet_gateway_negotiate: DEFAULT_TELNET_GATEWAY_NEGOTIATE,
+            telnet_gateway_raw: DEFAULT_TELNET_GATEWAY_RAW,
             enable_console: DEFAULT_ENABLE_CONSOLE,
             security_enabled: DEFAULT_SECURITY_ENABLED,
             username: DEFAULT_USERNAME.into(),
@@ -241,6 +268,14 @@ fn read_config_file(path: &str) -> Config {
             .and_then(|v| v.parse().ok())
             .filter(|&v: &u16| v >= 1)
             .unwrap_or(DEFAULT_TELNET_PORT),
+        telnet_gateway_negotiate: map
+            .get("telnet_gateway_negotiate")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(DEFAULT_TELNET_GATEWAY_NEGOTIATE),
+        telnet_gateway_raw: map
+            .get("telnet_gateway_raw")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(DEFAULT_TELNET_GATEWAY_RAW),
         enable_console: map
             .get("enable_console")
             .map(|v| v.eq_ignore_ascii_case("true"))
@@ -429,6 +464,23 @@ telnet_enabled = {}
 # Telnet server port
 telnet_port = {}
 
+# Outgoing Telnet Gateway cooperative negotiation.
+# When true, the gateway offers WILL TTYPE / WILL NAWS at connect and
+# accepts DO TTYPE / DO NAWS requests from the remote server.  Leave this
+# false if you dial raw-TCP services (legacy MUDs, hand-rolled BBSes that
+# don't implement the telnet protocol) — those would see the IAC offers
+# as garbage bytes.  ECHO cooperation is always on regardless of this
+# setting (raw-TCP services never send WILL ECHO).
+telnet_gateway_negotiate = {}
+
+# Outgoing Telnet Gateway raw-TCP escape hatch.
+# When true, the gateway bypasses its entire telnet-IAC layer and treats
+# the remote as a raw TCP byte stream.  Last-resort override for
+# destinations that clearly aren't telnet at all.  Supersedes
+# telnet_gateway_negotiate (there's nothing to negotiate in raw mode).
+# Toggleable from the Telnet Gateway menu.
+telnet_gateway_raw = {}
+
 # Show the GUI configuration/console window on startup.
 # Set to false when running as a headless service.
 enable_console = {}
@@ -520,6 +572,8 @@ ssh_password = {}
 ",
         cfg.telnet_enabled,
         cfg.telnet_port,
+        cfg.telnet_gateway_negotiate,
+        cfg.telnet_gateway_raw,
         cfg.enable_console,
         cfg.security_enabled,
         sanitize_value(&cfg.username),
@@ -601,6 +655,12 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
             if let Ok(v) = value.parse::<u16>() && v >= 1 {
                 cfg.telnet_port = v;
             }
+        }
+        "telnet_gateway_negotiate" => {
+            cfg.telnet_gateway_negotiate = value.eq_ignore_ascii_case("true");
+        }
+        "telnet_gateway_raw" => {
+            cfg.telnet_gateway_raw = value.eq_ignore_ascii_case("true");
         }
         "enable_console" => cfg.enable_console = value.eq_ignore_ascii_case("true"),
         "security_enabled" => cfg.security_enabled = value.eq_ignore_ascii_case("true"),
@@ -820,6 +880,8 @@ mod tests {
         let cfg = Config::default();
         assert!(cfg.telnet_enabled);
         assert_eq!(cfg.telnet_port, 2323);
+        assert!(!cfg.telnet_gateway_negotiate);
+        assert!(!cfg.telnet_gateway_raw);
         assert!(cfg.enable_console);
         assert!(!cfg.security_enabled);
         assert_eq!(cfg.username, "admin");
@@ -940,6 +1002,8 @@ mod tests {
         let original = Config {
             telnet_enabled: false,
             telnet_port: 1234,
+            telnet_gateway_negotiate: true,
+            telnet_gateway_raw: true,
             enable_console: true,
             security_enabled: true,
             username: "bob".into(),
@@ -985,6 +1049,11 @@ mod tests {
 
         assert_eq!(loaded.telnet_enabled, original.telnet_enabled);
         assert_eq!(loaded.telnet_port, original.telnet_port);
+        assert_eq!(
+            loaded.telnet_gateway_negotiate,
+            original.telnet_gateway_negotiate
+        );
+        assert_eq!(loaded.telnet_gateway_raw, original.telnet_gateway_raw);
         assert_eq!(loaded.enable_console, original.enable_console);
         assert_eq!(loaded.security_enabled, original.security_enabled);
         assert_eq!(loaded.username, original.username);
