@@ -404,6 +404,103 @@ async fn read_byte_iac_filtered(
     }
 }
 
+/// Events surfaced by the outgoing Telnet Gateway's local-side reader.
+///
+/// Unlike [`read_byte_iac_filtered`] (which drops every IAC sequence
+/// silently), this reader surfaces `SB NAWS <w><h> IAC SE` as a structured
+/// resize event so the gateway can forward it to the remote server while
+/// a session is already live.  All other IAC framing — 2-byte commands,
+/// option negotiations, non-NAWS subnegotiations — is still consumed.
+#[derive(Debug, PartialEq, Eq)]
+enum GatewayInboundEvent {
+    /// A plain data byte from the local user.  `IAC IAC` is unescaped.
+    Data(u8),
+    /// The local client sent `IAC SB NAWS <cols16><rows16> IAC SE`.
+    NawsResize(u16, u16),
+    /// Connection closed.
+    Eof,
+}
+
+/// Read one event from the local user's side of a Telnet Gateway session.
+async fn read_gateway_event(
+    reader: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
+) -> std::io::Result<GatewayInboundEvent> {
+    let mut buf = [0u8; 1];
+    loop {
+        match reader.read(&mut buf).await {
+            Ok(0) => return Ok(GatewayInboundEvent::Eof),
+            Ok(_) => {}
+            Err(e) => return Err(e),
+        }
+        let byte = buf[0];
+        if byte != IAC {
+            return Ok(GatewayInboundEvent::Data(byte));
+        }
+        // Read the command byte.
+        match reader.read(&mut buf).await {
+            Ok(0) => return Ok(GatewayInboundEvent::Eof),
+            Ok(_) => {}
+            Err(e) => return Err(e),
+        }
+        let cmd = buf[0];
+        match cmd {
+            IAC => return Ok(GatewayInboundEvent::Data(IAC)),
+            SB => {
+                // Read the option code.
+                match reader.read(&mut buf).await {
+                    Ok(0) => return Ok(GatewayInboundEvent::Eof),
+                    Ok(_) => {}
+                    Err(e) => return Err(e),
+                }
+                let opt = buf[0];
+                // Read body until IAC SE, unescaping IAC IAC → single IAC.
+                let mut body: Vec<u8> = Vec::new();
+                let mut in_iac = false;
+                loop {
+                    match reader.read(&mut buf).await {
+                        Ok(0) => return Ok(GatewayInboundEvent::Eof),
+                        Ok(_) => {}
+                        Err(e) => return Err(e),
+                    }
+                    let b = buf[0];
+                    if in_iac {
+                        if b == SE {
+                            break;
+                        } else if b == IAC {
+                            body.push(IAC);
+                            in_iac = false;
+                        } else {
+                            in_iac = false;
+                        }
+                    } else if b == IAC {
+                        in_iac = true;
+                    } else {
+                        body.push(b);
+                    }
+                }
+                if opt == OPT_NAWS && body.len() == 4 {
+                    let w = u16::from_be_bytes([body[0], body[1]]);
+                    let h = u16::from_be_bytes([body[2], body[3]]);
+                    return Ok(GatewayInboundEvent::NawsResize(w, h));
+                }
+                // Non-NAWS subnegotiation: drop and keep reading.
+            }
+            WILL | WONT | DO | DONT => {
+                // Consume the option byte; drop the negotiation.
+                match reader.read(&mut buf).await {
+                    Ok(0) => return Ok(GatewayInboundEvent::Eof),
+                    Ok(_) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            _ => {
+                // 2-byte command (NOP, DM, BRK, IP, AO, AYT, EC, EL, GA)
+                // — already fully consumed.
+            }
+        }
+    }
+}
+
 // ─── SSH Gateway helpers ────────────────────────────────────
 
 /// Filter SSH gateway output for non-ANSI terminals.
@@ -463,6 +560,542 @@ fn filter_gateway_output(input: &[u8], state: &mut u8, is_petscii: bool, out: &m
             }
         }
     }
+}
+
+/// Per-option Q-method state — full RFC 1143 six-state variant.
+///
+/// Each option tracks two independent state machines: one for our side
+/// (what we've declared via WILL/WONT) and one for the peer's side (what
+/// they've declared via WILL/WONT).
+///
+/// The "Opposite" variants handle the race where we change our mind
+/// about an option while a prior request is still in flight.  Example:
+/// we send `WILL TTYPE` (entering WantYes), then before the peer's reply
+/// arrives we decide we no longer want TTYPE, so we send `WONT TTYPE`
+/// — we cannot simply go to WantNo because our WILL is still on the wire
+/// and the peer will eventually respond to it.  Instead we enter
+/// `WantYesOpposite`, meaning "we're still waiting for the WILL reply,
+/// but our current intent is Off."  When the peer finally replies, the
+/// state machine resolves cleanly.
+///
+/// See RFC 1143 §7 for the full transition table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OptState {
+    /// Option is off and no negotiation is in flight.
+    No,
+    /// Option is on.
+    Yes,
+    /// We have asked to enable the option; awaiting peer's reply.
+    WantYes,
+    /// Same as WantYes, but since sending the request we've changed our
+    /// mind and now want the option off.  On the peer's reply we will
+    /// send the opposite verb.
+    WantYesOpposite,
+    /// We have asked to disable the option; awaiting peer's reply.
+    WantNo,
+    /// Same as WantNo, but since sending the request we've changed our
+    /// mind and now want the option on.  On the peer's reply we will
+    /// send the opposite verb.
+    WantNoOpposite,
+}
+
+/// Telnet-client IAC parser + Q-method state machine for the outgoing
+/// gateway.  Handles the remote→local direction: parses IAC, unescapes
+/// `IAC IAC` to a single data byte, consumes 2-byte commands, and
+/// performs option negotiation.
+///
+/// Negotiation policy:
+///
+/// - **ECHO** (RFC 857) — always cooperative: peer's `WILL ECHO` is
+///   accepted with `DO ECHO`.  Raw-TCP services never send WILL ECHO so
+///   this is always safe.
+/// - **TTYPE** (RFC 1091) and **NAWS** (RFC 1073) — cooperative only
+///   when `cooperate == true`.  Gated because cooperation implies
+///   proactive `WILL TTYPE` / `WILL NAWS` at connect, which raw-TCP
+///   services would see as garbage.
+/// - **Everything else** — refused: `WILL → DONT`, `DO → WONT`.
+///
+/// The parser never initiates a TTYPE/NAWS request from the peer side;
+/// we don't care about the server's own terminal type or window size.
+struct GatewayTelnetIac {
+    state: GatewayIacState,
+    /// Cooperate on TTYPE / NAWS (from the config toggle).
+    cooperate: bool,
+    /// Terminal name reported in `SB TTYPE IS`.  Chosen to match the
+    /// local user's detected terminal type.
+    terminal_name: String,
+    /// Width to report in `SB NAWS`.
+    window_cols: u16,
+    /// Height to report in `SB NAWS`.
+    window_rows: u16,
+    /// Per-option state: what we've said about our own side.
+    us_state: Box<[OptState; 256]>,
+    /// Per-option state: what the peer has said about their side.
+    him_state: Box<[OptState; 256]>,
+    /// Whether we've already sent a `DONT <opt>` refusal for this option.
+    /// Cleared when the peer finally sends `WONT <opt>` to ack the refusal.
+    /// Prevents a chattery peer from getting repeated DONTs for the same
+    /// unwanted WILL.
+    sent_dont: Box<[bool; 256]>,
+    /// Whether we've already sent a `WONT <opt>` refusal.  Cleared when the
+    /// peer sends `DONT <opt>` to ack.
+    sent_wont: Box<[bool; 256]>,
+    /// Subnegotiation buffer.  `sb_option` is set when we enter the SB
+    /// body (just after `IAC SB <opt>`); `sb_body` accumulates bytes
+    /// with `IAC IAC` already unescaped to single 0xFF.
+    sb_option: u8,
+    sb_body: Vec<u8>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum GatewayIacState {
+    /// Either a plain data byte or the start of a new IAC sequence.
+    Normal,
+    /// Previous byte was IAC; waiting for the command byte.
+    SawIac,
+    /// Previous bytes were IAC + WILL/WONT/DO/DONT; waiting for the option.
+    SawVerb(u8),
+    /// Just saw `IAC SB`; the next byte is the option code.
+    SawSbOption,
+    /// Inside an SB subnegotiation body; scanning for IAC SE.
+    InSb,
+    /// Inside an SB body, just saw an IAC; next byte decides whether it was
+    /// IAC SE (end of SB) or IAC IAC (escaped data byte, stay in SB).
+    InSbIac,
+}
+
+impl GatewayTelnetIac {
+    /// Build a fresh parser.  Returns `(parser, initial_offers)` — any
+    /// bytes that must be written to the remote before we start reading,
+    /// to advertise our cooperative options.  Empty when `cooperate` is
+    /// off (reactive-only mode).
+    fn new(
+        cooperate: bool,
+        terminal_name: String,
+        window_cols: u16,
+        window_rows: u16,
+    ) -> (Self, Vec<u8>) {
+        let mut parser = Self {
+            state: GatewayIacState::Normal,
+            cooperate,
+            terminal_name,
+            window_cols,
+            window_rows,
+            us_state: Box::new([OptState::No; 256]),
+            him_state: Box::new([OptState::No; 256]),
+            sent_dont: Box::new([false; 256]),
+            sent_wont: Box::new([false; 256]),
+            sb_option: 0,
+            sb_body: Vec::new(),
+        };
+        let mut initial = Vec::new();
+        if cooperate {
+            // Proactively offer WILL TTYPE and WILL NAWS; proactively
+            // request DO ECHO so we don't need to wait for the peer to
+            // offer echo (some BBSes wait for the client to ask first).
+            // Set the matching WantYes states so peer acks are recognised.
+            parser.us_state[OPT_TTYPE as usize] = OptState::WantYes;
+            parser.us_state[OPT_NAWS as usize] = OptState::WantYes;
+            parser.him_state[OPT_ECHO as usize] = OptState::WantYes;
+            initial.extend_from_slice(&[IAC, WILL, OPT_TTYPE]);
+            initial.extend_from_slice(&[IAC, WILL, OPT_NAWS]);
+            initial.extend_from_slice(&[IAC, DO, OPT_ECHO]);
+        }
+        (parser, initial)
+    }
+
+    /// True if we should answer the peer's `WILL <opt>` with `DO <opt>`.
+    fn cooperate_with_his_will(&self, opt: u8) -> bool {
+        // ECHO from the server is always welcome — it means "I'll echo
+        // your input," which for a retro user is what makes typing
+        // visible.  Everything else (WILL TTYPE / WILL NAWS from the
+        // server is unusual) we decline.
+        opt == OPT_ECHO
+    }
+
+    /// True if we should answer the peer's `DO <opt>` with `WILL <opt>`.
+    fn cooperate_with_his_do(&self, opt: u8) -> bool {
+        self.cooperate && (opt == OPT_TTYPE || opt == OPT_NAWS)
+    }
+
+    fn feed(&mut self, byte: u8, data: &mut Vec<u8>, replies: &mut Vec<u8>) {
+        match self.state {
+            GatewayIacState::Normal => {
+                if byte == IAC {
+                    self.state = GatewayIacState::SawIac;
+                } else {
+                    data.push(byte);
+                }
+            }
+            GatewayIacState::SawIac => {
+                match byte {
+                    IAC => {
+                        data.push(IAC);
+                        self.state = GatewayIacState::Normal;
+                    }
+                    SB => {
+                        self.state = GatewayIacState::SawSbOption;
+                    }
+                    WILL | WONT | DO | DONT => {
+                        self.state = GatewayIacState::SawVerb(byte);
+                    }
+                    _ => {
+                        // 2-byte command (NOP, DM, BRK, IP, AO, AYT, EC,
+                        // EL, GA, SE-out-of-context) — consumed.
+                        self.state = GatewayIacState::Normal;
+                    }
+                }
+            }
+            GatewayIacState::SawVerb(verb) => {
+                let opt = byte;
+                match verb {
+                    WILL => self.handle_recv_will(opt, replies),
+                    WONT => self.handle_recv_wont(opt, replies),
+                    DO => self.handle_recv_do(opt, replies),
+                    DONT => self.handle_recv_dont(opt, replies),
+                    _ => {}
+                }
+                self.state = GatewayIacState::Normal;
+            }
+            GatewayIacState::SawSbOption => {
+                self.sb_option = byte;
+                self.sb_body.clear();
+                self.state = GatewayIacState::InSb;
+            }
+            GatewayIacState::InSb => {
+                if byte == IAC {
+                    self.state = GatewayIacState::InSbIac;
+                } else {
+                    self.sb_body.push(byte);
+                }
+            }
+            GatewayIacState::InSbIac => {
+                match byte {
+                    SE => {
+                        self.process_subneg(replies);
+                        self.state = GatewayIacState::Normal;
+                    }
+                    IAC => {
+                        // Escaped IAC inside SB — keep as single 0xFF.
+                        self.sb_body.push(IAC);
+                        self.state = GatewayIacState::InSb;
+                    }
+                    _ => {
+                        // Malformed; resume scanning for IAC SE.
+                        self.state = GatewayIacState::InSb;
+                    }
+                }
+            }
+        }
+    }
+
+    // ─── Q-method handlers (his side) ─────────────────────
+
+    fn handle_recv_will(&mut self, opt: u8, replies: &mut Vec<u8>) {
+        let idx = opt as usize;
+        match self.him_state[idx] {
+            OptState::No => {
+                if self.cooperate_with_his_will(opt) {
+                    self.him_state[idx] = OptState::Yes;
+                    self.sent_dont[idx] = false; // contradicts any prior refusal
+                    replies.extend_from_slice(&[IAC, DO, opt]);
+                } else if !self.sent_dont[idx] {
+                    // Refuse, but only once per cycle.  Q-method keeps
+                    // him at No because we do not want it on.
+                    self.sent_dont[idx] = true;
+                    replies.extend_from_slice(&[IAC, DONT, opt]);
+                }
+            }
+            OptState::Yes => {
+                // Already on — spec says ignore.
+            }
+            OptState::WantYes => {
+                // Peer acks our DO.
+                self.him_state[idx] = OptState::Yes;
+            }
+            OptState::WantYesOpposite => {
+                // Peer acked our original DO, but we've since changed to
+                // wanting No; send DONT and enter WantNo.
+                self.him_state[idx] = OptState::WantNo;
+                replies.extend_from_slice(&[IAC, DONT, opt]);
+            }
+            OptState::WantNo => {
+                // Error: peer sent WILL in response to our DONT.  Log
+                // by dropping back to No and, if we haven't already,
+                // refuse again.
+                self.him_state[idx] = OptState::No;
+                if !self.sent_dont[idx] {
+                    self.sent_dont[idx] = true;
+                    replies.extend_from_slice(&[IAC, DONT, opt]);
+                }
+            }
+            OptState::WantNoOpposite => {
+                // Error but harmless: we wanted Yes again anyway.
+                self.him_state[idx] = OptState::Yes;
+            }
+        }
+    }
+
+    fn handle_recv_wont(&mut self, opt: u8, replies: &mut Vec<u8>) {
+        let idx = opt as usize;
+        // Peer is acking our refusal or withdrawing — reset refusal-sent
+        // so a future fresh cycle can issue a DONT again.
+        self.sent_dont[idx] = false;
+        match self.him_state[idx] {
+            OptState::No => {
+                // Already off — ignore.
+            }
+            OptState::Yes => {
+                self.him_state[idx] = OptState::No;
+                replies.extend_from_slice(&[IAC, DONT, opt]);
+            }
+            OptState::WantNo => {
+                self.him_state[idx] = OptState::No;
+            }
+            OptState::WantNoOpposite => {
+                // Peer confirmed our DONT, but we changed to WantYes;
+                // send a fresh DO.
+                self.him_state[idx] = OptState::WantYes;
+                self.sent_dont[idx] = false;
+                replies.extend_from_slice(&[IAC, DO, opt]);
+            }
+            OptState::WantYes => {
+                // Peer refused our DO.
+                self.him_state[idx] = OptState::No;
+            }
+            OptState::WantYesOpposite => {
+                // Peer refused our DO, but we already swung back to No,
+                // so we're exactly where we wanted.
+                self.him_state[idx] = OptState::No;
+            }
+        }
+    }
+
+    fn handle_recv_do(&mut self, opt: u8, replies: &mut Vec<u8>) {
+        let idx = opt as usize;
+        match self.us_state[idx] {
+            OptState::No => {
+                if self.cooperate_with_his_do(opt) {
+                    self.us_state[idx] = OptState::Yes;
+                    self.sent_wont[idx] = false; // contradicts any prior refusal
+                    replies.extend_from_slice(&[IAC, WILL, opt]);
+                    if opt == OPT_NAWS {
+                        self.emit_naws_sb(replies);
+                    }
+                } else if !self.sent_wont[idx] {
+                    self.sent_wont[idx] = true;
+                    replies.extend_from_slice(&[IAC, WONT, opt]);
+                }
+            }
+            OptState::Yes => {
+                // Already on — ignore.
+            }
+            OptState::WantYes => {
+                self.us_state[idx] = OptState::Yes;
+                if opt == OPT_NAWS {
+                    self.emit_naws_sb(replies);
+                }
+            }
+            OptState::WantYesOpposite => {
+                // Peer acked our WILL but we want No; send WONT.
+                self.us_state[idx] = OptState::WantNo;
+                replies.extend_from_slice(&[IAC, WONT, opt]);
+            }
+            OptState::WantNo => {
+                // Error: peer DO after our WONT.  Bounce to No.
+                self.us_state[idx] = OptState::No;
+                if !self.sent_wont[idx] {
+                    self.sent_wont[idx] = true;
+                    replies.extend_from_slice(&[IAC, WONT, opt]);
+                }
+            }
+            OptState::WantNoOpposite => {
+                // Error but harmless — we wanted Yes.
+                self.us_state[idx] = OptState::Yes;
+                if opt == OPT_NAWS {
+                    self.emit_naws_sb(replies);
+                }
+            }
+        }
+    }
+
+    fn handle_recv_dont(&mut self, opt: u8, replies: &mut Vec<u8>) {
+        let idx = opt as usize;
+        self.sent_wont[idx] = false;
+        match self.us_state[idx] {
+            OptState::No => {
+                // Already off.
+            }
+            OptState::Yes => {
+                self.us_state[idx] = OptState::No;
+                replies.extend_from_slice(&[IAC, WONT, opt]);
+            }
+            OptState::WantNo => {
+                self.us_state[idx] = OptState::No;
+            }
+            OptState::WantNoOpposite => {
+                // Peer confirmed DONT, but we changed to WantYes — send WILL.
+                self.us_state[idx] = OptState::WantYes;
+                self.sent_wont[idx] = false;
+                replies.extend_from_slice(&[IAC, WILL, opt]);
+            }
+            OptState::WantYes => {
+                // Peer refused our WILL.
+                self.us_state[idx] = OptState::No;
+            }
+            OptState::WantYesOpposite => {
+                // Peer refused our WILL, and we already swung back to No —
+                // exactly where we wanted.
+                self.us_state[idx] = OptState::No;
+            }
+        }
+    }
+
+    // ─── Active-change helpers (for mind-changes mid-flight) ──
+
+    /// Ask for our side of `opt` to be enabled (send `WILL`).  Advances
+    /// the Q-method state for `us_state[opt]` per RFC 1143 §7.
+    ///
+    /// Currently unused by `gateway_telnet` — we only enter `WantYes` via
+    /// the proactive offers in `new()` — but kept for symmetry and so
+    /// future active-change flows compile cleanly.
+    #[allow(dead_code)]
+    fn request_local_enable(&mut self, opt: u8, replies: &mut Vec<u8>) {
+        let idx = opt as usize;
+        match self.us_state[idx] {
+            OptState::No => {
+                self.us_state[idx] = OptState::WantYes;
+                self.sent_wont[idx] = false; // contradicts any prior refusal
+                replies.extend_from_slice(&[IAC, WILL, opt]);
+            }
+            OptState::Yes => {} // already on
+            OptState::WantNo => {
+                // Changed mind mid-flight.
+                self.us_state[idx] = OptState::WantNoOpposite;
+            }
+            OptState::WantNoOpposite => {} // already queued to enable
+            OptState::WantYes => {}
+            OptState::WantYesOpposite => {
+                // Reverting to original intent.
+                self.us_state[idx] = OptState::WantYes;
+            }
+        }
+    }
+
+    /// Ask for our side of `opt` to be disabled (send `WONT`).
+    #[allow(dead_code)]
+    fn request_local_disable(&mut self, opt: u8, replies: &mut Vec<u8>) {
+        let idx = opt as usize;
+        match self.us_state[idx] {
+            OptState::Yes => {
+                self.us_state[idx] = OptState::WantNo;
+                replies.extend_from_slice(&[IAC, WONT, opt]);
+            }
+            OptState::No => {} // already off
+            OptState::WantYes => {
+                self.us_state[idx] = OptState::WantYesOpposite;
+            }
+            OptState::WantYesOpposite => {}
+            OptState::WantNo => {}
+            OptState::WantNoOpposite => {
+                self.us_state[idx] = OptState::WantNo;
+            }
+        }
+    }
+
+    // ─── Subnegotiation ───────────────────────────────────
+
+    fn process_subneg(&mut self, replies: &mut Vec<u8>) {
+        if self.sb_option == OPT_TTYPE
+            && self.us_state[OPT_TTYPE as usize] == OptState::Yes
+            && self.sb_body.first().copied() == Some(TTYPE_SEND)
+        {
+            // Respond with our terminal name.  Any 0xFF in the name
+            // (shouldn't happen for our controlled values) would need
+            // IAC-doubling; we check explicitly.
+            let mut body = vec![IAC, SB, OPT_TTYPE, TTYPE_IS];
+            for &b in self.terminal_name.as_bytes() {
+                if b == IAC {
+                    body.push(IAC);
+                }
+                body.push(b);
+            }
+            body.extend_from_slice(&[IAC, SE]);
+            replies.extend_from_slice(&body);
+        }
+        // All other SB bodies are informational only — we silently drop.
+    }
+
+    /// Record an updated window size from the local user and, if NAWS is
+    /// currently enabled on our side, emit an `IAC SB NAWS <w><h> IAC SE`
+    /// update to the remote.  Called from the gateway loop when the user
+    /// resizes their terminal mid-session.
+    fn send_naws_update(&mut self, cols: u16, rows: u16, replies: &mut Vec<u8>) {
+        self.window_cols = cols;
+        self.window_rows = rows;
+        if self.us_state[OPT_NAWS as usize] == OptState::Yes {
+            self.emit_naws_sb(replies);
+        }
+    }
+
+    fn emit_naws_sb(&self, replies: &mut Vec<u8>) {
+        // `IAC SB NAWS <w16_BE> <h16_BE> IAC SE`, with any byte equal to
+        // IAC doubled per RFC 854.
+        let w = self.window_cols.to_be_bytes();
+        let h = self.window_rows.to_be_bytes();
+        let size_bytes = [w[0], w[1], h[0], h[1]];
+        let mut body = vec![IAC, SB, OPT_NAWS];
+        for &b in &size_bytes {
+            if b == IAC {
+                body.push(IAC);
+            }
+            body.push(b);
+        }
+        body.extend_from_slice(&[IAC, SE]);
+        replies.extend_from_slice(&body);
+    }
+}
+
+/// Default terminal name reported via `SB TTYPE IS`.  Chosen to be
+/// informative to modern BBSes and still truthful.
+fn gateway_terminal_name(tt: TerminalType) -> &'static str {
+    match tt {
+        TerminalType::Petscii => "PETSCII",
+        TerminalType::Ansi => "ANSI",
+        TerminalType::Ascii => "DUMB",
+    }
+}
+
+/// Default window dimensions to report via `SB NAWS` when the local
+/// client hasn't supplied any via its own NAWS.
+fn gateway_default_window(tt: TerminalType) -> (u16, u16) {
+    match tt {
+        TerminalType::Petscii => (PETSCII_WIDTH as u16, 25),
+        TerminalType::Ansi | TerminalType::Ascii => (80, 24),
+    }
+}
+
+/// Write `bytes` to `w`, doubling any 0xFF as IAC IAC per RFC 854.  Used
+/// by the outgoing telnet gateway in both directions so that literal 0xFF
+/// data bytes survive the wire without being mistaken for IAC.
+async fn write_telnet_data<W>(w: &mut W, bytes: &[u8]) -> std::io::Result<()>
+where
+    W: AsyncWriteExt + Unpin + ?Sized,
+{
+    let mut last = 0;
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == IAC {
+            if last < i {
+                w.write_all(&bytes[last..i]).await?;
+            }
+            w.write_all(&[IAC, IAC]).await?;
+            last = i + 1;
+        }
+    }
+    if last < bytes.len() {
+        w.write_all(&bytes[last..]).await?;
+    }
+    Ok(())
 }
 
 /// Normalize a client input byte for SSH gateway forwarding.
@@ -3565,6 +4198,54 @@ impl TelnetSession {
         .await?;
         self.send_line("").await?;
 
+        // Protocol-mode prompt: let the user toggle the raw-TCP escape
+        // hatch before dialing.  Any change is persisted to xmodem.conf.
+        let is_petscii = self.terminal_type == TerminalType::Petscii;
+        loop {
+            let cfg_now = config::get_config();
+            let mode_label = if cfg_now.telnet_gateway_raw {
+                self.red("Raw TCP (no IAC parsing)")
+            } else {
+                self.green("Telnet protocol")
+            };
+            self.send_line(&format!("  Mode: {}", mode_label)).await?;
+            self.send(&format!(
+                "  Press {} to toggle mode, any other key to continue: ",
+                self.cyan("T"),
+            ))
+            .await?;
+            self.flush().await?;
+            let b = match self.read_byte_filtered().await? {
+                Some(b) => b,
+                None => return Ok(()),
+            };
+            self.send_line("").await?;
+            if is_esc_key(b, is_petscii) {
+                return Ok(());
+            }
+            let ch = if is_petscii { petscii_to_ascii_byte(b) } else { b };
+            if ch == b't' || ch == b'T' {
+                let new_raw = !cfg_now.telnet_gateway_raw;
+                config::update_config_values(&[(
+                    "telnet_gateway_raw",
+                    if new_raw { "true" } else { "false" },
+                )]);
+                self.send_line(&format!(
+                    "  Mode set to {}.",
+                    if new_raw {
+                        self.red("Raw TCP")
+                    } else {
+                        self.green("Telnet protocol")
+                    },
+                ))
+                .await?;
+                self.send_line("").await?;
+                continue;
+            }
+            self.send_line("").await?;
+            break;
+        }
+
         // Gather host and port
         let get_host_port = async {
             self.send(&format!("  {} ", self.cyan("Host:")))
@@ -3674,45 +4355,116 @@ impl TelnetSession {
         let mut last_was_esc = false;
         let esc_byte: u8 = if is_petscii { 0x5F } else { 0x1B };
 
+        // Telnet-client IAC state machine + option negotiator.  Whether
+        // we offer TTYPE / NAWS proactively at connect is gated by the
+        // `telnet_gateway_negotiate` config flag.  ECHO cooperation is
+        // always on.  In raw mode (`telnet_gateway_raw = true`) the
+        // parser is still constructed but its initial offers and
+        // negotiation paths are bypassed — see the `raw` checks below.
+        let raw = cfg.telnet_gateway_raw;
+        let terminal_name = gateway_terminal_name(self.terminal_type).to_string();
+        let (cols_default, rows_default) = gateway_default_window(self.terminal_type);
+        let cols = self.window_width.unwrap_or(cols_default);
+        let rows = self.window_height.unwrap_or(rows_default);
+        let (mut iac, initial_offers) = GatewayTelnetIac::new(
+            !raw && cfg.telnet_gateway_negotiate,
+            terminal_name,
+            cols,
+            rows,
+        );
+        if !raw && !initial_offers.is_empty() {
+            if remote_writer.write_all(&initial_offers).await.is_err() {
+                let _ = remote_writer.shutdown().await;
+                return Ok(());
+            }
+            let _ = remote_writer.flush().await;
+        }
+        let mut data_from_remote: Vec<u8> = Vec::with_capacity(4096);
+        let mut replies_to_remote: Vec<u8> = Vec::new();
+
         loop {
             tokio::select! {
-                byte = read_byte_iac_filtered(reader, true) => {
-                    match byte {
-                        Ok(Some(b)) if is_esc_key(b, is_petscii) => {
+                event = read_gateway_event(reader) => {
+                    match event {
+                        Ok(GatewayInboundEvent::Data(b)) if is_esc_key(b, is_petscii) => {
                             if last_was_esc {
                                 break; // Two consecutive ESC presses — disconnect
                             }
                             last_was_esc = true;
                         }
-                        Ok(Some(b)) => {
+                        Ok(GatewayInboundEvent::Data(b)) => {
                             // Forward the previously held ESC before this byte
                             if last_was_esc {
                                 last_was_esc = false;
                                 let e = if is_petscii { petscii_to_ascii_byte(esc_byte) } else { esc_byte };
-                                if remote_writer.write_all(&[e]).await.is_err() { break; }
+                                let write_ok = if raw {
+                                    remote_writer.write_all(&[e]).await.is_ok()
+                                } else {
+                                    write_telnet_data(&mut remote_writer, &[e]).await.is_ok()
+                                };
+                                if !write_ok { break; }
                             }
                             let b = if is_petscii { petscii_to_ascii_byte(b) } else { b };
                             let b = if b == erase_char && erase_char != 0x7F { 0x7F } else { b };
-                            if remote_writer.write_all(&[b]).await.is_err() { break; }
+                            let write_ok = if raw {
+                                remote_writer.write_all(&[b]).await.is_ok()
+                            } else {
+                                write_telnet_data(&mut remote_writer, &[b]).await.is_ok()
+                            };
+                            if !write_ok { break; }
                             if remote_writer.flush().await.is_err() { break; }
                         }
-                        _ => break,
+                        Ok(GatewayInboundEvent::NawsResize(cols, rows)) => {
+                            if !raw {
+                                let mut naws_update = Vec::new();
+                                iac.send_naws_update(cols, rows, &mut naws_update);
+                                if !naws_update.is_empty() {
+                                    if remote_writer.write_all(&naws_update).await.is_err() { break; }
+                                    if remote_writer.flush().await.is_err() { break; }
+                                }
+                            }
+                            // In raw mode we swallow the resize — the
+                            // destination isn't speaking telnet so there's
+                            // nowhere to forward it to.
+                        }
+                        Ok(GatewayInboundEvent::Eof) => break,
+                        Err(_) => break,
                     }
                 }
                 n = remote_reader.read(&mut remote_buf) => {
                     match n {
                         Ok(0) => break,
                         Ok(n) => {
-                            let data = if is_petscii || is_ascii {
+                            let raw_slice: &[u8];
+                            if raw {
+                                // No IAC parsing — bytes are user data straight through.
+                                raw_slice = &remote_buf[..n];
+                            } else {
+                                data_from_remote.clear();
+                                replies_to_remote.clear();
+                                for &b in &remote_buf[..n] {
+                                    iac.feed(b, &mut data_from_remote, &mut replies_to_remote);
+                                }
+                                if !replies_to_remote.is_empty() {
+                                    if remote_writer.write_all(&replies_to_remote).await.is_err() { break; }
+                                    if remote_writer.flush().await.is_err() { break; }
+                                }
+                                raw_slice = &data_from_remote[..];
+                            }
+                            let data: &[u8] = if is_petscii || is_ascii {
                                 filter_buf.clear();
-                                filter_gateway_output(&remote_buf[..n], &mut ansi_state, is_petscii, &mut filter_buf);
+                                filter_gateway_output(raw_slice, &mut ansi_state, is_petscii, &mut filter_buf);
                                 &filter_buf[..]
                             } else {
-                                &remote_buf[..n]
+                                raw_slice
                             };
                             if !data.is_empty() {
                                 let mut w = writer.lock().await;
-                                if w.write_all(data).await.is_err() { break; }
+                                // Always IAC-escape when writing to the
+                                // local user — their client is a real
+                                // telnet peer and a literal 0xFF would
+                                // be misinterpreted as IAC.
+                                if write_telnet_data(&mut **w, data).await.is_err() { break; }
                                 if w.flush().await.is_err() { break; }
                             }
                         }
@@ -10083,6 +10835,801 @@ mod tests {
             "expected IAC DONT STATUS, got {:?}",
             out
         );
+    }
+
+    // ─── Gateway telnet-client IAC parser ─────────────────
+
+    fn feed_all(iac: &mut GatewayTelnetIac, input: &[u8]) -> (Vec<u8>, Vec<u8>) {
+        let mut data = Vec::new();
+        let mut replies = Vec::new();
+        for &b in input {
+            iac.feed(b, &mut data, &mut replies);
+        }
+        (data, replies)
+    }
+
+    /// Build a reactive-refuse (cooperate=false) parser for tests that
+    /// exercise the legacy strict-refuser behavior.
+    fn reactive_iac() -> GatewayTelnetIac {
+        let (parser, _) = GatewayTelnetIac::new(false, "ANSI".into(), 80, 24);
+        parser
+    }
+
+    /// Build a cooperative parser (cooperate=true) and return the initial
+    /// offer bytes along with the parser.
+    fn cooperative_iac() -> (GatewayTelnetIac, Vec<u8>) {
+        GatewayTelnetIac::new(true, "ANSI".into(), 80, 24)
+    }
+
+    #[test]
+    fn test_gateway_iac_plain_data_passes_through() {
+        let mut iac = reactive_iac();
+        let (data, replies) = feed_all(&mut iac, b"Hello, world!");
+        assert_eq!(data, b"Hello, world!");
+        assert!(replies.is_empty());
+    }
+
+    #[test]
+    fn test_gateway_iac_iac_unescapes_to_data_ff() {
+        let mut iac = reactive_iac();
+        let (data, replies) = feed_all(&mut iac, &[b'A', IAC, IAC, b'B']);
+        assert_eq!(data, vec![b'A', 0xFF, b'B']);
+        assert!(replies.is_empty());
+    }
+
+    #[test]
+    fn test_gateway_iac_two_byte_commands_consumed() {
+        let mut iac = reactive_iac();
+        // AYT (0xF6), NOP (0xF1), GA (0xF9): all consumed, none leak.
+        let (data, replies) = feed_all(
+            &mut iac,
+            &[b'X', IAC, 0xF6, b'Y', IAC, 0xF1, b'Z', IAC, 0xF9, b'W'],
+        );
+        assert_eq!(data, b"XYZW");
+        assert!(replies.is_empty());
+    }
+
+    #[test]
+    fn test_gateway_iac_will_echo_gets_do_reply() {
+        // ECHO cooperation is always on — peer's WILL ECHO is accepted
+        // with DO ECHO so the remote echoes the user's keystrokes.
+        let mut iac = reactive_iac();
+        let (data, replies) = feed_all(&mut iac, &[IAC, WILL, OPT_ECHO, b'A']);
+        assert_eq!(data, b"A");
+        assert_eq!(replies, vec![IAC, DO, OPT_ECHO]);
+    }
+
+    #[test]
+    fn test_gateway_iac_will_unsupported_gets_dont_reply() {
+        // Unsupported options still get refused.
+        let mut iac = reactive_iac();
+        let (data, replies) = feed_all(&mut iac, &[IAC, WILL, 0x00, b'A']); // BINARY
+        assert_eq!(data, b"A");
+        assert_eq!(replies, vec![IAC, DONT, 0x00]);
+    }
+
+    #[test]
+    fn test_gateway_iac_do_gets_wont_reply() {
+        let mut iac = reactive_iac();
+        let (data, replies) = feed_all(&mut iac, &[IAC, DO, OPT_NAWS, b'B']);
+        assert_eq!(data, b"B");
+        assert_eq!(replies, vec![IAC, WONT, OPT_NAWS]);
+    }
+
+    #[test]
+    fn test_gateway_iac_wont_and_dont_need_no_reply() {
+        let mut iac = reactive_iac();
+        let (data, replies) = feed_all(
+            &mut iac,
+            &[IAC, WONT, OPT_ECHO, IAC, DONT, OPT_NAWS, b'C'],
+        );
+        assert_eq!(data, b"C");
+        assert!(replies.is_empty());
+    }
+
+    #[test]
+    fn test_gateway_iac_duplicate_refusal_not_repeated() {
+        let mut iac = reactive_iac();
+        // First WILL triggers DONT; second WILL for the same opt is silent.
+        let (_, r1) = feed_all(&mut iac, &[IAC, WILL, OPT_SGA]);
+        let (_, r2) = feed_all(&mut iac, &[IAC, WILL, OPT_SGA]);
+        assert_eq!(r1, vec![IAC, DONT, OPT_SGA]);
+        assert!(r2.is_empty());
+    }
+
+    #[test]
+    fn test_gateway_iac_sb_body_consumed_with_iac_iac_inside() {
+        let mut iac = reactive_iac();
+        // SB TTYPE IS "v" 0xFF 0xFF "t" IAC SE — the escaped IAC inside
+        // must not prematurely end the subnegotiation.
+        let (data, replies) = feed_all(
+            &mut iac,
+            &[
+                b'A',
+                IAC, SB, OPT_TTYPE, 0x00, b'v', IAC, IAC, b't', IAC, SE,
+                b'B',
+            ],
+        );
+        assert_eq!(data, b"AB");
+        assert!(replies.is_empty());
+    }
+
+    #[test]
+    fn test_gateway_iac_malformed_sb_resyncs_on_iac_se() {
+        let mut iac = reactive_iac();
+        // IAC inside SB followed by an unexpected byte (not SE, not IAC).
+        // Parser must keep scanning for IAC SE.
+        let (data, _) = feed_all(
+            &mut iac,
+            &[
+                IAC, SB, OPT_NAWS, 0x00, IAC, 0xEE, 0x00, IAC, SE,
+                b'Q',
+            ],
+        );
+        assert_eq!(data, b"Q");
+    }
+
+    #[test]
+    fn test_gateway_iac_split_across_feeds() {
+        // Parser must survive IAC sequences split across multiple calls —
+        // simulating fragmented TCP reads.  WILL ECHO now triggers the
+        // cooperative DO ECHO reply.
+        let mut iac = reactive_iac();
+        let mut data = Vec::new();
+        let mut replies = Vec::new();
+        iac.feed(IAC, &mut data, &mut replies);
+        assert!(data.is_empty() && replies.is_empty());
+        iac.feed(WILL, &mut data, &mut replies);
+        assert!(data.is_empty() && replies.is_empty());
+        iac.feed(OPT_ECHO, &mut data, &mut replies);
+        assert!(data.is_empty());
+        assert_eq!(replies, vec![IAC, DO, OPT_ECHO]);
+        iac.feed(b'R', &mut data, &mut replies);
+        assert_eq!(data, vec![b'R']);
+    }
+
+    // ─── Cooperative-mode gateway parser ──────────────────
+
+    #[test]
+    fn test_gateway_cooperative_initial_offers() {
+        // Cooperate mode advertises WILL TTYPE, WILL NAWS, and requests
+        // DO ECHO at connect so the remote echoes the user's keystrokes.
+        let (_, initial) = cooperative_iac();
+        assert_eq!(
+            initial,
+            vec![
+                IAC, WILL, OPT_TTYPE,
+                IAC, WILL, OPT_NAWS,
+                IAC, DO, OPT_ECHO,
+            ],
+        );
+    }
+
+    #[test]
+    fn test_gateway_cooperative_will_echo_is_ack() {
+        // After proactively sending DO ECHO, peer's WILL ECHO is an ack
+        // (him_state WantYes → Yes) with no extra reply.
+        let (mut iac, _) = cooperative_iac();
+        let (data, replies) = feed_all(&mut iac, &[IAC, WILL, OPT_ECHO, b'A']);
+        assert_eq!(data, b"A");
+        assert!(
+            replies.is_empty(),
+            "WILL ECHO after our DO ECHO should be a silent ack, got {:?}",
+            replies
+        );
+    }
+
+    #[test]
+    fn test_gateway_reactive_no_initial_offers() {
+        // Reactive mode (cooperate=false) sends nothing at connect.
+        let (_, initial) = GatewayTelnetIac::new(false, "ANSI".into(), 80, 24);
+        assert!(initial.is_empty());
+    }
+
+    #[test]
+    fn test_gateway_cooperative_do_ttype_is_ack() {
+        // After sending WILL TTYPE proactively, peer's DO TTYPE is an ack
+        // — us_state transitions to Yes, no extra reply.
+        let (mut iac, _) = cooperative_iac();
+        let (data, replies) = feed_all(&mut iac, &[IAC, DO, OPT_TTYPE, b'A']);
+        assert_eq!(data, b"A");
+        assert!(
+            replies.is_empty(),
+            "DO TTYPE after WILL TTYPE should be a silent ack, got {:?}",
+            replies
+        );
+    }
+
+    #[test]
+    fn test_gateway_cooperative_sb_ttype_send_returns_is() {
+        // After DO TTYPE acks our WILL, peer sends SB TTYPE SEND; we
+        // respond with SB TTYPE IS <name>.
+        let (mut iac, _) = cooperative_iac();
+        let (_, _) = feed_all(&mut iac, &[IAC, DO, OPT_TTYPE]);
+        let (data, replies) = feed_all(
+            &mut iac,
+            &[IAC, SB, OPT_TTYPE, TTYPE_SEND, IAC, SE, b'Z'],
+        );
+        assert_eq!(data, b"Z");
+        let expected = [
+            IAC, SB, OPT_TTYPE, TTYPE_IS,
+            b'A', b'N', b'S', b'I',
+            IAC, SE,
+        ];
+        assert_eq!(replies, expected);
+    }
+
+    #[test]
+    fn test_gateway_reactive_do_ttype_refused() {
+        // Without cooperation the same DO TTYPE is refused with WONT.
+        let mut iac = reactive_iac();
+        let (_, replies) = feed_all(&mut iac, &[IAC, DO, OPT_TTYPE]);
+        assert_eq!(replies, vec![IAC, WONT, OPT_TTYPE]);
+    }
+
+    #[test]
+    fn test_gateway_cooperative_do_naws_emits_sb() {
+        // DO NAWS (whether ack or unprovoked) triggers an immediate SB
+        // NAWS with our configured dimensions.
+        let (mut iac, _) = cooperative_iac();
+        let (_, replies) = feed_all(&mut iac, &[IAC, DO, OPT_NAWS]);
+        // For cooperative_iac we passed 80x24.
+        let expected_sb = [
+            IAC, SB, OPT_NAWS,
+            0x00, 0x50,  // 80
+            0x00, 0x18,  // 24
+            IAC, SE,
+        ];
+        assert!(
+            replies.windows(expected_sb.len()).any(|w| w == expected_sb),
+            "expected SB NAWS 80x24 in replies, got {:?}",
+            replies
+        );
+    }
+
+    #[test]
+    fn test_gateway_cooperative_dont_ttype_withdraws() {
+        // Peer refusing our proactive WILL TTYPE drops us_state to No.
+        let (mut iac, _) = cooperative_iac();
+        let (_, replies) = feed_all(&mut iac, &[IAC, DONT, OPT_TTYPE]);
+        // No reply — peer's refusal closes our WantYes cleanly.
+        assert!(replies.is_empty());
+        // Subsequent SB TTYPE SEND should be ignored (us_state=No).
+        let (_, replies2) = feed_all(
+            &mut iac,
+            &[IAC, SB, OPT_TTYPE, TTYPE_SEND, IAC, SE],
+        );
+        assert!(
+            replies2.is_empty(),
+            "SB TTYPE SEND after DONT should be ignored"
+        );
+    }
+
+    #[test]
+    fn test_gateway_cooperative_naws_sent_with_local_dimensions() {
+        // Feed custom dimensions and verify SB NAWS reflects them.
+        let (mut iac, _) = GatewayTelnetIac::new(true, "PETSCII".into(), 40, 25);
+        let (_, replies) = feed_all(&mut iac, &[IAC, DO, OPT_NAWS]);
+        let expected = [
+            IAC, SB, OPT_NAWS,
+            0x00, 0x28,  // 40
+            0x00, 0x19,  // 25
+            IAC, SE,
+        ];
+        assert!(replies.windows(expected.len()).any(|w| w == expected));
+    }
+
+    #[test]
+    fn test_gateway_cooperative_naws_value_ff_is_escaped() {
+        // An 0xFF byte in a NAWS dimension must be IAC-doubled per RFC 854.
+        // 255x255 would contain two 0xFF bytes in the size field.
+        let (mut iac, _) = GatewayTelnetIac::new(true, "ANSI".into(), 0x00FF, 0x00FF);
+        let (_, replies) = feed_all(&mut iac, &[IAC, DO, OPT_NAWS]);
+        let expected = [
+            IAC, SB, OPT_NAWS,
+            0x00, IAC, IAC,  // width high, width low (0xFF escaped)
+            0x00, IAC, IAC,  // height high, height low (0xFF escaped)
+            IAC, SE,
+        ];
+        assert!(
+            replies.windows(expected.len()).any(|w| w == expected),
+            "expected SB NAWS with escaped 0xFFs, got {:?}",
+            replies
+        );
+    }
+
+    #[test]
+    fn test_gateway_refusal_not_repeated_within_cycle() {
+        // Two rapid WILL SGAs get only one DONT; subsequent WONT clears
+        // the refusal-sent flag so a future WILL cycle refreshes.
+        let mut iac = reactive_iac();
+        let (_, r1) = feed_all(&mut iac, &[IAC, WILL, OPT_SGA]);
+        let (_, r2) = feed_all(&mut iac, &[IAC, WILL, OPT_SGA]);
+        assert_eq!(r1, vec![IAC, DONT, OPT_SGA]);
+        assert!(r2.is_empty(), "second WILL should not re-trigger DONT");
+        let (_, _) = feed_all(&mut iac, &[IAC, WONT, OPT_SGA]);
+        let (_, r3) = feed_all(&mut iac, &[IAC, WILL, OPT_SGA]);
+        assert_eq!(
+            r3, vec![IAC, DONT, OPT_SGA],
+            "new refusal cycle should issue fresh DONT after peer's WONT"
+        );
+    }
+
+    #[test]
+    fn test_gateway_qmethod_peer_yes_echo_peer_withdraws() {
+        // Accept WILL ECHO → peer later WONT ECHO → we reply DONT to ack.
+        let mut iac = reactive_iac();
+        let (_, r1) = feed_all(&mut iac, &[IAC, WILL, OPT_ECHO]);
+        assert_eq!(r1, vec![IAC, DO, OPT_ECHO]);
+        let (_, r2) = feed_all(&mut iac, &[IAC, WONT, OPT_ECHO]);
+        assert_eq!(r2, vec![IAC, DONT, OPT_ECHO]);
+    }
+
+    // ─── Q-method property-based fuzz harness ────────────
+
+    /// Property-based fuzzer for `GatewayTelnetIac`.  Generates random
+    /// sequences of `Op`s and asserts structural invariants after every
+    /// step so that any future refactor of the Q-method state machine
+    /// gets caught at `cargo test`.
+    ///
+    /// Options are restricted to the range 0..16 so random sequences
+    /// frequently target the same option — that's where interesting
+    /// race-condition transitions (`WantYesOpposite` / `WantNoOpposite`)
+    /// actually get exercised.
+    mod qmethod_proptest {
+        use super::*;
+        use proptest::prelude::*;
+
+        #[derive(Debug, Clone)]
+        enum Op {
+            RecvWill(u8),
+            RecvWont(u8),
+            RecvDo(u8),
+            RecvDont(u8),
+            LocalEnable(u8),
+            LocalDisable(u8),
+            RecvData(u8),
+        }
+
+        fn op_strategy() -> impl Strategy<Value = Op> {
+            let opt = 0u8..16u8;
+            prop_oneof![
+                opt.clone().prop_map(Op::RecvWill),
+                opt.clone().prop_map(Op::RecvWont),
+                opt.clone().prop_map(Op::RecvDo),
+                opt.clone().prop_map(Op::RecvDont),
+                opt.clone().prop_map(Op::LocalEnable),
+                opt.clone().prop_map(Op::LocalDisable),
+                (0u8..=255u8).prop_map(Op::RecvData),
+            ]
+        }
+
+        fn apply(
+            iac: &mut GatewayTelnetIac,
+            op: &Op,
+            data: &mut Vec<u8>,
+            replies: &mut Vec<u8>,
+        ) {
+            match *op {
+                Op::RecvWill(opt) => {
+                    iac.feed(IAC, data, replies);
+                    iac.feed(WILL, data, replies);
+                    iac.feed(opt, data, replies);
+                }
+                Op::RecvWont(opt) => {
+                    iac.feed(IAC, data, replies);
+                    iac.feed(WONT, data, replies);
+                    iac.feed(opt, data, replies);
+                }
+                Op::RecvDo(opt) => {
+                    iac.feed(IAC, data, replies);
+                    iac.feed(DO, data, replies);
+                    iac.feed(opt, data, replies);
+                }
+                Op::RecvDont(opt) => {
+                    iac.feed(IAC, data, replies);
+                    iac.feed(DONT, data, replies);
+                    iac.feed(opt, data, replies);
+                }
+                Op::LocalEnable(opt) => {
+                    iac.request_local_enable(opt, replies);
+                }
+                Op::LocalDisable(opt) => {
+                    iac.request_local_disable(opt, replies);
+                }
+                Op::RecvData(b) => {
+                    iac.feed(b, data, replies);
+                }
+            }
+        }
+
+        /// Validate that a byte stream of replies only contains well-formed
+        /// IAC sequences: `IAC <verb> <opt>`, `IAC SB <opt> ... IAC SE`,
+        /// or `IAC <2-byte-command>`.  No orphan data bytes, no truncated
+        /// sequences.
+        fn iac_reply_stream_is_well_formed(bytes: &[u8]) -> bool {
+            let mut i = 0;
+            while i < bytes.len() {
+                if bytes[i] != IAC {
+                    return false;
+                }
+                i += 1;
+                if i >= bytes.len() {
+                    return false;
+                }
+                match bytes[i] {
+                    SB => {
+                        i += 1;
+                        if i >= bytes.len() {
+                            return false;
+                        }
+                        i += 1; // option byte
+                        // Scan body until IAC SE.
+                        loop {
+                            if i >= bytes.len() {
+                                return false;
+                            }
+                            if bytes[i] == IAC {
+                                i += 1;
+                                if i >= bytes.len() {
+                                    return false;
+                                }
+                                if bytes[i] == SE {
+                                    i += 1;
+                                    break;
+                                }
+                                // IAC IAC or other — body continues.
+                                i += 1;
+                            } else {
+                                i += 1;
+                            }
+                        }
+                    }
+                    WILL | WONT | DO | DONT => {
+                        i += 1;
+                        if i >= bytes.len() {
+                            return false;
+                        }
+                        i += 1; // option byte
+                    }
+                    _ => {
+                        // 2-byte command.  Our gateway doesn't emit these,
+                        // but if it ever does, one byte is the whole thing.
+                        i += 1;
+                    }
+                }
+            }
+            true
+        }
+
+        fn check_structural_invariants(iac: &GatewayTelnetIac) {
+            for opt in 0u8..=255 {
+                let idx = opt as usize;
+                // Refusal flags only make sense when the side stays at No.
+                // (If a future code path drives him/us into Yes via an
+                // independent route after a refusal was sent, we'd need
+                // to clear the refusal flag first.)
+                if iac.sent_dont[idx] {
+                    assert_eq!(
+                        iac.him_state[idx],
+                        OptState::No,
+                        "sent_dont[{}] is set but him_state is {:?}",
+                        opt,
+                        iac.him_state[idx],
+                    );
+                }
+                if iac.sent_wont[idx] {
+                    assert_eq!(
+                        iac.us_state[idx],
+                        OptState::No,
+                        "sent_wont[{}] is set but us_state is {:?}",
+                        opt,
+                        iac.us_state[idx],
+                    );
+                }
+            }
+        }
+
+        proptest! {
+            /// Random sequences of peer-initiated verbs, local mind-changes,
+            /// and data bytes must never panic or produce malformed output.
+            #[test]
+            fn fuzz_random_operations(
+                ops in prop::collection::vec(op_strategy(), 0..200),
+            ) {
+                let (mut iac, _) = GatewayTelnetIac::new(
+                    true,
+                    "ANSI".into(),
+                    80,
+                    24,
+                );
+                let mut data = Vec::new();
+                let mut replies = Vec::new();
+                for op in &ops {
+                    apply(&mut iac, op, &mut data, &mut replies);
+                    check_structural_invariants(&iac);
+                }
+                // Cumulative reply stream from the whole run must be
+                // parseable telnet protocol.
+                prop_assert!(
+                    iac_reply_stream_is_well_formed(&replies),
+                    "reply stream was malformed: {:?}",
+                    replies,
+                );
+            }
+
+            /// The byte-level parser must never panic on an arbitrary
+            /// input, including truncations mid-sequence.
+            #[test]
+            fn fuzz_random_bytes(
+                bytes in prop::collection::vec(0u8..=255u8, 0..500),
+            ) {
+                let (mut iac, _) = GatewayTelnetIac::new(
+                    true,
+                    "ANSI".into(),
+                    80,
+                    24,
+                );
+                let mut data = Vec::new();
+                let mut replies = Vec::new();
+                for &b in &bytes {
+                    iac.feed(b, &mut data, &mut replies);
+                }
+                check_structural_invariants(&iac);
+                prop_assert!(iac_reply_stream_is_well_formed(&replies));
+            }
+
+            /// Reactive mode (cooperate=false) should only ever emit
+            /// refusal verbs (DONT/WONT) for non-ECHO options — never an
+            /// accepting WILL/DO or subnegotiation.
+            #[test]
+            fn fuzz_reactive_only_refuses(
+                ops in prop::collection::vec(op_strategy(), 0..100),
+            ) {
+                let mut iac = reactive_iac();
+                let mut data = Vec::new();
+                let mut replies = Vec::new();
+                for op in &ops {
+                    apply(&mut iac, op, &mut data, &mut replies);
+                }
+                // Walk the reply stream: if we see an accepting verb it
+                // must be DO ECHO or the byte sequence must be part of a
+                // refusal cycle from an active-change helper.  For the
+                // simpler check, verify there are no SB sequences at all
+                // (reactive mode never emits subnegotiations).
+                let mut i = 0;
+                while i + 1 < replies.len() {
+                    if replies[i] == IAC && replies[i + 1] == SB {
+                        panic!(
+                            "reactive mode emitted SB subnegotiation: \
+                             replies = {:?}", replies,
+                        );
+                    }
+                    i += 1;
+                }
+            }
+        }
+    }
+
+    // ─── 6-state Q-method transitions ─────────────────────
+
+    #[test]
+    fn test_qmethod_request_enable_from_no() {
+        let mut iac = reactive_iac();
+        let mut replies = Vec::new();
+        iac.request_local_enable(OPT_SGA, &mut replies);
+        assert_eq!(replies, vec![IAC, WILL, OPT_SGA]);
+        assert_eq!(iac.us_state[OPT_SGA as usize], OptState::WantYes);
+    }
+
+    #[test]
+    fn test_qmethod_mind_change_during_wantyes_goes_to_opposite() {
+        // We send WILL (enter WantYes), then change our mind and send
+        // WONT before peer replies: state → WantYesOpposite, nothing on
+        // the wire yet because our WILL is still pending.
+        let mut iac = reactive_iac();
+        let mut replies = Vec::new();
+        iac.request_local_enable(OPT_SGA, &mut replies);
+        replies.clear();
+        iac.request_local_disable(OPT_SGA, &mut replies);
+        assert_eq!(iac.us_state[OPT_SGA as usize], OptState::WantYesOpposite);
+        assert!(
+            replies.is_empty(),
+            "in-flight mind-change defers the WONT until peer ack"
+        );
+    }
+
+    #[test]
+    fn test_qmethod_peer_acks_opposite_with_wont() {
+        // us_state = WantYesOpposite, peer sends DO (ack of our WILL).
+        // We now send WONT and enter WantNo.
+        let mut iac = reactive_iac();
+        let idx = OPT_SGA as usize;
+        iac.us_state[idx] = OptState::WantYesOpposite;
+        let mut replies = Vec::new();
+        iac.feed(IAC, &mut Vec::new(), &mut replies);
+        iac.feed(DO, &mut Vec::new(), &mut replies);
+        iac.feed(OPT_SGA, &mut Vec::new(), &mut replies);
+        assert_eq!(iac.us_state[idx], OptState::WantNo);
+        assert_eq!(replies, vec![IAC, WONT, OPT_SGA]);
+    }
+
+    #[test]
+    fn test_qmethod_peer_refuses_opposite_cleanly() {
+        // us_state = WantYesOpposite, peer sends DONT (refuses our WILL).
+        // We wanted No anyway — settle at No without any extra verb.
+        let mut iac = reactive_iac();
+        let idx = OPT_SGA as usize;
+        iac.us_state[idx] = OptState::WantYesOpposite;
+        let mut replies = Vec::new();
+        iac.feed(IAC, &mut Vec::new(), &mut replies);
+        iac.feed(DONT, &mut Vec::new(), &mut replies);
+        iac.feed(OPT_SGA, &mut Vec::new(), &mut replies);
+        assert_eq!(iac.us_state[idx], OptState::No);
+        assert!(replies.is_empty(), "opposite path resolved without reply");
+    }
+
+    #[test]
+    fn test_qmethod_his_wantno_opposite_on_wont_reply() {
+        // him_state = WantNoOpposite; peer sends WONT confirming our DONT.
+        // We swing to WantYes and send DO.
+        let mut iac = reactive_iac();
+        let idx = OPT_SGA as usize;
+        iac.him_state[idx] = OptState::WantNoOpposite;
+        let mut replies = Vec::new();
+        iac.feed(IAC, &mut Vec::new(), &mut replies);
+        iac.feed(WONT, &mut Vec::new(), &mut replies);
+        iac.feed(OPT_SGA, &mut Vec::new(), &mut replies);
+        assert_eq!(iac.him_state[idx], OptState::WantYes);
+        assert_eq!(replies, vec![IAC, DO, OPT_SGA]);
+    }
+
+    #[test]
+    fn test_qmethod_active_enable_is_idempotent_in_wantyes() {
+        // Calling request_local_enable while already in WantYes is a no-op.
+        let mut iac = reactive_iac();
+        let mut replies = Vec::new();
+        iac.request_local_enable(OPT_SGA, &mut replies);
+        assert_eq!(replies, vec![IAC, WILL, OPT_SGA]);
+        replies.clear();
+        iac.request_local_enable(OPT_SGA, &mut replies);
+        assert!(replies.is_empty(), "idempotent");
+        assert_eq!(iac.us_state[OPT_SGA as usize], OptState::WantYes);
+    }
+
+    #[test]
+    fn test_qmethod_error_recovery_will_in_wantno() {
+        // him_state = WantNo, peer sends WILL (protocol violation). We
+        // should bounce back to No without entering Yes, and refuse
+        // again if we haven't already.
+        let mut iac = reactive_iac();
+        let idx = OPT_SGA as usize;
+        iac.him_state[idx] = OptState::WantNo;
+        let mut replies = Vec::new();
+        iac.feed(IAC, &mut Vec::new(), &mut replies);
+        iac.feed(WILL, &mut Vec::new(), &mut replies);
+        iac.feed(OPT_SGA, &mut Vec::new(), &mut replies);
+        assert_eq!(iac.him_state[idx], OptState::No);
+        assert_eq!(replies, vec![IAC, DONT, OPT_SGA]);
+    }
+
+    // ─── read_gateway_event ───────────────────────────────
+
+    #[tokio::test]
+    async fn test_gateway_event_data_byte() {
+        let mut data = &b"Ahello"[..];
+        let ev = read_gateway_event(&mut data).await.unwrap();
+        assert_eq!(ev, GatewayInboundEvent::Data(b'A'));
+    }
+
+    #[tokio::test]
+    async fn test_gateway_event_iac_iac_unescapes() {
+        let mut data: &[u8] = &[IAC, IAC, b'B'];
+        let ev = read_gateway_event(&mut data).await.unwrap();
+        assert_eq!(ev, GatewayInboundEvent::Data(0xFF));
+    }
+
+    #[tokio::test]
+    async fn test_gateway_event_drops_2byte_iac() {
+        let mut data: &[u8] = &[IAC, 0xF1, b'X']; // IAC NOP X
+        let ev = read_gateway_event(&mut data).await.unwrap();
+        assert_eq!(ev, GatewayInboundEvent::Data(b'X'));
+    }
+
+    #[tokio::test]
+    async fn test_gateway_event_drops_negotiation() {
+        let mut data: &[u8] = &[IAC, WILL, OPT_ECHO, b'Y'];
+        let ev = read_gateway_event(&mut data).await.unwrap();
+        assert_eq!(ev, GatewayInboundEvent::Data(b'Y'));
+    }
+
+    #[tokio::test]
+    async fn test_gateway_event_surfaces_naws() {
+        // IAC SB NAWS 0x00 0x50 0x00 0x18 IAC SE → NawsResize(80, 24)
+        let mut data: &[u8] = &[
+            IAC, SB, OPT_NAWS, 0x00, 0x50, 0x00, 0x18, IAC, SE,
+            b'Z',
+        ];
+        let ev = read_gateway_event(&mut data).await.unwrap();
+        assert_eq!(ev, GatewayInboundEvent::NawsResize(80, 24));
+    }
+
+    #[tokio::test]
+    async fn test_gateway_event_naws_with_escaped_iac_in_body() {
+        // Width = 0x00FF needs IAC-doubling inside the NAWS body.
+        let mut data: &[u8] = &[
+            IAC, SB, OPT_NAWS,
+            0x00, IAC, IAC,    // width low = 0xFF (doubled)
+            0x00, 0x18,
+            IAC, SE,
+        ];
+        let ev = read_gateway_event(&mut data).await.unwrap();
+        assert_eq!(ev, GatewayInboundEvent::NawsResize(0x00FF, 0x0018));
+    }
+
+    #[tokio::test]
+    async fn test_gateway_event_drops_non_naws_subneg() {
+        // SB TTYPE SEND — should be silently consumed; next event is the data byte.
+        let mut data: &[u8] = &[
+            IAC, SB, OPT_TTYPE, TTYPE_SEND, IAC, SE,
+            b'Q',
+        ];
+        let ev = read_gateway_event(&mut data).await.unwrap();
+        assert_eq!(ev, GatewayInboundEvent::Data(b'Q'));
+    }
+
+    #[tokio::test]
+    async fn test_gateway_event_eof() {
+        let mut data: &[u8] = &[];
+        let ev = read_gateway_event(&mut data).await.unwrap();
+        assert_eq!(ev, GatewayInboundEvent::Eof);
+    }
+
+    // ─── NAWS mid-session forwarding ──────────────────────
+
+    #[test]
+    fn test_gateway_naws_update_forwarded_when_enabled() {
+        // After DO NAWS peer response, us_state[NAWS] = Yes. A later
+        // send_naws_update must emit an IAC SB NAWS to remote.
+        let (mut iac, _) = cooperative_iac();
+        let (_, _) = feed_all(&mut iac, &[IAC, DO, OPT_NAWS]); // ack sets Yes
+        let mut replies = Vec::new();
+        iac.send_naws_update(120, 50, &mut replies);
+        let expected = [
+            IAC, SB, OPT_NAWS,
+            0x00, 0x78,  // 120
+            0x00, 0x32,  // 50
+            IAC, SE,
+        ];
+        assert_eq!(replies, expected);
+    }
+
+    #[test]
+    fn test_gateway_naws_update_silent_when_disabled() {
+        // Without the NAWS option being enabled (reactive mode or peer
+        // refused), send_naws_update emits nothing.
+        let mut iac = reactive_iac();
+        let mut replies = Vec::new();
+        iac.send_naws_update(120, 50, &mut replies);
+        assert!(replies.is_empty(), "should not emit SB NAWS when option is off");
+    }
+
+    // ─── write_telnet_data ────────────────────────────────
+
+    #[tokio::test]
+    async fn test_write_telnet_data_escapes_ff() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_telnet_data(&mut buf, &[b'A', 0xFF, b'B', 0xFF, 0xFF, b'C'])
+            .await
+            .unwrap();
+        assert_eq!(buf, vec![b'A', 0xFF, 0xFF, b'B', 0xFF, 0xFF, 0xFF, 0xFF, b'C']);
+    }
+
+    #[tokio::test]
+    async fn test_write_telnet_data_passthrough_without_ff() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_telnet_data(&mut buf, b"hello").await.unwrap();
+        assert_eq!(buf, b"hello");
     }
 
     #[tokio::test]

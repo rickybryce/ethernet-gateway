@@ -58,7 +58,7 @@ terminal and BBS use:
 
 | RFC | Title | Implementation notes |
 |-----|-------|----------------------|
-| **RFC 854** | Telnet Protocol Specification | IAC framing, IAC IAC data escaping, two-byte command handling. AYT replies with `[Yes]`; IP / BRK surface as ESC to the line-editor; EC translates to DEL (backspace) and EL to NAK (erase-line) so line-input honors them; NOP / DM / AO / GA are consumed. Full TCP urgent-mode SYNCH is not implemented — DM is informational. Outbound 0xFF bytes are escaped as IAC IAC; inbound IAC sequences are consumed transparently. |
+| **RFC 854** | Telnet Protocol Specification | IAC framing, IAC IAC data escaping, two-byte command handling. AYT replies with `[Yes]`; IP / BRK surface as ESC to the line-editor; EC translates to DEL (backspace) and EL to NAK (erase-line) so line-input honors them; NOP / DM / AO / GA are consumed. Full TCP urgent-mode SYNCH is not implemented (DM is informational) — per RFC 6093 the urgent mechanism is deprecated because middleboxes routinely strip or mangle the urgent pointer. Outbound 0xFF bytes are escaped as IAC IAC; inbound IAC sequences are consumed transparently. |
 | **RFC 855** | Telnet Option Specifications | DO / DONT / WILL / WONT negotiation with per-option state. Options we don't support receive WONT / DONT so the peer doesn't wait. |
 | **RFC 857** | Telnet Echo Option | The server advertises WILL ECHO to become the echoing side and honors peer requests for ECHO. |
 | **RFC 858** | Suppress Go Ahead Option | WILL SGA / DO SGA to operate in full-duplex character-at-a-time mode (rather than half-duplex GA mode). |
@@ -71,6 +71,71 @@ terminal and BBS use:
 Options not negotiated (BINARY, LINEMODE, ENVIRON, NEW-ENVIRON, TSPEED,
 COM-PORT, CHARSET) are explicitly refused with WONT / DONT so the peer
 doesn't stall waiting for an answer.
+
+#### Outgoing Telnet Gateway
+
+The Telnet Gateway menu (and internally the RFC 854/855 side of `ATDT
+host:port` when used for file transfer) dials out to remote telnet servers.
+Compliance operates in two modes controlled by the `telnet_gateway_negotiate`
+config flag:
+
+**Reactive mode (default, `telnet_gateway_negotiate = false`)**
+
+The gateway does not send any proactive negotiation offers, so raw-TCP
+services on port 23 (legacy MUDs, hand-rolled BBS software, etc.) are not
+poked with IAC bytes they don't understand.  It still does:
+
+- Escape outbound 0xFF data bytes as `IAC IAC` so literal 0xFF survives
+  the wire without being mistaken for the start of an IAC sequence.
+- Parse inbound IAC from the remote and silently consume 2-byte commands
+  (NOP, DM, BRK, IP, AO, AYT, EC, EL, GA) and subnegotiation bodies
+  instead of leaking them into the user's terminal.
+- Accept peer's `WILL ECHO` with `DO ECHO` (always on — raw-TCP services
+  never send `WILL ECHO`, so this is safe in both modes).  This fixes the
+  silent-typing failure on BBSes that expect the server to echo.
+- Refuse every other peer-initiated option: `WILL <opt>` → `DONT <opt>`,
+  `DO <opt>` → `WONT <opt>`.  Refusals are one-shot per cycle (RFC 1143
+  spirit) so a persistent remote can't drive us into a loop.
+
+**Raw-TCP escape hatch (`telnet_gateway_raw = true`)**
+
+When set, the gateway bypasses its entire telnet-IAC layer: no IAC
+escaping on outbound, no IAC parsing on inbound, no negotiation.
+Intended for destinations that clearly aren't telnet at all (legacy
+MUDs, hand-rolled BBS software).  Supersedes `telnet_gateway_negotiate`.
+The Telnet Gateway menu shows the current mode and lets you toggle it
+with a single keystroke; the change is saved to `xmodem.conf` so future
+sessions start in the selected mode.  Bytes written to the local user
+are still IAC-escaped so their telnet client doesn't misinterpret a
+stray 0xFF as a protocol byte.
+
+**Cooperative mode (`telnet_gateway_negotiate = true`)**
+
+In addition to everything reactive mode does, the gateway:
+
+- Sends `IAC WILL TTYPE`, `IAC WILL NAWS`, and `IAC DO ECHO` as proactive
+  offers at connect time, so BBSes that wait for the client to ask first
+  still get echo, terminal-type adaptation, and window-size awareness.
+- Responds to `SB TTYPE SEND` with `SB TTYPE IS PETSCII` / `ANSI` / `DUMB`
+  depending on the local user's terminal type, so remotes can serve
+  appropriate content.
+- Responds to `DO NAWS` with `WILL NAWS` plus an immediate `SB NAWS`
+  carrying the local user's actual window dimensions (from their own
+  NAWS, or terminal-type defaults: 40×25 for PETSCII, 80×24 for ANSI /
+  ASCII).  Any 0xFF byte in the width/height is properly IAC-doubled.
+- **Forwards NAWS updates mid-session**: if the local user resizes their
+  terminal during a gateway session, the new dimensions are captured
+  from their `IAC SB NAWS` subnegotiation and relayed to the remote
+  server as an updated `SB NAWS`.
+- Tracks each option through a **full RFC 1143 six-state Q-method**
+  (`No` / `Yes` / `WantYes` / `WantYesOpposite` / `WantNo` /
+  `WantNoOpposite`), so mind-changes while a prior WILL or DO is in
+  flight resolve cleanly instead of racing into inconsistent state.
+
+The gateway never waits for a reply to any message it sends, so silent
+or partially-compliant remote servers do not cause it to stall.  Enable
+cooperative mode when dialing real telnet servers; leave it off for
+compatibility with raw-TCP destinations.
 
 ### Hayes AT Command Set
 
@@ -235,6 +300,16 @@ telnet_enabled = true
 
 # Telnet server port
 telnet_port = 2323
+
+# Outgoing Telnet Gateway cooperative negotiation (see Telnet RFCs section).
+# Off by default so raw-TCP services on port 23 keep working.
+telnet_gateway_negotiate = false
+
+# Outgoing Telnet Gateway raw-TCP escape hatch.
+# When true, the gateway disables its telnet-IAC layer entirely and
+# treats the remote as raw TCP.  Toggleable live from the Telnet Gateway
+# menu (press 'T' at the mode prompt) — changes are persisted here.
+telnet_gateway_raw = false
 
 # Show the GUI configuration/console window on startup.
 # Set to false when running as a headless service.
