@@ -4304,10 +4304,17 @@ impl TelnetSession {
             return Ok(());
         }
 
-        // Open channel and request PTY + shell
+        // Open channel and request PTY + shell.  Every error path from
+        // here forward must call `session.disconnect` before returning
+        // — otherwise the remote sees an orphaned, still-authenticated
+        // session and its connection slot stays occupied until a TCP
+        // timeout eventually reaps it.
         let channel = match session.channel_open_session().await {
             Ok(ch) => ch,
             Err(e) => {
+                let _ = session
+                    .disconnect(russh::Disconnect::ByApplication, "channel open failed", "")
+                    .await;
                 self.show_error(&format!("Channel error: {}", e))
                     .await?;
                 return Ok(());
@@ -4324,10 +4331,16 @@ impl TelnetSession {
             .request_pty(false, term, cols, rows, 0, 0, &[])
             .await
         {
+            let _ = session
+                .disconnect(russh::Disconnect::ByApplication, "pty request failed", "")
+                .await;
             self.show_error(&format!("PTY error: {}", e)).await?;
             return Ok(());
         }
         if let Err(e) = channel.request_shell(false).await {
+            let _ = session
+                .disconnect(russh::Disconnect::ByApplication, "shell request failed", "")
+                .await;
             self.show_error(&format!("Shell error: {}", e)).await?;
             return Ok(());
         }
