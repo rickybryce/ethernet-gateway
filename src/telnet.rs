@@ -104,6 +104,21 @@ enum TerminalType {
     Petscii,
 }
 
+/// Transfer protocol selected at download time by the user.  Picked
+/// per-transfer via the `SELECT PROTOCOL` prompt; no persistent config.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum DownloadProtocol {
+    /// Classic XMODEM — 128-byte SOH blocks, CRC-16 with checksum fallback.
+    Xmodem,
+    /// XMODEM-1K — 1024-byte STX blocks (with SOH fallback for the
+    /// final partial block).  Opportunistically falls back to plain
+    /// XMODEM if the receiver NAKs the first STX.
+    Xmodem1k,
+    /// YMODEM — block 0 with filename + size, then 1K-style data
+    /// blocks.
+    Ymodem,
+}
+
 // ─── Input mode ────────────────────────────────────────────
 #[derive(Clone, Copy)]
 enum InputMode {
@@ -2114,11 +2129,46 @@ impl TelnetSession {
         &mut self,
         instant_digits: bool,
     ) -> Result<Option<String>, std::io::Error> {
+        // ZMODEM autostart detection state.  A compliant ZMODEM sender
+        // opens a transfer with `** ZDLE <header-type>` where
+        // `<header-type>` is one of `A` (binary/CRC-16), `B` (hex),
+        // or `C` (binary/CRC-32).  Reading the full four-byte prefix
+        // off the menu input loop is an unambiguous "the user's
+        // terminal just tried to auto-start a ZMODEM transfer" signal
+        // — ZMODEM is not yet implemented, so we intercept, send the
+        // spec'd abort sequence, and bounce back to the menu with an
+        // explanation instead of leaving the receiver hanging.
+        let mut zmodem_state: u8 = 0;
         loop {
             let byte = match self.read_byte_filtered().await? {
                 Some(b) => b,
                 None => return Ok(None),
             };
+
+            // ZMODEM autostart: **\x18[ABC].
+            match (zmodem_state, byte) {
+                (0, b'*') => {
+                    zmodem_state = 1;
+                    continue;
+                }
+                (1, b'*') => {
+                    zmodem_state = 2;
+                    continue;
+                }
+                (2, 0x18) => {
+                    zmodem_state = 3;
+                    continue;
+                }
+                (3, b'A') | (3, b'B') | (3, b'C') => {
+                    self.handle_zmodem_autostart().await?;
+                    // Bounce back to the caller so the menu redraws.
+                    return Ok(None);
+                }
+                _ => {
+                    zmodem_state = 0;
+                    // Fall through and process `byte` normally.
+                }
+            }
 
             if is_esc_key(byte, self.terminal_type == TerminalType::Petscii) {
                 self.drain_input().await;
@@ -2247,6 +2297,47 @@ impl TelnetSession {
         )
         .await
         {}
+    }
+
+    /// Handle a detected ZMODEM autostart prefix (`**\x18[ABC]`) on the
+    /// menu input stream.  Emits the protocol-standard abort (5 × CAN)
+    /// so the client's terminal bails out of ZMODEM receive mode, then
+    /// drains any trailing ZMODEM bytes, then displays a user-friendly
+    /// message explaining that ZMODEM isn't implemented yet.  The
+    /// caller re-renders the menu afterwards.
+    async fn handle_zmodem_autostart(&mut self) -> Result<(), std::io::Error> {
+        glog!("File transfer: ZMODEM autostart detected; sending abort");
+        // Standard ZMODEM abort sequence: 5 × CAN (0x18).  Clients in
+        // ZMODEM receive mode will see this and return to interactive
+        // terminal mode.
+        self.send_raw(&[0x18; 5]).await?;
+        // Followed by a few backspaces — the convention is CAN*5 then
+        // BS*5 to wipe the "rz\r" prompt some senders emit before the
+        // ZMODEM header.
+        self.send_raw(&[0x08; 5]).await?;
+        self.flush().await?;
+        // Give the client a moment to exit ZMODEM mode, then drain any
+        // remaining frames it was sending.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        self.drain_input().await;
+
+        self.send_line("").await?;
+        self.send_line(&format!(
+            "  {}",
+            self.yellow("ZMODEM autostart detected — aborting.")
+        ))
+        .await?;
+        self.send_line("  ZMODEM is not yet supported by this server.").await?;
+        self.send_line(
+            "  Please use XMODEM, XMODEM-1K, or YMODEM from",
+        )
+        .await?;
+        self.send_line("  the File Transfer menu instead.").await?;
+        self.send_line("").await?;
+        self.send("  Press any key to continue.").await?;
+        self.flush().await?;
+        let _ = self.wait_for_key().await;
+        Ok(())
     }
 
     async fn show_error(&mut self, msg: &str) -> Result<(), std::io::Error> {
@@ -2851,17 +2942,6 @@ impl TelnetSession {
             iac_status
         ))
         .await?;
-        let k_status = if config::get_config().xmodem_send_1k {
-            self.green("ON")
-        } else {
-            self.red("OFF")
-        };
-        self.send_line(&format!(
-            "  {}  1K blocks (download) [{}]",
-            self.cyan("K"),
-            k_status
-        ))
-        .await?;
         self.send_line("").await?;
         let footer = self.nav_footer();
         self.send_line(&footer).await?;
@@ -2896,14 +2976,6 @@ impl TelnetSession {
             "i" => {
                 self.xmodem_iac = !self.xmodem_iac;
             }
-            "k" => {
-                // Toggle XMODEM-1K send mode and persist the change.
-                let new_value = !config::get_config().xmodem_send_1k;
-                config::update_config_values(&[(
-                    "xmodem_send_1k",
-                    if new_value { "true" } else { "false" },
-                )]);
-            }
             "q" => {
                 self.current_menu = Menu::Main;
             }
@@ -2915,17 +2987,17 @@ impl TelnetSession {
                     "  C  Change to a subdirectory",
                     "  I  Toggle IAC escaping for",
                     "     binary file transfers",
-                    "  K  Toggle XMODEM-1K (1024-byte",
-                    "     blocks) on download.  Auto",
-                    "     falls back to 128 if the",
-                    "     remote client rejects 1K.",
                     "  R  Refresh the screen",
                     "  Q  Back to the main menu",
+                    "",
+                    "  On download you will be prompted",
+                    "  to pick XMODEM / XMODEM-1K /",
+                    "  YMODEM for that transfer.",
                 ]).await?;
             }
             "r" => {} // Refresh — just re-render
             _ => {
-                self.show_error("Press U, D, X, C, I, K, R, Q, or H.")
+                self.show_error("Press U, D, X, C, I, R, Q, or H.")
                     .await?;
             }
         }
@@ -3395,6 +3467,74 @@ impl TelnetSession {
         }
     }
 
+    /// Prompt the user for which XMODEM-family protocol to use for this
+    /// download.  Returns `None` if the user presses ESC to cancel.
+    async fn prompt_download_protocol(
+        &mut self,
+    ) -> Result<Option<DownloadProtocol>, std::io::Error> {
+        let is_petscii = self.terminal_type == TerminalType::Petscii;
+        let esc_label = if is_petscii { "<-" } else { "ESC" };
+
+        self.send_line("").await?;
+        let sep = self.separator();
+        self.send_line(&sep).await?;
+        self.send_line(&format!("  {}", self.yellow("SELECT PROTOCOL")))
+            .await?;
+        self.send_line(&sep).await?;
+        self.send_line("").await?;
+        self.send_line(&format!(
+            "  {}  XMODEM       (128-byte blocks)",
+            self.cyan("X")
+        ))
+        .await?;
+        self.send_line(&format!(
+            "  {}  XMODEM-1K    (1024-byte blocks)",
+            self.cyan("1")
+        ))
+        .await?;
+        self.send_line(&format!(
+            "  {}  YMODEM       (filename + size header, 1K)",
+            self.cyan("Y")
+        ))
+        .await?;
+        self.send_line("").await?;
+        self.send(&format!(
+            "  Pick one, or {} to cancel: ",
+            self.cyan(esc_label)
+        ))
+        .await?;
+        self.flush().await?;
+
+        loop {
+            let b = match self.read_byte_filtered().await? {
+                Some(b) => b,
+                None => return Ok(None),
+            };
+            if is_esc_key(b, is_petscii) {
+                self.send_line("").await?;
+                return Ok(None);
+            }
+            let ch = if is_petscii {
+                (petscii_to_ascii_byte(b) as char).to_ascii_lowercase()
+            } else {
+                (b as char).to_ascii_lowercase()
+            };
+            let chosen = match ch {
+                'x' => Some(DownloadProtocol::Xmodem),
+                '1' => Some(DownloadProtocol::Xmodem1k),
+                'y' => Some(DownloadProtocol::Ymodem),
+                _ => None,
+            };
+            if let Some(p) = chosen {
+                self.send_raw(&[b]).await?;
+                self.send_line("").await?;
+                self.flush().await?;
+                return Ok(Some(p));
+            }
+            // Invalid key — stay at the prompt.
+        }
+    }
+
     async fn initiate_download(
         &mut self,
         filename: &str,
@@ -3429,10 +3569,21 @@ impl TelnetSession {
             }
         };
 
+        // Prompt the user to pick the transfer protocol for this download.
+        // ESC at the prompt cancels the transfer.
+        let protocol = match self.prompt_download_protocol().await? {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+
         self.send_line("").await?;
         self.send_line(&format!(
             "  {}",
-            self.green("Start XMODEM receive now.")
+            self.green(match protocol {
+                DownloadProtocol::Xmodem => "Start XMODEM receive now.",
+                DownloadProtocol::Xmodem1k => "Start XMODEM-1K receive now.",
+                DownloadProtocol::Ymodem => "Start YMODEM receive now.",
+            })
         ))
         .await?;
         self.send_line(&format!("  Start transfer within {} seconds.",
@@ -3447,13 +3598,27 @@ impl TelnetSession {
         self.send_line("").await?;
         self.flush().await?;
 
-        if config::get_config().verbose { glog!("XMODEM download: IAC escaping={}", self.xmodem_iac); }
+        if config::get_config().verbose { glog!("XMODEM download: IAC escaping={} protocol={:?}", self.xmodem_iac, protocol); }
         self.drain_input().await;
 
         let start = std::time::Instant::now();
         let cfg = config::get_config();
         let verbose = cfg.verbose;
-        let use_1k = cfg.xmodem_send_1k;
+        // YMODEM always uses 1K data blocks; XMODEM-1K uses 1K blocks
+        // without the filename header; classic XMODEM uses 128-byte
+        // blocks only.
+        let use_1k = matches!(
+            protocol,
+            DownloadProtocol::Xmodem1k | DownloadProtocol::Ymodem,
+        );
+        let ymodem = if matches!(protocol, DownloadProtocol::Ymodem) {
+            Some(crate::xmodem::YmodemHeader {
+                filename: filename.to_string(),
+                size: file_size,
+            })
+        } else {
+            None
+        };
         let mut writer_guard = self.writer.lock().await;
         let result = crate::xmodem::xmodem_send(
             &mut self.reader,
@@ -3463,6 +3628,7 @@ impl TelnetSession {
             self.terminal_type == TerminalType::Petscii,
             verbose,
             use_1k,
+            ymodem,
         )
         .await;
         drop(writer_guard);
@@ -12187,6 +12353,71 @@ mod tests {
 
         assert_eq!(session.session_read_byte().await.unwrap(), Some(b'!'));
         assert_eq!(session.terminal_type, TerminalType::Petscii);
+    }
+
+    /// Test 8a: empty TTYPE IS response (zero-byte terminal name).
+    /// Session must not panic; terminal_type stays at its factory value.
+    #[tokio::test]
+    async fn test_ttype_is_empty_payload() {
+        let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ascii);
+        session.neg_sent_do[OPT_TTYPE as usize] = true;
+        let initial_type = session.terminal_type;
+
+        use tokio::io::AsyncWriteExt;
+        peer.write_all(&[IAC, SB, OPT_TTYPE, TTYPE_IS, IAC, SE, b'Q'])
+            .await
+            .unwrap();
+
+        assert_eq!(session.session_read_byte().await.unwrap(), Some(b'Q'));
+        assert_eq!(session.terminal_type, initial_type);
+    }
+
+    /// Test 8b: TTYPE IS with IAC IAC embedded in the terminal-type
+    /// string.  The SB-body reader must unescape to a single 0xFF so
+    /// the name decodes without interpreting the 0xFF as an IAC
+    /// command.  Terminal-type lookup should treat it as an unknown
+    /// name and leave the session terminal_type unchanged.
+    #[tokio::test]
+    async fn test_ttype_is_with_escaped_iac_in_name() {
+        let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ascii);
+        session.neg_sent_do[OPT_TTYPE as usize] = true;
+        let initial_type = session.terminal_type;
+
+        use tokio::io::AsyncWriteExt;
+        // "term\xFFname" with the 0xFF properly IAC-doubled on the wire.
+        peer.write_all(&[IAC, SB, OPT_TTYPE, TTYPE_IS]).await.unwrap();
+        peer.write_all(b"term").await.unwrap();
+        peer.write_all(&[IAC, IAC]).await.unwrap();      // escaped 0xFF
+        peer.write_all(b"name").await.unwrap();
+        peer.write_all(&[IAC, SE, b'R']).await.unwrap();
+
+        assert_eq!(session.session_read_byte().await.unwrap(), Some(b'R'));
+        // The unusual name doesn't match any known terminal type →
+        // session keeps its factory terminal.
+        assert_eq!(session.terminal_type, initial_type);
+    }
+
+    /// Test 8c: a ridiculously long TTYPE IS payload — our SB reader
+    /// has a hard cap to prevent a malicious peer from exhausting
+    /// memory.  The session must not panic and should resync on the
+    /// eventual IAC SE.  The writer runs in its own task so we don't
+    /// deadlock on the duplex buffer (2 KiB > 512-byte buffer).
+    #[tokio::test]
+    async fn test_ttype_is_oversized_payload_does_not_panic() {
+        let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ascii);
+        session.neg_sent_do[OPT_TTYPE as usize] = true;
+
+        let writer = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            peer.write_all(&[IAC, SB, OPT_TTYPE, TTYPE_IS]).await.unwrap();
+            let junk = vec![b'x'; 2048];
+            peer.write_all(&junk).await.unwrap();
+            peer.write_all(&[IAC, SE, b'Z']).await.unwrap();
+        });
+
+        // After the SB, we should cleanly receive the post-SE data byte.
+        assert_eq!(session.session_read_byte().await.unwrap(), Some(b'Z'));
+        writer.await.unwrap();
     }
 
     #[tokio::test]

@@ -1,0 +1,208 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  # Allow manual triggering (e.g. to re-run for a tag that already exists).
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.3.3)"
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ─── Build binaries on each target platform ──────────────
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux build dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libudev-dev \
+            pkg-config \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libssl-dev \
+            libwayland-dev \
+            libfontconfig1-dev
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo build --release
+        run: cargo build --release --target ${{ matrix.target }} --verbose
+
+      - name: Package (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          NAME="xmodem-gateway-${{ github.ref_name }}-${{ matrix.target }}"
+          mkdir -p "dist/${NAME}"
+          cp "target/${{ matrix.target }}/release/xmodem-gateway" "dist/${NAME}/"
+          cp README.md LICENSE "dist/${NAME}/" 2>/dev/null || true
+          tar -czf "dist/${NAME}.tar.gz" -C dist "${NAME}"
+          echo "ARTIFACT=dist/${NAME}.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Package (zip)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $name = "xmodem-gateway-${{ github.ref_name }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path "dist\$name" | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\xmodem-gateway.exe" "dist\$name\"
+          if (Test-Path "README.md") { Copy-Item "README.md" "dist\$name\" }
+          if (Test-Path "LICENSE")   { Copy-Item "LICENSE"   "dist\$name\" }
+          Compress-Archive -Path "dist\$name\*" -DestinationPath "dist\$name.zip"
+          Add-Content -Path $env:GITHUB_ENV -Value "ARTIFACT=dist\$name.zip"
+
+      - name: SHA-256 checksum
+        shell: bash
+        run: |
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${ARTIFACT}" > "${ARTIFACT}.sha256"
+          else
+            # macOS / Windows (git-bash) use `shasum` / `certutil` — shasum is
+            # present on both the macOS runners and Windows git-bash.
+            shasum -a 256 "${ARTIFACT}" > "${ARTIFACT}.sha256"
+          fi
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.target }}
+          path: |
+            ${{ env.ARTIFACT }}
+            ${{ env.ARTIFACT }}.sha256
+          if-no-files-found: error
+
+  # ─── Sign and publish a GitHub Release ───────────────────
+  release:
+    name: sign & publish
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write  # needed for sigstore/cosign keyless signing
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # needed so CHANGELOG.md is present
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la dist/
+
+      # ─── GPG sign (requires GPG_PRIVATE_KEY secret) ─────
+      # If the secret is not configured, the step is skipped — the
+      # release still publishes with SHA-256 checksums, just no .asc
+      # files.  Set GPG_PRIVATE_KEY (ASCII-armored) in repo Settings →
+      # Secrets → Actions to enable GPG signing.
+      - name: Import GPG key
+        if: env.GPG_PRIVATE_KEY != ''
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          echo "GPG_AVAILABLE=1" >> "$GITHUB_ENV"
+
+      - name: GPG-sign artifacts
+        if: env.GPG_AVAILABLE == '1'
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          cd dist
+          for f in xmodem-gateway-*.tar.gz xmodem-gateway-*.zip; do
+            [ -f "$f" ] || continue
+            if [ -n "${GPG_PASSPHRASE}" ]; then
+              echo "${GPG_PASSPHRASE}" | gpg --batch --yes --pinentry-mode loopback \
+                --passphrase-fd 0 --armor --detach-sign "$f"
+            else
+              gpg --batch --yes --armor --detach-sign "$f"
+            fi
+          done
+          ls -la
+
+      # ─── Sigstore keyless signing (always runs, no secrets needed) ─
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sigstore-sign artifacts
+        run: |
+          cd dist
+          for f in xmodem-gateway-*.tar.gz xmodem-gateway-*.zip; do
+            [ -f "$f" ] || continue
+            cosign sign-blob --yes --output-signature "${f}.sig" \
+              --output-certificate "${f}.pem" "$f"
+          done
+          ls -la
+
+      # ─── Publish the GitHub Release ─────────────────────
+      - name: Extract changelog section for this tag
+        id: changelog
+        run: |
+          TAG="${GITHUB_REF_NAME:-${{ github.event.inputs.tag }}}"
+          VERSION="${TAG#v}"
+          # Pull the `## [VERSION]` block out of CHANGELOG.md, stopping at
+          # the next `## ` heading.  Empty string if not found.
+          if [ -f CHANGELOG.md ]; then
+            awk -v ver="$VERSION" '
+              $0 ~ "^## \\[" ver "\\]" { capture=1; next }
+              capture && /^## / { exit }
+              capture { print }
+            ' CHANGELOG.md > release_notes.md
+          fi
+          if [ ! -s release_notes.md ]; then
+            echo "Release ${TAG}." > release_notes.md
+          fi
+          echo "notes_path=release_notes.md" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name || github.event.inputs.tag }}
+          name: "xmodem-gateway ${{ github.ref_name || github.event.inputs.tag }}"
+          body_path: ${{ steps.changelog.outputs.notes_path }}
+          draft: false
+          prerelease: false
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+            dist/*.asc
+            dist/*.sig
+            dist/*.pem
+          fail_on_unmatched_files: false

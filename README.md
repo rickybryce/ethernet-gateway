@@ -304,6 +304,42 @@ Or, if the SSH interface is enabled, connect with any SSH client:
 ssh <ssh-user>@<server-ip> -p 2222
 ```
 
+### Running as a systemd Service (Linux)
+
+A hardened systemd unit file is provided at
+[`contrib/systemd/xmodem-gateway.service`](contrib/systemd/xmodem-gateway.service).
+To install:
+
+```sh
+# Create a dedicated unprivileged user
+sudo useradd --system --home-dir /var/lib/xmodem-gateway \
+             --shell /usr/sbin/nologin xmodem-gateway
+sudo install -d -m 0750 -o xmodem-gateway -g xmodem-gateway \
+             /var/lib/xmodem-gateway
+
+# Install the binary
+sudo install -m 0755 target/release/xmodem-gateway /usr/local/bin/
+
+# Install and start the service
+sudo install -m 0644 contrib/systemd/xmodem-gateway.service \
+             /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now xmodem-gateway.service
+
+# Watch the log
+journalctl -u xmodem-gateway -f
+```
+
+The unit ships with defensive hardening enabled by default:
+`NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`,
+`ProtectHome`, namespace restrictions, `SystemCallFilter=@system-service`,
+capability bounding, and a 512 MiB memory cap.  Edit the file to
+loosen anything that breaks your deployment.
+
+Set the telnet server port below 1024 (e.g. 23) by uncommenting the
+`CapabilityBoundingSet=CAP_NET_BIND_SERVICE` line and matching
+`AmbientCapabilities`.
+
 ## GUI Configuration Editor
 
 When `enable_console = true` (the default), a graphical configuration window

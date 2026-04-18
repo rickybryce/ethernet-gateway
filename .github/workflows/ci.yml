@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  # Allow manual triggering from the Actions tab.
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Install Linux build dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libudev-dev \
+            pkg-config \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libssl-dev \
+            libwayland-dev \
+            libfontconfig1-dev
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo build
+        run: cargo build --verbose
+
+      - name: cargo clippy (all targets, warnings = errors)
+        run: cargo clippy --all-targets --verbose
+
+      - name: cargo test
+        run: cargo test --verbose
+
+      # Run the proptest fuzzers with an elevated case count on Linux.
+      # Keeps CI fast on the other platforms while still getting
+      # cross-platform coverage of the deterministic unit tests.
+      - name: cargo test (extended proptest cases)
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          PROPTEST_CASES: "4096"
+        run: cargo test qmethod_proptest --verbose
+
+  rustfmt:
+    name: rustfmt check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+        continue-on-error: true  # advisory only; this repo doesn't enforce rustfmt style
+
+  audit:
+    name: cargo audit (CVE scan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+    # Advisory: a transient advisory in an indirect dep shouldn't block
+    # the whole CI.  The job still reports and surfaces a red X; use
+    # `cargo audit` locally to triage before merge.
+    continue-on-error: true
