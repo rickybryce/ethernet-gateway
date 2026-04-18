@@ -554,9 +554,13 @@ This is useful for accessing SSH servers from terminals that only support telnet
 (such as a Commodore 64).
 
 1. From the main menu, press **S** (SSH Gateway)
-2. Enter the remote host, port (default 22), username, and password
-3. Once connected, you have a full interactive shell on the remote server
-4. Press **ESC** twice to disconnect from the SSH session
+2. Optionally press **K** at the first prompt to display the gateway's public
+   key (see *Public-Key Authentication* below)
+3. Enter the remote host, port (default 22), and username
+4. The gateway attempts public-key authentication using its own keypair first
+5. If the remote doesn't trust the gateway key, you are prompted for a password
+6. Once connected, you have a full interactive shell on the remote server
+7. Press **ESC** twice to disconnect from the SSH session
 
 The server acts as a proxy between your telnet client and the remote SSH server.
 All input is forwarded to the SSH session, and all output is sent back to your
@@ -568,19 +572,77 @@ automatically stripped, and text is converted to the appropriate encoding. ANSI
 terminals receive the raw output unmodified. The PTY size is set to 40x25 for
 PETSCII and 80x24 for ANSI/ASCII terminals.
 
+### Public-Key Authentication
+
+On the first outbound SSH dial, the gateway generates an Ed25519 client keypair
+and stores it as `xmodem_gateway_ssh_key` (0o600 on Unix). Every subsequent
+dial tries public-key authentication with this key *before* falling back to a
+password prompt. If the remote accepts the key, you skip the password prompt
+entirely — identical to how OpenSSH from the command line behaves.
+
+To set up passwordless login to a particular remote:
+
+1. Open the SSH Gateway menu and press **K** — the gateway's public key is
+   displayed in the standard `ssh-ed25519 AAAA…` OpenSSH format.
+2. Copy that line into the remote server's `~/.ssh/authorized_keys` file.
+3. Future dials to that host skip the password prompt.
+
+If the remote doesn't have the gateway's key in its `authorized_keys`, you see
+a one-line notice (`Pubkey not accepted — password required.`) and the
+password prompt appears as before.
+
+### Host-Key Verification
+
+The first time you dial a new SSH server, the gateway shows the server's
+SHA-256 fingerprint and asks whether to trust it (TOFU — trust-on-first-use).
+If accepted, the fingerprint is saved to `gateway_hosts` (0o600 on Unix) and
+checked on every subsequent dial. A changed key produces a prominent
+`WARNING: HOST KEY HAS CHANGED!` with the option to update or abort.
+
+All host-key trust decisions (first-time accept, update, and reject) are
+written to the server log so there is a forensic trail if a key change turns
+out to be a man-in-the-middle attempt.
+
+### SSH Gateway vs SSH Server
+
+`gateway_hosts` holds the *remote* servers' public keys (similar to an OpenSSH
+client's `~/.ssh/known_hosts`). `xmodem_ssh_host_key` is the XMODEM Gateway's
+*own* SSH server host key. `xmodem_gateway_ssh_key` is the gateway's outgoing-
+client keypair used for public-key authentication to remote servers. All three
+are independent.
+
 ## Telnet Gateway
 
 The Telnet Gateway connects through the server to a remote telnet host. This is
 useful for accessing BBS systems or other telnet services from retro terminals.
 
 1. From the main menu, press **T** (Telnet Gateway)
-2. Enter the remote host and port (default 23)
-3. Once connected, all input and output is proxied between your terminal and the
+2. At the mode prompt, press **T** to toggle between `Telnet protocol` and
+   `Raw TCP` mode if needed (see below), or any other key to continue
+3. Enter the remote host and port (default 23)
+4. Once connected, all input and output is proxied between your terminal and the
    remote server
-4. Press **ESC** twice to disconnect
+5. Press **ESC** twice to disconnect
 
 For PETSCII and ASCII terminals, ANSI escape sequences from the remote host are
 automatically filtered.
+
+### Protocol Modes
+
+The gateway has three modes of operation, all documented in the [Telnet RFCs](#telnet-rfcs)
+section above. In short:
+
+- **Telnet protocol (default)** — the gateway parses IAC framing in both
+  directions, accepts cooperative ECHO from the remote, refuses other options.
+  Works with any real telnet server.
+- **Cooperative mode** (`telnet_gateway_negotiate = true` in `xmodem.conf`) —
+  adds proactive TTYPE, NAWS, and DO ECHO offers so modern BBSes can adapt
+  content and render full-screen layouts at your actual window size.
+- **Raw TCP** (toggled with **T** at the gateway menu, saved persistently) —
+  the IAC layer is disabled entirely. Use this when dialing destinations that
+  don't speak telnet at all (legacy MUDs, hand-rolled BBS software, some
+  services on port 23). The toggle persists to `xmodem.conf` so you only need
+  to set it once per destination type.
 
 ## Modem Emulator
 
