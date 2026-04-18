@@ -8797,7 +8797,14 @@ pub fn start_server(
                                     lockouts: lo,
                                     peer_addr: Some(addr.ip()),
                                     transfer_subdir: String::new(),
-                                    xmodem_iac: false,
+                                    // Telnet wire requires 0xFF to be doubled as IAC IAC
+                                    // in both directions (RFC 854/856).  Default on here
+                                    // so XMODEM/YMODEM transfers don't desync when the
+                                    // file data — or a random CRC byte — happens to be
+                                    // 0xFF.  The I key in the File Transfer menu still
+                                    // lets the user toggle it off for clients that don't
+                                    // escape (rare).
+                                    xmodem_iac: true,
                                     web_lines: Vec::new(),
                                     web_scroll: 0,
                                     web_links: Vec::new(),
