@@ -47,6 +47,17 @@ enum TransferMode {
     Crc16,
 }
 
+/// Optional YMODEM header metadata supplied by the caller when sending
+/// in YMODEM (batch) mode.  The filename appears in block 0; size is
+/// used by receivers to truncate trailing SUB-padding exactly.  When
+/// `None`, the sender uses plain XMODEM semantics and never emits a
+/// block 0.
+#[derive(Clone)]
+pub(crate) struct YmodemHeader {
+    pub filename: String,
+    pub size: u64,
+}
+
 // =============================================================================
 // XMODEM PROTOCOL - RECEIVE (UPLOAD)
 // =============================================================================
@@ -114,15 +125,68 @@ pub(crate) async fn xmodem_receive(
                     };
                     if verbose {
                         glog!(
-                            "XMODEM recv: {} received, reading block #1 ({}-byte)",
+                            "XMODEM recv: {} received, peeking at block header ({}-byte)",
                             if byte == STX { "STX" } else { "SOH" },
                             block_size,
                         );
                     }
+                    // Peek at block_num / complement so we can detect
+                    // YMODEM block 0 (filename header) vs. an ordinary
+                    // first data block.
+                    let block_num = raw_read_byte(reader, is_tcp).await?;
+                    let block_complement = raw_read_byte(reader, is_tcp).await?;
+                    if byte == SOH
+                        && block_num == 0
+                        && block_complement == 0xFF
+                    {
+                        // YMODEM block 0 — read the 128-byte payload +
+                        // trailer under a hard timeout so a stalled
+                        // sender can't deadlock the session.  On CRC
+                        // success we ACK and send a second 'C' to start
+                        // the data phase; on failure we NAK and let the
+                        // sender's retry be handled as a duplicate block
+                        // by the main loop.
+                        if verbose { glog!("XMODEM recv: YMODEM block 0 detected"); }
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(BLOCK_BODY_TIMEOUT_SECS),
+                            read_ymodem_block_zero_body(
+                                reader, mode, is_tcp, verbose,
+                            ),
+                        )
+                        .await
+                        {
+                            Ok(Ok(true)) => {
+                                raw_write_byte(writer, ACK, is_tcp).await?;
+                                // Second 'C' starts the data phase.
+                                raw_write_byte(writer, CRC_REQUEST, is_tcp).await?;
+                                break;
+                            }
+                            Ok(Ok(false)) => {
+                                if verbose { glog!("XMODEM recv: YMODEM block 0 CRC error"); }
+                                raw_write_byte(writer, NAK, is_tcp).await?;
+                                break;
+                            }
+                            Ok(Err(e)) => {
+                                if verbose { glog!("XMODEM recv: YMODEM block 0 read error: {}", e); }
+                                raw_write_byte(writer, NAK, is_tcp).await?;
+                                break;
+                            }
+                            Err(_) => {
+                                if verbose { glog!("XMODEM recv: YMODEM block 0 timeout"); }
+                                raw_write_byte(writer, NAK, is_tcp).await?;
+                                break;
+                            }
+                        }
+                    }
+                    // Not YMODEM block 0 — treat as an ordinary first
+                    // data block.  `receive_block_body` takes the
+                    // already-read header bytes.
                     match tokio::time::timeout(
                         std::time::Duration::from_secs(BLOCK_BODY_TIMEOUT_SECS),
-                        receive_block(
+                        receive_block_body(
                             reader,
+                            block_num,
+                            block_complement,
                             &mut expected_block,
                             mode,
                             is_tcp,
@@ -258,7 +322,71 @@ async fn receive_block(
 ) -> Result<Vec<u8>, String> {
     let block_num = raw_read_byte(reader, is_tcp).await?;
     let block_complement = raw_read_byte(reader, is_tcp).await?;
+    receive_block_body(
+        reader,
+        block_num,
+        block_complement,
+        expected_block,
+        mode,
+        is_tcp,
+        verbose,
+        block_size,
+    )
+    .await
+}
 
+/// Read and validate the 128-byte payload + CRC/checksum trailer of a
+/// YMODEM block 0, given that `SOH 0x00 0xFF` has already been read.
+/// Returns `Ok(true)` if the checksum/CRC is valid, `Ok(false)` if it
+/// is not.  Called under a `tokio::time::timeout` so a stalled sender
+/// can't hold the session indefinitely.
+async fn read_ymodem_block_zero_body(
+    reader: &mut (impl AsyncRead + Unpin),
+    mode: TransferMode,
+    is_tcp: bool,
+    verbose: bool,
+) -> Result<bool, String> {
+    let mut payload = [0u8; XMODEM_BLOCK_SIZE];
+    for b in payload.iter_mut() {
+        *b = raw_read_byte(reader, is_tcp).await?;
+    }
+    let valid = match mode {
+        TransferMode::Crc16 => {
+            let hi = raw_read_byte(reader, is_tcp).await?;
+            let lo = raw_read_byte(reader, is_tcp).await?;
+            let recv = ((hi as u16) << 8) | lo as u16;
+            recv == crc16_xmodem(&payload)
+        }
+        TransferMode::Checksum => {
+            let recv = raw_read_byte(reader, is_tcp).await?;
+            let calc = payload.iter().fold(0u8, |a, &b| a.wrapping_add(b));
+            recv == calc
+        }
+    };
+    if valid && verbose {
+        let name_len = payload.iter().position(|&b| b == 0).unwrap_or(0);
+        let name = std::str::from_utf8(&payload[..name_len])
+            .unwrap_or("<invalid>");
+        glog!("XMODEM recv: YMODEM filename='{}'", name);
+    }
+    Ok(valid)
+}
+
+/// Same as `receive_block` but the block-number + complement bytes have
+/// already been read by the caller.  Used for YMODEM first-block
+/// handling where we peek at `block_num` to distinguish block 0
+/// (filename header) from block 1 (first data block).
+#[allow(clippy::too_many_arguments)]
+async fn receive_block_body(
+    reader: &mut (impl AsyncRead + Unpin),
+    block_num: u8,
+    block_complement: u8,
+    expected_block: &mut u8,
+    mode: TransferMode,
+    is_tcp: bool,
+    verbose: bool,
+    block_size: usize,
+) -> Result<Vec<u8>, String> {
     if verbose { glog!("XMODEM recv block: num=0x{:02X} complement=0x{:02X} expected=0x{:02X} size={} mode={}",
         block_num, block_complement, *expected_block, block_size,
         match mode { TransferMode::Crc16 => "CRC16", TransferMode::Checksum => "Checksum" }); }
@@ -309,6 +437,7 @@ async fn receive_block(
 // XMODEM PROTOCOL - SEND (DOWNLOAD)
 // =============================================================================
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn xmodem_send(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),
@@ -317,6 +446,7 @@ pub(crate) async fn xmodem_send(
     is_petscii: bool,
     verbose: bool,
     use_1k: bool,
+    ymodem: Option<YmodemHeader>,
 ) -> Result<(), String> {
     let cfg = config::get_config();
     let negotiation_timeout = cfg.xmodem_negotiation_timeout;
@@ -378,6 +508,42 @@ pub(crate) async fn xmodem_send(
     .await
     {
         if verbose { glog!("XMODEM send: drained negotiation byte 0x{:02X}", b); }
+    }
+
+    // ─── YMODEM block 0 (filename header) ──────────────────
+    //
+    // When `ymodem` is set, emit an SOH block with block_num=0 carrying
+    // `filename\0size mtime\0` followed by NUL padding out to 128 bytes.
+    // The receiver ACKs block 0 and then sends a second 'C' byte to
+    // signal it's ready for the data phase.
+    if let Some(ref hdr) = ymodem {
+        send_ymodem_block_zero(
+            reader,
+            writer,
+            hdr,
+            is_tcp,
+            block_timeout,
+            max_retries,
+            verbose,
+        )
+        .await?;
+        // Wait for the receiver's second 'C' (data-phase request).
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(block_timeout),
+            raw_read_byte(reader, is_tcp),
+        )
+        .await
+        {
+            Ok(Ok(b)) if b == CRC_REQUEST => {
+                if verbose { glog!("XMODEM send: got second 'C' after block 0"); }
+            }
+            Ok(Ok(b)) => {
+                if verbose { glog!("XMODEM send: expected 'C' after block 0 got 0x{:02X}", b); }
+            }
+            _ => {
+                if verbose { glog!("XMODEM send: timed out waiting for second 'C' after block 0"); }
+            }
+        }
     }
 
     // Pad data to a 128-byte boundary (the minimum granularity).  When
@@ -517,10 +683,39 @@ pub(crate) async fn xmodem_send(
         )
         .await
         {
-            Ok(Ok(ACK)) => return Ok(()),
+            Ok(Ok(ACK)) => {
+                // YMODEM end-of-batch: after EOT is ACKed, the receiver
+                // sends one more 'C' and expects an empty block 0
+                // (filename starts with NUL) meaning "no more files."
+                if ymodem.is_some() {
+                    send_ymodem_end_of_batch(
+                        reader,
+                        writer,
+                        is_tcp,
+                        block_timeout,
+                        max_retries,
+                        verbose,
+                    )
+                    .await?;
+                }
+                return Ok(());
+            }
             Ok(Ok(NAK)) => continue,
             Ok(Ok(b)) => {
                 if verbose { glog!("XMODEM send: unexpected EOT response 0x{:02X}, treating as ACK", b); }
+                if ymodem.is_some() {
+                    // Best-effort: attempt the end-of-batch handshake
+                    // but don't hard-fail the transfer if it flakes.
+                    let _ = send_ymodem_end_of_batch(
+                        reader,
+                        writer,
+                        is_tcp,
+                        block_timeout,
+                        max_retries,
+                        verbose,
+                    )
+                    .await;
+                }
                 return Ok(());
             }
             Ok(Err(e)) => {
@@ -531,6 +726,133 @@ pub(crate) async fn xmodem_send(
         }
     }
     if verbose { glog!("XMODEM send: EOT not ACKed after {} retries, assuming success", max_retries); }
+    Ok(())
+}
+
+/// Build and transmit YMODEM block 0 (filename + size header).
+/// Uses a 128-byte SOH block regardless of the sender's 1K preference
+/// because the YMODEM spec fixes block 0 at 128 bytes.
+async fn send_ymodem_block_zero(
+    reader: &mut (impl AsyncRead + Unpin),
+    writer: &mut (impl AsyncWrite + Unpin),
+    hdr: &YmodemHeader,
+    is_tcp: bool,
+    block_timeout: u64,
+    max_retries: usize,
+    verbose: bool,
+) -> Result<(), String> {
+    // Build the 128-byte payload: "filename\0size_decimal\0" then NUL
+    // padding.  Filenames are limited to what fits; anything longer is
+    // truncated at 100 bytes so the size field still fits in 128.
+    let mut payload = [0u8; XMODEM_BLOCK_SIZE];
+    let fn_bytes = hdr.filename.as_bytes();
+    let fn_cap = fn_bytes.len().min(100);
+    payload[..fn_cap].copy_from_slice(&fn_bytes[..fn_cap]);
+    // payload[fn_cap] is already 0 (null-terminator for filename).
+    let meta = format!("{} ", hdr.size);
+    let meta_start = fn_cap + 1;
+    let meta_end = (meta_start + meta.len()).min(XMODEM_BLOCK_SIZE);
+    let meta_len = meta_end - meta_start;
+    payload[meta_start..meta_end]
+        .copy_from_slice(&meta.as_bytes()[..meta_len]);
+    // Remaining bytes stay 0 as padding/NUL-terminator.
+
+    let mut packet = Vec::with_capacity(3 + XMODEM_BLOCK_SIZE + 2);
+    packet.push(SOH);
+    packet.push(0);       // block_num = 0
+    packet.push(0xFF);    // !0
+    packet.extend_from_slice(&payload);
+    let crc = crc16_xmodem(&payload);
+    packet.push((crc >> 8) as u8);
+    packet.push((crc & 0xFF) as u8);
+
+    if verbose { glog!(
+        "XMODEM send: YMODEM block 0 filename='{}' size={}",
+        hdr.filename, hdr.size,
+    ); }
+
+    let mut retries = 0;
+    loop {
+        if retries >= max_retries {
+            return Err("YMODEM block 0: too many retries".into());
+        }
+        raw_write_bytes(writer, &packet, is_tcp).await?;
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(block_timeout),
+            raw_read_byte(reader, is_tcp),
+        )
+        .await
+        {
+            Ok(Ok(ACK)) => return Ok(()),
+            Ok(Ok(NAK)) => {
+                retries += 1;
+                continue;
+            }
+            Ok(Ok(CAN)) => return Err("Transfer cancelled by receiver".into()),
+            Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {
+                retries += 1;
+                continue;
+            }
+        }
+    }
+}
+
+/// After the last data EOT is ACKed, the YMODEM receiver sends one more
+/// 'C' and expects an all-zero block 0 meaning "end of batch, no more
+/// files."  This keeps single-file YMODEM downloads semantically
+/// correct for receivers that enforce the full protocol.
+async fn send_ymodem_end_of_batch(
+    reader: &mut (impl AsyncRead + Unpin),
+    writer: &mut (impl AsyncWrite + Unpin),
+    is_tcp: bool,
+    block_timeout: u64,
+    max_retries: usize,
+    verbose: bool,
+) -> Result<(), String> {
+    // Wait for the receiver's final 'C'.  Some lax receivers skip this
+    // step; don't hard-fail if it never arrives.
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(block_timeout),
+        raw_read_byte(reader, is_tcp),
+    )
+    .await
+    {
+        Ok(Ok(b)) if b == CRC_REQUEST => {
+            if verbose { glog!("XMODEM send: got end-of-batch 'C'"); }
+        }
+        other => {
+            if verbose { glog!("XMODEM send: no end-of-batch 'C' ({:?}); skipping empty block 0", other); }
+            return Ok(());
+        }
+    }
+
+    let payload = [0u8; XMODEM_BLOCK_SIZE];
+    let mut packet = Vec::with_capacity(3 + XMODEM_BLOCK_SIZE + 2);
+    packet.push(SOH);
+    packet.push(0);
+    packet.push(0xFF);
+    packet.extend_from_slice(&payload);
+    let crc = crc16_xmodem(&payload);
+    packet.push((crc >> 8) as u8);
+    packet.push((crc & 0xFF) as u8);
+
+    let mut retries = 0;
+    while retries < max_retries {
+        raw_write_bytes(writer, &packet, is_tcp).await?;
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(block_timeout),
+            raw_read_byte(reader, is_tcp),
+        )
+        .await
+        {
+            Ok(Ok(ACK)) => return Ok(()),
+            Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {
+                retries += 1;
+                continue;
+            }
+        }
+    }
+    if verbose { glog!("XMODEM send: end-of-batch block 0 not ACKed, continuing"); }
     Ok(())
 }
 
@@ -718,6 +1040,7 @@ mod tests {
                 false,
                 false,
                 use_1k,
+                None, // ymodem disabled
             )
             .await
             .unwrap();
@@ -870,6 +1193,7 @@ mod tests {
                 false,
                 false,
                 true, // use_1k
+                None, // ymodem disabled
             )
             .await
         });
@@ -920,6 +1244,777 @@ mod tests {
     async fn test_xmodem_round_trip_single_byte() {
         let received = xmodem_round_trip(&[0x42]).await;
         assert_eq!(received, vec![0x42]);
+    }
+
+    // ─── YMODEM round-trips ───────────────────────────────
+
+    /// Drive an xmodem_send / xmodem_receive pair with the sender in
+    /// YMODEM mode.  The receiver is always prepared to skip a block 0
+    /// filename header, so the same xmodem_receive path handles it.
+    async fn ymodem_round_trip(filename: &str, original: &[u8]) -> Vec<u8> {
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+
+        let data = original.to_vec();
+        let hdr = YmodemHeader {
+            filename: filename.to_string(),
+            size: data.len() as u64,
+        };
+
+        let send_task = tokio::spawn(async move {
+            xmodem_send(
+                &mut send_read,
+                &mut send_write,
+                &data,
+                false,
+                false,
+                false,
+                true, // use_1k (YMODEM implies 1K blocks)
+                Some(hdr),
+            )
+            .await
+            .unwrap();
+        });
+        let recv_task = tokio::spawn(async move {
+            xmodem_receive(&mut recv_read, &mut recv_write, false, false, false)
+                .await
+                .unwrap()
+        });
+
+        send_task.await.unwrap();
+        recv_task.await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_ymodem_round_trip_single_1k_block() {
+        let original: Vec<u8> = (0..XMODEM_1K_BLOCK_SIZE).map(|i| (i & 0xFF) as u8).collect();
+        let received = ymodem_round_trip("test.bin", &original).await;
+        assert_eq!(received, original);
+    }
+
+    #[tokio::test]
+    async fn test_ymodem_round_trip_small_file() {
+        let original = b"hello YMODEM";
+        let received = ymodem_round_trip("hello.txt", original).await;
+        // Trailing SUB padding is stripped on receive; the first 12
+        // bytes must match exactly.
+        assert_eq!(&received[..original.len()], original);
+    }
+
+    #[tokio::test]
+    async fn test_ymodem_round_trip_mixed_1k_plus_final_soh() {
+        // 1024 + 200 bytes: one STX + one SOH partial.
+        let original: Vec<u8> = (0..(XMODEM_1K_BLOCK_SIZE + 200))
+            .map(|i| ((i * 13) & 0xFF) as u8)
+            .collect();
+        let received = ymodem_round_trip("mixed.dat", &original).await;
+        assert_eq!(&received[..original.len()], original);
+    }
+
+    #[tokio::test]
+    async fn test_ymodem_round_trip_long_filename_truncated_to_100() {
+        // The sender truncates filenames to 100 bytes to leave room
+        // for the size/metadata trailer inside the 128-byte block 0.
+        // A 150-char filename should still round-trip the data OK —
+        // the receiver discards the header, so truncation doesn't
+        // affect file contents.
+        let long_name: String = "a".repeat(150);
+        let original = b"payload-for-long-filename-test";
+        let received = ymodem_round_trip(&long_name, original).await;
+        assert_eq!(&received[..original.len()], original);
+    }
+
+    #[tokio::test]
+    async fn test_ymodem_round_trip_protocol_bytes_in_data() {
+        // Payload filled with XMODEM-family protocol bytes pushed
+        // through the YMODEM send/receive pipeline.  Verifies the
+        // data-block path is byte-transparent even when the payload
+        // looks like framing bytes.
+        let mut original: Vec<u8> = Vec::with_capacity(XMODEM_1K_BLOCK_SIZE);
+        for _ in 0..(XMODEM_1K_BLOCK_SIZE / 8) {
+            original.extend_from_slice(&[SOH, STX, EOT, ACK, NAK, CAN, SUB, 0xFF]);
+        }
+        let received = ymodem_round_trip("proto.bin", &original).await;
+        assert_eq!(&received[..original.len()], original);
+    }
+
+    // ─── Checksum-mode round-trip (NAK-initiated) ─────────
+
+    /// Drive `xmodem_send` against a handwritten receiver that starts
+    /// negotiation with NAK (checksum mode), verify the sender emits
+    /// 1-byte checksum trailers, and confirm the payload round-trips.
+    /// The production `xmodem_receive` normally sends 'C' first and
+    /// only falls back to NAK after a timeout, so end-to-end checksum
+    /// mode wasn't otherwise exercised by the test suite.
+    #[tokio::test]
+    async fn test_xmodem_checksum_mode_round_trip() {
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+
+        let original: Vec<u8> =
+            b"Checksum-mode payload, a few SOHs (\x01\x01\x01) too.".to_vec();
+        let original_clone = original.clone();
+
+        let send_task = tokio::spawn(async move {
+            xmodem_send(
+                &mut send_read,
+                &mut send_write,
+                &original_clone,
+                false, // is_tcp
+                false, // is_petscii
+                false, // verbose
+                false, // use_1k — classic XMODEM only in checksum mode
+                None,  // ymodem disabled
+            )
+            .await
+            .unwrap();
+        });
+
+        // Fake receiver that forces checksum mode.
+        let recv_task = tokio::spawn(async move {
+            // Initiate with NAK → sender enters checksum mode.
+            raw_write_byte(&mut recv_write, NAK, false).await.unwrap();
+
+            let mut received: Vec<u8> = Vec::new();
+            let mut expected_block: u8 = 1;
+            loop {
+                let header = raw_read_byte(&mut recv_read, false).await.unwrap();
+                match header {
+                    EOT => {
+                        raw_write_byte(&mut recv_write, ACK, false).await.unwrap();
+                        break;
+                    }
+                    SOH => {
+                        let block_num =
+                            raw_read_byte(&mut recv_read, false).await.unwrap();
+                        let block_complement =
+                            raw_read_byte(&mut recv_read, false).await.unwrap();
+                        assert_eq!(block_complement, !block_num,
+                            "complement byte must be bitwise NOT of block_num");
+                        assert_eq!(block_num, expected_block,
+                            "block numbers must be sequential starting from 1");
+                        let mut payload = [0u8; XMODEM_BLOCK_SIZE];
+                        for b in payload.iter_mut() {
+                            *b = raw_read_byte(&mut recv_read, false).await.unwrap();
+                        }
+                        // Checksum trailer (1 byte) — NOT CRC-16 (2 bytes).
+                        let recv_sum =
+                            raw_read_byte(&mut recv_read, false).await.unwrap();
+                        let calc_sum =
+                            payload.iter().fold(0u8, |a, &b| a.wrapping_add(b));
+                        assert_eq!(
+                            recv_sum, calc_sum,
+                            "checksum-mode sender must emit valid 8-bit sum",
+                        );
+                        received.extend_from_slice(&payload);
+                        raw_write_byte(&mut recv_write, ACK, false).await.unwrap();
+                        expected_block = expected_block.wrapping_add(1);
+                    }
+                    other => panic!(
+                        "checksum-mode sender emitted unexpected header 0x{:02X}",
+                        other,
+                    ),
+                }
+            }
+            received
+        });
+
+        send_task.await.unwrap();
+        let mut received = recv_task.await.unwrap();
+        // Strip trailing SUB padding (sender pads the final block).
+        while received.last() == Some(&SUB) {
+            received.pop();
+        }
+        assert_eq!(received, original);
+    }
+
+    // ─── IAC-escape round-trips (telnet envelope) ─────────
+
+    /// Round-trip helper for XMODEM/XMODEM-1K with `is_tcp=true`.  The
+    /// sender IAC-escapes 0xFF data bytes on the wire; the receiver
+    /// unescapes.  Both sides must see the identical original payload
+    /// despite the envelope.
+    async fn xmodem_round_trip_iac(original: &[u8], use_1k: bool) -> Vec<u8> {
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+
+        let data = original.to_vec();
+        let send_task = tokio::spawn(async move {
+            xmodem_send(
+                &mut send_read,
+                &mut send_write,
+                &data,
+                true,  // is_tcp — enable IAC escaping
+                false,
+                false,
+                use_1k,
+                None,
+            )
+            .await
+            .unwrap();
+        });
+        let recv_task = tokio::spawn(async move {
+            xmodem_receive(&mut recv_read, &mut recv_write, true, false, false)
+                .await
+                .unwrap()
+        });
+        send_task.await.unwrap();
+        recv_task.await.unwrap()
+    }
+
+    async fn ymodem_round_trip_iac(filename: &str, original: &[u8]) -> Vec<u8> {
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+
+        let data = original.to_vec();
+        let hdr = YmodemHeader {
+            filename: filename.to_string(),
+            size: data.len() as u64,
+        };
+        let send_task = tokio::spawn(async move {
+            xmodem_send(
+                &mut send_read,
+                &mut send_write,
+                &data,
+                true, // is_tcp
+                false,
+                false,
+                true, // use_1k (YMODEM implies 1K)
+                Some(hdr),
+            )
+            .await
+            .unwrap();
+        });
+        let recv_task = tokio::spawn(async move {
+            xmodem_receive(&mut recv_read, &mut recv_write, true, false, false)
+                .await
+                .unwrap()
+        });
+        send_task.await.unwrap();
+        recv_task.await.unwrap()
+    }
+
+    /// 0xFF bytes in the data payload must survive telnet IAC escaping:
+    /// sender doubles them on the wire, receiver collapses back.
+    #[tokio::test]
+    async fn test_xmodem_round_trip_iac_escaping_0xff_in_data() {
+        let original: Vec<u8> = vec![0xFF; 128];
+        let received = xmodem_round_trip_iac(&original, false).await;
+        assert_eq!(received, original);
+    }
+
+    #[tokio::test]
+    async fn test_xmodem_round_trip_iac_escaping_all_bytes() {
+        // Every byte value 0..=255 across two 128-byte blocks, with
+        // IAC escaping active.  This is the strictest byte-transparency
+        // check for classic XMODEM over a telnet-style transport.
+        let original: Vec<u8> = (0..=255u8).collect();
+        let received = xmodem_round_trip_iac(&original, false).await;
+        assert_eq!(received, original);
+    }
+
+    #[tokio::test]
+    async fn test_xmodem_1k_round_trip_iac_escaping_all_bytes() {
+        // Same stress test forced into XMODEM-1K mode.  Tests the
+        // 1024-byte-block path over a telnet envelope.
+        let mut original: Vec<u8> = Vec::with_capacity(XMODEM_1K_BLOCK_SIZE);
+        for b in 0..=255u8 {
+            original.extend_from_slice(&[b; 4]);
+        }
+        assert_eq!(original.len(), XMODEM_1K_BLOCK_SIZE);
+        let received = xmodem_round_trip_iac(&original, true).await;
+        assert_eq!(received, original);
+    }
+
+    #[tokio::test]
+    async fn test_ymodem_round_trip_iac_escaping() {
+        // YMODEM block 0 filename header + data blocks over a telnet
+        // envelope.  0xFF bytes in the data must survive; block 0
+        // payload is short enough to contain no 0xFF itself.
+        let original: Vec<u8> = (0..=255u8).collect();
+        let received = ymodem_round_trip_iac("iac.bin", &original).await;
+        assert_eq!(&received[..original.len()], original);
+    }
+
+    // ─── Error-path & edge-case tests ─────────────────────
+
+    /// Read one 128-byte XMODEM-CRC block from a stream and return its
+    /// payload.  Frame: `SOH | num | !num | 128 data bytes | CRC-hi | CRC-lo`.
+    /// Used by the fake-receiver tests below.
+    async fn read_soh_crc_block(
+        reader: &mut (impl AsyncRead + Unpin),
+    ) -> Vec<u8> {
+        let soh = raw_read_byte(reader, false).await.unwrap();
+        assert_eq!(soh, SOH, "expected SOH header");
+        let _block_num = raw_read_byte(reader, false).await.unwrap();
+        let _block_complement = raw_read_byte(reader, false).await.unwrap();
+        let mut payload = vec![0u8; XMODEM_BLOCK_SIZE];
+        for b in payload.iter_mut() {
+            *b = raw_read_byte(reader, false).await.unwrap();
+        }
+        // CRC trailer (2 bytes).
+        let _ = raw_read_byte(reader, false).await.unwrap();
+        let _ = raw_read_byte(reader, false).await.unwrap();
+        payload
+    }
+
+    /// Test 1: sender must retry a block when NAK'd, and complete
+    /// successfully when the receiver eventually ACKs.
+    #[tokio::test]
+    async fn test_xmodem_send_nak_retry_then_success() {
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+
+        let original = b"NAK-retry test payload".to_vec();
+        let orig = original.clone();
+        let send_task = tokio::spawn(async move {
+            xmodem_send(
+                &mut send_read, &mut send_write, &orig,
+                false, false, false, false, None,
+            ).await.unwrap();
+        });
+
+        let recv_task = tokio::spawn(async move {
+            raw_write_byte(&mut recv_write, CRC_REQUEST, false).await.unwrap();
+            // NAK block 1 twice.
+            for _ in 0..2 {
+                let _ = read_soh_crc_block(&mut recv_read).await;
+                raw_write_byte(&mut recv_write, NAK, false).await.unwrap();
+            }
+            // Third attempt: ACK with actual payload verification.
+            let payload = read_soh_crc_block(&mut recv_read).await;
+            raw_write_byte(&mut recv_write, ACK, false).await.unwrap();
+            // EOT.
+            let eot = raw_read_byte(&mut recv_read, false).await.unwrap();
+            assert_eq!(eot, EOT);
+            raw_write_byte(&mut recv_write, ACK, false).await.unwrap();
+            payload
+        });
+
+        send_task.await.unwrap();
+        let payload = recv_task.await.unwrap();
+        // The third (accepted) attempt must carry the original data.
+        assert_eq!(&payload[..original.len()], original);
+    }
+
+    /// Test 2: corrupted-block recovery end-to-end with the REAL
+    /// receiver.  A middle task flips one byte in block 1 on the way
+    /// to the receiver for the first attempt, then forwards verbatim.
+    /// The real `xmodem_receive` CRC-validates, NAKs, the sender
+    /// retries, and the transfer completes with correct data.
+    #[tokio::test]
+    async fn test_xmodem_corrupted_block_recovery() {
+        // Two duplex channels chained through a middle forwarder.
+        // duplex1: sender_half  ↔ peer_a
+        // duplex2: peer_b       ↔ receiver_half
+        // Forwarders: peer_a.read → peer_b.write   (sender→receiver)
+        //             peer_b.read → peer_a.write   (receiver→sender)
+        let (sender_half, peer_a) = tokio::io::duplex(16384);
+        let (peer_b, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+        let (mut peer_a_read, mut peer_a_write) = tokio::io::split(peer_a);
+        let (mut peer_b_read, mut peer_b_write) = tokio::io::split(peer_b);
+
+        let original: Vec<u8> = (0..100).map(|i| (i * 3) as u8).collect();
+        let orig = original.clone();
+        let send_task = tokio::spawn(async move {
+            xmodem_send(
+                &mut send_read, &mut send_write, &orig,
+                false, false, false, false, None,
+            ).await.unwrap();
+        });
+        let recv_task = tokio::spawn(async move {
+            xmodem_receive(&mut recv_read, &mut recv_write, false, false, false)
+                .await.unwrap()
+        });
+
+        // Forwarder sender→receiver: flip one byte in the payload of
+        // the first 131-byte packet (SOH + num + !num + 128 data + 2
+        // CRC).  For all subsequent bytes, forward verbatim.
+        let s_to_r = tokio::spawn(async move {
+            let mut buf = [0u8; 1];
+            for i in 0..(3 + XMODEM_BLOCK_SIZE + 2) {
+                if peer_a_read.read_exact(&mut buf).await.is_err() { return; }
+                if i == 10 {
+                    buf[0] ^= 0xFF; // flip all bits of one data byte
+                }
+                if peer_b_write.write_all(&buf).await.is_err() { return; }
+            }
+            tokio::io::copy(&mut peer_a_read, &mut peer_b_write).await.ok();
+        });
+        // Forwarder receiver→sender: verbatim.
+        let r_to_s = tokio::spawn(async move {
+            tokio::io::copy(&mut peer_b_read, &mut peer_a_write).await.ok();
+        });
+
+        send_task.await.unwrap();
+        let received = recv_task.await.unwrap();
+        let _ = s_to_r.await;
+        let _ = r_to_s.await;
+        assert_eq!(received, original, "receiver must recover correct data after NAK+retry");
+    }
+
+    /// Test 3: duplicate block from an unusual sender (phantom NAK
+    /// caused retransmission) must be detected and silently ACKed by
+    /// the real receiver, with no duplication in the output.
+    #[tokio::test]
+    async fn test_xmodem_receive_duplicate_block() {
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+
+        // Build a 128-byte payload for block 1.
+        let block1_data: Vec<u8> = (0..128u8).map(|i| i.wrapping_mul(5)).collect();
+        let block1_data_clone = block1_data.clone();
+
+        // Fake sender that transmits block 1 twice (same payload).
+        let send_task = tokio::spawn(async move {
+            // Wait for 'C' from receiver.
+            let req = raw_read_byte(&mut send_read, false).await.unwrap();
+            assert_eq!(req, CRC_REQUEST);
+
+            // Helper that builds an SOH+CRC packet for an arbitrary
+            // block_num and payload.
+            let build = |n: u8, data: &[u8]| -> Vec<u8> {
+                let mut p = Vec::with_capacity(3 + 128 + 2);
+                p.push(SOH);
+                p.push(n);
+                p.push(!n);
+                p.extend_from_slice(data);
+                let crc = crc16_xmodem(data);
+                p.push((crc >> 8) as u8);
+                p.push((crc & 0xFF) as u8);
+                p
+            };
+
+            // Send block 1. Wait for ACK.
+            send_write.write_all(&build(1, &block1_data_clone)).await.unwrap();
+            let a1 = raw_read_byte(&mut send_read, false).await.unwrap();
+            assert_eq!(a1, ACK);
+
+            // Send block 1 AGAIN (simulating retransmission after a
+            // lost ACK).  Real receiver should recognize as duplicate.
+            send_write.write_all(&build(1, &block1_data_clone)).await.unwrap();
+            let a_dup = raw_read_byte(&mut send_read, false).await.unwrap();
+            assert_eq!(a_dup, ACK, "receiver must ACK duplicate without error");
+
+            // Proceed to EOT.
+            raw_write_byte(&mut send_write, EOT, false).await.unwrap();
+            let a_eot = raw_read_byte(&mut send_read, false).await.unwrap();
+            assert_eq!(a_eot, ACK);
+        });
+
+        let received = xmodem_receive(
+            &mut recv_read, &mut recv_write, false, false, false,
+        ).await.unwrap();
+
+        send_task.await.unwrap();
+        // Data should appear exactly once, not doubled.
+        assert_eq!(received, block1_data);
+    }
+
+    /// Test 4a: receiver returns "cancelled by sender" when the sender
+    /// emits CAN mid-transfer.
+    #[tokio::test]
+    async fn test_xmodem_receive_aborts_on_sender_can() {
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+
+        let send_task = tokio::spawn(async move {
+            // Wait for 'C'.
+            let _ = raw_read_byte(&mut send_read, false).await.unwrap();
+            // Send CAN instead of any block.
+            raw_write_byte(&mut send_write, CAN, false).await.unwrap();
+        });
+
+        let result = xmodem_receive(
+            &mut recv_read, &mut recv_write, false, false, false,
+        ).await;
+
+        send_task.await.unwrap();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("cancelled by sender"),
+            "expected cancel-by-sender error, got: {}", err,
+        );
+    }
+
+    /// Test 4b: sender returns "cancelled by receiver" when the
+    /// receiver sends CAN in response to a data block.
+    #[tokio::test]
+    async fn test_xmodem_send_aborts_on_receiver_can_mid_transfer() {
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+
+        let data = b"payload".to_vec();
+        let send_task = tokio::spawn(async move {
+            xmodem_send(
+                &mut send_read, &mut send_write, &data,
+                false, false, false, false, None,
+            ).await
+        });
+
+        let recv_task = tokio::spawn(async move {
+            raw_write_byte(&mut recv_write, CRC_REQUEST, false).await.unwrap();
+            // Read block 1 and respond with CAN.
+            let _ = read_soh_crc_block(&mut recv_read).await;
+            raw_write_byte(&mut recv_write, CAN, false).await.unwrap();
+        });
+
+        let result = send_task.await.unwrap();
+        recv_task.await.unwrap();
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("cancelled by receiver"),
+            "expected cancel-by-receiver error",
+        );
+    }
+
+    /// Test 4c: sender returns cancel error when the receiver sends
+    /// CAN during negotiation (before any block has been transmitted).
+    #[tokio::test]
+    async fn test_xmodem_send_aborts_on_receiver_can_during_negotiation() {
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (_recv_read, mut recv_write) = tokio::io::split(receiver_half);
+
+        let data = b"never-sent".to_vec();
+        let send_task = tokio::spawn(async move {
+            xmodem_send(
+                &mut send_read, &mut send_write, &data,
+                false, false, false, false, None,
+            ).await
+        });
+
+        // Send CAN immediately in place of 'C' or NAK.
+        raw_write_byte(&mut recv_write, CAN, false).await.unwrap();
+
+        let result = send_task.await.unwrap();
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("cancelled by receiver"),
+            "expected cancel-by-receiver during negotiation",
+        );
+    }
+
+    /// Test 5: `xmodem_send` times out and returns an error when the
+    /// receiver never transmits 'C' or NAK.  Uses tokio's paused-time
+    /// mode so the test doesn't actually wait the full negotiation
+    /// window.
+    #[tokio::test(start_paused = true)]
+    async fn test_xmodem_send_negotiation_timeout() {
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        // Keep the receiver half alive so reads from sender block
+        // (rather than EOF-ing) — we want the timeout path to fire.
+        let _keep_alive = receiver_half;
+
+        let data = b"data".to_vec();
+        let send_task = tokio::spawn(async move {
+            xmodem_send(
+                &mut send_read, &mut send_write, &data,
+                false, false, false, false, None,
+            ).await
+        });
+
+        // Advance virtual time past any reasonable negotiation window.
+        tokio::time::advance(std::time::Duration::from_secs(600)).await;
+
+        let result = send_task.await.unwrap();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_lowercase().contains("timeout")
+                || err.to_lowercase().contains("negotiation"),
+            "expected negotiation-timeout error, got: {}", err,
+        );
+    }
+
+    /// Test 6: receiver NAKs when the sender transmits a block with
+    /// the wrong block number (out of sequence).
+    #[tokio::test]
+    async fn test_xmodem_receive_nak_on_out_of_sequence_block() {
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+
+        // Real receiver.
+        let recv_task = tokio::spawn(async move {
+            xmodem_receive(&mut recv_read, &mut recv_write, false, false, false)
+                .await
+        });
+
+        // Wait for 'C' from receiver.
+        let req = raw_read_byte(&mut send_read, false).await.unwrap();
+        assert_eq!(req, CRC_REQUEST);
+
+        // Fake sender: transmit block 5 instead of block 1.
+        let bogus_data = vec![0xAAu8; XMODEM_BLOCK_SIZE];
+        let crc = crc16_xmodem(&bogus_data);
+        let mut pkt = Vec::new();
+        pkt.push(SOH);
+        pkt.push(5);
+        pkt.push(!5);
+        pkt.extend_from_slice(&bogus_data);
+        pkt.push((crc >> 8) as u8);
+        pkt.push((crc & 0xFF) as u8);
+        send_write.write_all(&pkt).await.unwrap();
+
+        // Receiver should respond with NAK (expected 1, got 5).
+        let response = raw_read_byte(&mut send_read, false).await.unwrap();
+        assert_eq!(
+            response, NAK,
+            "receiver must NAK an out-of-sequence block",
+        );
+
+        // Send CAN to terminate cleanly.
+        raw_write_byte(&mut send_write, CAN, false).await.unwrap();
+        let result = recv_task.await.unwrap();
+        assert!(result.is_err());
+    }
+
+    /// Test 9: YMODEM sender must retry block 0 (the filename header)
+    /// when the receiver NAKs it, and complete successfully when the
+    /// receiver eventually ACKs.
+    #[tokio::test]
+    async fn test_ymodem_send_block_zero_nak_retry() {
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+
+        // 1024 bytes so the sender uses STX (1K block) — otherwise it
+        // falls back to SOH and our post-block-0 read assertion fails.
+        let original: Vec<u8> = (0..1024u16)
+            .map(|i| (i as u8).wrapping_mul(3))
+            .collect();
+        let orig_clone = original.clone();
+        let hdr = YmodemHeader {
+            filename: "retry.bin".to_string(),
+            size: original.len() as u64,
+        };
+
+        let send_task = tokio::spawn(async move {
+            xmodem_send(
+                &mut send_read, &mut send_write, &orig_clone,
+                false, false, false, true /* use_1k */, Some(hdr),
+            ).await.unwrap();
+        });
+
+        let recv_task = tokio::spawn(async move {
+            raw_write_byte(&mut recv_write, CRC_REQUEST, false).await.unwrap();
+
+            // Block 0 NAK'd twice.
+            for _ in 0..2 {
+                // Read full 128-byte block 0 + 2 CRC bytes.
+                for _ in 0..(3 + XMODEM_BLOCK_SIZE + 2) {
+                    raw_read_byte(&mut recv_read, false).await.unwrap();
+                }
+                raw_write_byte(&mut recv_write, NAK, false).await.unwrap();
+            }
+
+            // Third attempt: read + ACK.
+            for _ in 0..(3 + XMODEM_BLOCK_SIZE + 2) {
+                raw_read_byte(&mut recv_read, false).await.unwrap();
+            }
+            raw_write_byte(&mut recv_write, ACK, false).await.unwrap();
+
+            // Second 'C' → start data phase.
+            raw_write_byte(&mut recv_write, CRC_REQUEST, false).await.unwrap();
+
+            // Receive the 1K STX data block.
+            let hdr_byte = raw_read_byte(&mut recv_read, false).await.unwrap();
+            assert_eq!(hdr_byte, STX);
+            for _ in 0..(2 + XMODEM_1K_BLOCK_SIZE + 2) {
+                raw_read_byte(&mut recv_read, false).await.unwrap();
+            }
+            raw_write_byte(&mut recv_write, ACK, false).await.unwrap();
+
+            // EOT.
+            let eot = raw_read_byte(&mut recv_read, false).await.unwrap();
+            assert_eq!(eot, EOT);
+            raw_write_byte(&mut recv_write, ACK, false).await.unwrap();
+        });
+
+        send_task.await.unwrap();
+        recv_task.await.unwrap();
+    }
+
+    /// Test 10: XMODEM-1K → XMODEM fallback not only completes but
+    /// delivers the exact original bytes to the receiver.  Stronger
+    /// assertion than the existing opportunistic-fallback test which
+    /// only verified the transfer didn't error out.
+    #[tokio::test]
+    async fn test_xmodem_1k_fallback_preserves_exact_bytes() {
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+
+        // Known-distinct payload to detect any corruption.
+        let original: Vec<u8> = (0..XMODEM_1K_BLOCK_SIZE)
+            .map(|i| ((i * 31 + 7) & 0xFF) as u8)
+            .collect();
+        let orig_clone = original.clone();
+
+        let send_task = tokio::spawn(async move {
+            xmodem_send(
+                &mut send_read, &mut send_write, &orig_clone,
+                false, false, false, true /* use_1k */, None,
+            ).await.unwrap();
+        });
+
+        let recv_task = tokio::spawn(async move {
+            raw_write_byte(&mut recv_write, CRC_REQUEST, false).await.unwrap();
+
+            // First attempt: STX (1K).  NAK it to force fallback.
+            let hdr = raw_read_byte(&mut recv_read, false).await.unwrap();
+            assert_eq!(hdr, STX);
+            for _ in 0..(2 + XMODEM_1K_BLOCK_SIZE + 2) {
+                raw_read_byte(&mut recv_read, false).await.unwrap();
+            }
+            raw_write_byte(&mut recv_write, NAK, false).await.unwrap();
+
+            // Fallback: 8 SOH blocks covering the same 1024 bytes.
+            let mut received = Vec::with_capacity(XMODEM_1K_BLOCK_SIZE);
+            for expected_num in 1u8..=8 {
+                let hdr = raw_read_byte(&mut recv_read, false).await.unwrap();
+                assert_eq!(hdr, SOH);
+                let blk = raw_read_byte(&mut recv_read, false).await.unwrap();
+                assert_eq!(blk, expected_num);
+                raw_read_byte(&mut recv_read, false).await.unwrap(); // !blk
+                let mut payload = vec![0u8; XMODEM_BLOCK_SIZE];
+                for b in payload.iter_mut() {
+                    *b = raw_read_byte(&mut recv_read, false).await.unwrap();
+                }
+                // CRC.
+                raw_read_byte(&mut recv_read, false).await.unwrap();
+                raw_read_byte(&mut recv_read, false).await.unwrap();
+                received.extend_from_slice(&payload);
+                raw_write_byte(&mut recv_write, ACK, false).await.unwrap();
+            }
+
+            // EOT.
+            let eot = raw_read_byte(&mut recv_read, false).await.unwrap();
+            assert_eq!(eot, EOT);
+            raw_write_byte(&mut recv_write, ACK, false).await.unwrap();
+
+            received
+        });
+
+        send_task.await.unwrap();
+        let received = recv_task.await.unwrap();
+        assert_eq!(
+            received, original,
+            "fallback path must preserve exact payload bytes",
+        );
     }
 
     #[tokio::test]
@@ -987,6 +2082,7 @@ mod tests {
                 false,
                 false,
                 false,
+                None,
             )
             .await;
         });
