@@ -866,35 +866,90 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                 <div class="instructions">
                     <h3>Connecting</h3>
                     <ol>
+                        <li>At the first prompt, press <strong>K</strong> to view the gateway's public key (see <em>Public-Key Authentication</em> below), or any other key to continue</li>
                         <li>Enter the remote server hostname or IP address</li>
                         <li>Enter the port (default: 22)</li>
-                        <li>Enter your username and password for the remote server</li>
-                        <li>If the host key is unknown, confirm the SHA-256 fingerprint</li>
-                        <li>You now have a full interactive shell on the remote server</li>
-                        <li>Press <strong>Esc</strong> to disconnect and return to the main menu</li>
+                        <li>Enter your username for the remote server</li>
+                        <li>If the host key is unknown, confirm the SHA-256 fingerprint; if it has changed, review the warning carefully before accepting</li>
+                        <li>The gateway attempts <strong>public-key authentication</strong> first; if the remote accepts the gateway's key, you skip straight to the shell</li>
+                        <li>If the pubkey is not accepted, you are prompted for a password</li>
+                        <li>Once authenticated, you have a full interactive shell on the remote server</li>
+                        <li>Press <strong>Esc</strong> twice to disconnect and return to the main menu</li>
+                    </ol>
+                </div>
+
+                <div class="instructions">
+                    <h3>Public-Key Authentication</h3>
+                    <ol>
+                        <li>On first outbound dial, the gateway auto-generates an Ed25519 client keypair and stores it as <code>xmodem_gateway_ssh_key</code> (0o600 on Unix)</li>
+                        <li>From the SSH Gateway menu, press <strong>K</strong> &mdash; the public key is displayed in OpenSSH <code>ssh-ed25519 AAAA&hellip;</code> format</li>
+                        <li>Copy that single line into the remote server's <code>~/.ssh/authorized_keys</code></li>
+                        <li>Future dials to that host skip the password prompt entirely</li>
                     </ol>
                 </div>
 
                 <div class="callout callout-info">
-                    <strong>Host Key Verification:</strong> Known host keys are stored in
-                    <code>~/.ssh/known_hosts</code> (standard OpenSSH format). If a server's
-                    key changes, a security warning is displayed with the option to update
-                    the stored key.
+                    <strong>Host Key Verification:</strong> Known remote-server host keys
+                    are stored in <code>gateway_hosts</code> (in the gateway's working
+                    directory, 0o600 on Unix). This is independent of any OpenSSH
+                    <code>~/.ssh/known_hosts</code> you may have. Trust decisions
+                    (first-time accept, key update, key rejection) are written to the
+                    server log for auditability.
                 </div>
+
+                <div class="callout callout-info">
+                    <strong>Three SSH key files exist, do not confuse them:</strong>
+                    <ul style="margin: 0.5em 0;">
+                        <li><code>xmodem_ssh_host_key</code> &mdash; this gateway's <em>own</em> SSH server host key (used when clients connect <em>to</em> us over SSH)</li>
+                        <li><code>xmodem_gateway_ssh_key</code> &mdash; this gateway's outgoing client keypair (used when we dial <em>out</em> to remote SSH servers)</li>
+                        <li><code>gateway_hosts</code> &mdash; trusted remote-server fingerprints (analogous to OpenSSH's <code>known_hosts</code>)</li>
+                    </ul>
+                </div>
+
+                <p class="dim-text">
+                    Per-IP lockout is shared with the telnet server: after 3 failed
+                    authentication attempts in 5 minutes, the source IP is blocked for
+                    5 minutes across both protocols.
+                </p>
 
                 <p class="dim-text">
                     ANSI escape sequences from the remote server are automatically
                     stripped when connected from a PETSCII or ASCII terminal, ensuring
-                    readable output on vintage hardware.
+                    readable output on vintage hardware. The PTY is sized 40&times;25 for
+                    PETSCII and 80&times;24 for ANSI/ASCII.
                 </p>
 
                 <div class="cat">Telnet Gateway</div>
                 <p class="dim-text">
                     Connect to remote telnet servers through XMODEM Gateway. Press
-                    <strong>T</strong> from the main menu. Enter the hostname and port
-                    of the remote server. The gateway bridges your session with
-                    terminal-appropriate I/O handling.
+                    <strong>T</strong> from the main menu.
                 </p>
+                <div class="instructions">
+                    <h3>Connecting</h3>
+                    <ol>
+                        <li>At the mode prompt, press <strong>T</strong> to toggle between <em>Telnet protocol</em> and <em>Raw TCP</em> mode (see <em>Protocol Modes</em> below), or any other key to continue</li>
+                        <li>Enter the remote host and port (default 23)</li>
+                        <li>Session bytes are proxied between your terminal and the remote</li>
+                        <li>Press <strong>Esc</strong> twice to disconnect</li>
+                    </ol>
+                </div>
+
+                <div class="instructions">
+                    <h3>Protocol Modes</h3>
+                    <ul>
+                        <li><strong>Telnet protocol (default)</strong> &mdash; the gateway parses IAC framing, unescapes <code>IAC IAC</code> to literal 0xFF data, accepts peer-initiated <code>WILL ECHO</code> cooperatively, and refuses other options with <code>DONT</code>/<code>WONT</code>. Works with any RFC-compliant telnet server.</li>
+                        <li><strong>Cooperative</strong> (<code>telnet_gateway_negotiate = true</code>) &mdash; adds proactive offers of <code>WILL TTYPE</code>, <code>WILL NAWS</code>, and <code>DO ECHO</code> at connect, plus mid-session NAWS forwarding when you resize. Makes modern BBSes (Synchronet, Mystic) render at your actual window size.</li>
+                        <li><strong>Raw TCP</strong> (toggled with <strong>T</strong>, persisted to <code>xmodem.conf</code>) &mdash; disables the telnet IAC layer entirely. Use this when dialing destinations that aren't really telnet: some MUDs, hand-rolled BBS software, or custom services on port 23. Bytes to your local client are still IAC-escaped so a stray 0xFF doesn't confuse your telnet client.</li>
+                    </ul>
+                </div>
+
+                <div class="callout callout-info">
+                    <strong>RFC compliance:</strong> In telnet-protocol mode the gateway
+                    uses the full RFC 1143 six-state Q-method for option negotiation and
+                    caps subnegotiation bodies at 8 KiB to prevent malicious remotes from
+                    exhausting memory. It never stalls waiting for a reply, so silent or
+                    partially-compliant remotes still work.
+                </div>
             </div>
 
             <hr class="divider">
@@ -1187,14 +1242,19 @@ xmodem_max_retries = 10</span></code></pre>
                 <table class="data-table">
                     <tr><th>Command</th><th>Description</th></tr>
                     <tr><td><code>AT</code></td><td>Connection test (returns OK)</td></tr>
+                    <tr><td><code>A/</code></td><td>Repeat last command (no AT prefix, no CR required)</td></tr>
                     <tr><td><code>ATZ</code></td><td>Reset to stored configuration</td></tr>
-                    <tr><td><code>AT&amp;F</code></td><td>Factory reset (restore all defaults)</td></tr>
+                    <tr><td><code>AT&amp;F</code></td><td>Factory reset (gateway-friendly defaults)</td></tr>
                     <tr><td><code>AT&amp;W</code></td><td>Save current settings to config file</td></tr>
                     <tr><td><code>AT&amp;V</code></td><td>Display current modem configuration</td></tr>
-                    <tr><td><code>ATI</code></td><td>Display modem identification / version</td></tr>
+                    <tr><td><code>ATI</code> / <code>ATI0</code>&ndash;<code>ATI7</code></td><td>Identification variants: product code, ROM checksum, ROM test, firmware, OEM, country, diagnostics, product info</td></tr>
                     <tr><td><code>ATE0</code> / <code>ATE1</code></td><td>Disable / enable command echo</td></tr>
                     <tr><td><code>ATV0</code> / <code>ATV1</code></td><td>Numeric / verbose result codes</td></tr>
                     <tr><td><code>ATQ0</code> / <code>ATQ1</code></td><td>Enable / suppress result codes (quiet mode)</td></tr>
+                    <tr><td><code>ATX0</code>&ndash;<code>ATX4</code></td><td>Result-code verbosity (X4 default: full extended set with baud in CONNECT)</td></tr>
+                    <tr><td><code>AT&amp;C0</code> / <code>AT&amp;C1</code></td><td>DCD always on / DCD reflects carrier (default)</td></tr>
+                    <tr><td><code>AT&amp;D0</code>&ndash;<code>AT&amp;D3</code></td><td>DTR handling (0 = ignore, gateway default)</td></tr>
+                    <tr><td><code>AT&amp;K0</code>&ndash;<code>AT&amp;K4</code></td><td>Modem-layer flow control (0 = none, gateway default)</td></tr>
                     <tr><td><code>ATH</code></td><td>Hang up / close connection</td></tr>
                     <tr><td><code>ATO</code></td><td>Return to online mode (after +++ escape)</td></tr>
                     <tr><td><code>ATA</code></td><td>Answer incoming call</td></tr>
@@ -1202,11 +1262,21 @@ xmodem_max_retries = 10</span></code></pre>
                     <tr><td><code>ATDP host:port</code></td><td>Dial (pulse) &mdash; TCP connect to host</td></tr>
                     <tr><td><code>ATD host:port</code></td><td>Dial (generic) &mdash; TCP connect to host</td></tr>
                     <tr><td><code>ATDL</code></td><td>Redial last number</td></tr>
+                    <tr><td><code>ATDS</code> / <code>ATDS<em>n</em></code></td><td>Dial stored number from slot <em>n</em> (0&ndash;3; default 0)</td></tr>
+                    <tr><td><code>AT&amp;Z<em>n</em>=<em>s</em></code></td><td>Store phone number or host <em>s</em> in slot <em>n</em> (0&ndash;3). Persisted with <code>AT&amp;W</code>.</td></tr>
                     <tr><td><code>AT?</code></td><td>Show AT command help</td></tr>
                     <tr><td><code>ATS?</code></td><td>Show S-register help</td></tr>
-                    <tr><td><code>ATS<em>n</em>?</code></td><td>Query S-register <em>n</em></td></tr>
+                    <tr><td><code>ATS<em>n</em>?</code></td><td>Query S-register <em>n</em> (range S0&ndash;S26)</td></tr>
                     <tr><td><code>ATS<em>n</em>=<em>v</em></code></td><td>Set S-register <em>n</em> to value <em>v</em></td></tr>
                 </table>
+
+                <div class="callout">
+                    <strong>Dial-string modifiers</strong> (phone-number context only): <code>,</code> pauses for <em>S8</em> seconds, <code>W</code> adds <em>S6</em> seconds (wait for dial tone), <code>;</code> returns to command mode after connect, <code>*</code> and <code>#</code> are preserved as DTMF digits, <code>P</code>/<code>T</code>/<code>@</code>/<code>!</code> are accepted and ignored. Hostnames like <code>pine.example.com</code> are <em>not</em> stripped because they don't match the phone-digit pattern.
+                </div>
+
+                <div class="callout callout-info">
+                    <strong>Unrecognized commands</strong> (<code>ATB</code>, <code>ATC</code>, <code>ATL</code>, <code>ATM</code>, <code>AT&amp;B</code>, <code>AT&amp;G</code>, <code>AT&amp;J</code>, <code>AT&amp;S</code>, <code>AT&amp;T</code>, <code>AT&amp;Y</code>, etc.) return <code>OK</code> so legacy init strings don't halt mid-setup on commands we can't implement in a software emulator.
+                </div>
 
                 <div class="callout">
                     <strong>Escape Sequence:</strong> While connected (online mode), send
@@ -1226,13 +1296,20 @@ xmodem_max_retries = 10</span></code></pre>
                     <tr><td>S4</td><td>10</td><td>Line feed character</td></tr>
                     <tr><td>S5</td><td>8</td><td>Backspace character</td></tr>
                     <tr><td>S6</td><td>2</td><td>Wait for dial tone (seconds)</td></tr>
-                    <tr><td>S7</td><td>50</td><td>Wait for carrier (seconds)</td></tr>
+                    <tr><td>S7</td><td><strong>15</strong></td><td>Wait for carrier (seconds) &mdash; Hayes default is 50; reduced here so failed TCP dials return quickly. Capped internally at 60s.</td></tr>
                     <tr><td>S8</td><td>2</td><td>Comma pause time (seconds)</td></tr>
                     <tr><td>S9</td><td>6</td><td>Carrier detect response (1/10 sec)</td></tr>
                     <tr><td>S10</td><td>14</td><td>Carrier loss disconnect (1/10 sec)</td></tr>
                     <tr><td>S11</td><td>95</td><td>DTMF tone duration (milliseconds)</td></tr>
                     <tr><td>S12</td><td>50</td><td>Escape guard time (1/50 sec; 50 = 1 second)</td></tr>
+                    <tr><td>S13&ndash;S24</td><td>0</td><td>Reserved. Stored and persisted so legacy init strings that probe these registers don't halt with ERROR, but they have no effect on the emulator.</td></tr>
+                    <tr><td>S25</td><td>5</td><td>DTR detect time (1/100 sec). Reserved &mdash; we don't drive DTR.</td></tr>
+                    <tr><td>S26</td><td>1</td><td>RTS-to-CTS delay (1/100 sec). Reserved &mdash; we don't drive RTS/CTS.</td></tr>
                 </table>
+
+                <div class="callout">
+                    <strong>Keep S3, S4, and S5 at distinct values.</strong> Command-mode line editing dispatches on the raw byte: the CR branch is checked before BS, so setting <code>S3 = 8</code> would cause backspace to terminate the line. Leaving S3/S4/S5 at their Hayes defaults (13/10/8) avoids this.
+                </div>
             </div>
 
             <hr class="divider">
@@ -1310,6 +1387,7 @@ xmodem_max_retries = 10</span></code></pre>
                     <tr><th>Policy</th><th>Value</th></tr>
                     <tr><td>Max failed attempts</td><td>3 per IP address</td></tr>
                     <tr><td>Lockout duration</td><td>5 minutes</td></tr>
+                    <tr><td>Protocol scope</td><td>Shared across telnet and SSH &mdash; an attacker can't bounce between the two to reset the counter</td></tr>
                     <tr><td>Counter reset</td><td>After lockout expires or successful login</td></tr>
                     <tr><td>Credential comparison</td><td>Constant-time (timing attack resistant)</td></tr>
                 </table>
@@ -1319,6 +1397,36 @@ xmodem_max_retries = 10</span></code></pre>
                     All file operations are restricted to the configured transfer directory.
                     Filenames are validated to prevent path traversal. Directory changes
                     are canonicalized to prevent symlink escapes.
+                </p>
+
+                <div class="cat">Sensitive File Protection</div>
+                <p class="dim-text">
+                    On Unix, the following files are written with mode <code>0o600</code>
+                    (owner read/write only) so other local users can't read them:
+                </p>
+                <div class="instructions">
+                    <ul>
+                        <li><code>xmodem.conf</code> &mdash; contains telnet/SSH passwords and the Groq API key</li>
+                        <li><code>xmodem_ssh_host_key</code> &mdash; the gateway's SSH server private host key</li>
+                        <li><code>xmodem_gateway_ssh_key</code> &mdash; the gateway's outgoing SSH client key</li>
+                        <li><code>gateway_hosts</code> &mdash; remote-server host keys (privacy: reveals dial history)</li>
+                        <li><code>dialup.conf</code> &mdash; phone-to-host mapping</li>
+                    </ul>
+                </div>
+                <p class="dim-text">
+                    On Windows, NTFS ACLs are inherited from the parent directory. For
+                    multi-user Windows boxes, place the binary in a per-user folder
+                    (e.g. under <code>%USERPROFILE%</code>) so the ACL inherits
+                    owner-only access.
+                </p>
+
+                <div class="cat">Telnet Gateway DoS Protection</div>
+                <p class="dim-text">
+                    Subnegotiation (<code>IAC SB &hellip; IAC SE</code>) bodies from remote
+                    servers are capped at 8&nbsp;KiB to prevent a malicious peer from
+                    exhausting memory by sending a huge SB without a terminating
+                    <code>IAC SE</code>. The state machine still resyncs on the
+                    eventual terminator so the session isn't corrupted.
                 </p>
 
                 <div class="cat">Signal Handling</div>

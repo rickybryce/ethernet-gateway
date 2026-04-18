@@ -3846,9 +3846,12 @@ impl TelnetSession {
         Ok(())
     }
 
-    async fn gateway_prompts(
+    /// Prompt for the remote SSH host, port, and username.  Password is
+    /// collected separately (`gateway_password_prompt`) so we can skip
+    /// it entirely when public-key authentication succeeds.
+    async fn gateway_host_prompts(
         &mut self,
-    ) -> Result<Option<(String, u16, String, String)>, std::io::Error> {
+    ) -> Result<Option<(String, u16, String)>, std::io::Error> {
         self.send(&format!("  {} ", self.cyan("Host:")))
             .await?;
         self.flush().await?;
@@ -3880,15 +3883,23 @@ impl TelnetSession {
             _ => return Ok(None),
         };
 
+        Ok(Some((host, port, username)))
+    }
+
+    /// Prompt for the remote SSH password.  Called only after public-key
+    /// authentication is rejected by the remote so users who have set up
+    /// the gateway's key in the remote's `authorized_keys` never see
+    /// this prompt at all.
+    async fn gateway_password_prompt(
+        &mut self,
+    ) -> Result<Option<String>, std::io::Error> {
         self.send(&format!("  {} ", self.cyan("Password:")))
             .await?;
         self.flush().await?;
-        let password = match self.get_password_input().await? {
-            Some(s) => s,
-            None => return Ok(None),
-        };
-
-        Ok(Some((host, port, username, password)))
+        match self.get_password_input().await? {
+            Some(s) => Ok(Some(s)),
+            None => Ok(None),
+        }
     }
 
     /// SSH gateway: connect to a remote server and proxy the session.
@@ -3944,20 +3955,20 @@ impl TelnetSession {
             break;
         }
 
-        let (host, port, username, password) = if idle_timeout.is_zero() {
-            match self.gateway_prompts().await {
-                Ok(Some(creds)) => creds,
+        let (host, port, username) = if idle_timeout.is_zero() {
+            match self.gateway_host_prompts().await {
+                Ok(Some(v)) => v,
                 Ok(None) => return Ok(()),
                 Err(e) => return Err(e),
             }
         } else {
             match tokio::time::timeout(
                 idle_timeout,
-                self.gateway_prompts(),
+                self.gateway_host_prompts(),
             )
             .await
             {
-                Ok(Ok(Some(creds))) => creds,
+                Ok(Ok(Some(v))) => v,
                 Ok(Ok(None)) => return Ok(()),
                 Ok(Err(e)) => return Err(e),
                 Err(_) => {
@@ -4209,6 +4220,64 @@ impl TelnetSession {
             }
         }
         if !authed {
+            // Pubkey auth did not succeed (either we had no key, the key
+            // wasn't accepted, or there was a transport-level error).
+            // Prompt for a password now and try password auth.
+            self.send_line(&format!(
+                "  {}",
+                self.yellow("Pubkey not accepted — password required."),
+            ))
+            .await?;
+            let password = if idle_timeout.is_zero() {
+                match self.gateway_password_prompt().await {
+                    Ok(Some(p)) => p,
+                    Ok(None) => {
+                        let _ = session
+                            .disconnect(russh::Disconnect::ByApplication, "cancelled", "")
+                            .await;
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        let _ = session
+                            .disconnect(russh::Disconnect::ByApplication, "cancelled", "")
+                            .await;
+                        return Err(e);
+                    }
+                }
+            } else {
+                match tokio::time::timeout(
+                    idle_timeout,
+                    self.gateway_password_prompt(),
+                )
+                .await
+                {
+                    Ok(Ok(Some(p))) => p,
+                    Ok(Ok(None)) => {
+                        let _ = session
+                            .disconnect(russh::Disconnect::ByApplication, "cancelled", "")
+                            .await;
+                        return Ok(());
+                    }
+                    Ok(Err(e)) => {
+                        let _ = session
+                            .disconnect(russh::Disconnect::ByApplication, "cancelled", "")
+                            .await;
+                        return Err(e);
+                    }
+                    Err(_) => {
+                        let _ = session
+                            .disconnect(russh::Disconnect::ByApplication, "idle timeout", "")
+                            .await;
+                        let _ = self
+                            .send_line("\r\nDisconnected: idle timeout.")
+                            .await;
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "idle timeout at password prompt",
+                        ));
+                    }
+                }
+            };
             match session.authenticate_password(&username, &password).await {
                 Ok(russh::client::AuthResult::Success) => {
                     authed = true;
