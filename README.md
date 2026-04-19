@@ -8,12 +8,19 @@ terminals. Designed for local network use with retro and modern terminal clients
 **[User Manual](http://telnetbible.com/xmodem-gateway/index.html)**
 
 Once you run the server on your PC, you can telnet to that server from anywhere 
-on your network (allow firewall port 2323).  Example:  ATDT 192.168.1.160:2323
+on your network (allow firewall port 2323).  
+
+Example:  telnet 192.168.1.160:2323 
 
 This program also serves as a modem emulator.  For an Altairduino PRO, connect 
 directly to the altairduino, and set your modem port to be 2SIO2. (A6/A7 on 
 mine).  Remember, you can configure the serial ports by pressing stop and aux1
 up.
+
+Run IMP8, then hit T for terminal mode on the Altairduino.  
+Example:  ATDT <host>:2323
+For gateway options:  ATDT xmodem-gateway
+
 
 This should also work with the RC2014 / SC126, etc as well.
 
