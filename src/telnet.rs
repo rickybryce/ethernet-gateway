@@ -1382,6 +1382,12 @@ pub(crate) struct TelnetSession {
     // TTYPE result — set once via SB TTYPE IS. Prevents re-requesting
     // and lets detect_terminal_type skip the BACKSPACE prompt.
     ttype_matched: bool,
+    // Set the first time session_read_byte sees an IAC SB or
+    // WILL/WONT/DO/DONT from the peer.  Distinguishes a true telnet
+    // client (which participates in option negotiation, RFC 854/856)
+    // from a raw TCP client (netcat, retro firmware) that just pipes
+    // bytes.  Used to auto-enable IAC escaping only for real telnet.
+    telnet_negotiated: bool,
     // NAWS (window size), captured from SB NAWS. None if peer didn't
     // negotiate. Not yet wired into layout code.
     window_width: Option<u16>,
@@ -1430,6 +1436,7 @@ impl TelnetSession {
             neg_sent_wont: Box::new([false; 256]),
             neg_sent_dont: Box::new([false; 256]),
             ttype_matched: false,
+            telnet_negotiated: false,
             window_width: None,
             window_height: None,
         }
@@ -1474,6 +1481,7 @@ impl TelnetSession {
             neg_sent_wont: Box::new([false; 256]),
             neg_sent_dont: Box::new([false; 256]),
             ttype_matched: false,
+            telnet_negotiated: false,
             window_width: None,
             window_height: None,
         }
@@ -1702,6 +1710,7 @@ impl TelnetSession {
             match cmd {
                 IAC => return Ok(Some(IAC)), // escaped data 0xFF
                 SB => {
+                    self.telnet_negotiated = true;
                     let Some(payload) = self.read_subneg_payload().await? else {
                         return Ok(None);
                     };
@@ -1710,6 +1719,7 @@ impl TelnetSession {
                     }
                 }
                 WILL | WONT | DO | DONT => {
+                    self.telnet_negotiated = true;
                     if self.reader.read(&mut buf).await? == 0 {
                         return Ok(None);
                     }
@@ -2694,18 +2704,19 @@ impl TelnetSession {
         if !self.is_serial && !self.is_ssh {
             self.detect_terminal_type().await?;
 
-            // Auto-set the IAC/CR-NUL transform default based on the
-            // detected terminal type.  RFC 854 requires all telnet
-            // clients to escape 0xFF on the wire, but many retro
-            // clients (IMP8, CCGMS, StrikeTerm, AltairDuino firmware,
-            // some dumb-terminal boards) don't — they treat a TCP
-            // connection to port 23 as raw bytes.  PETSCII and plain
-            // ASCII connections are overwhelmingly retro and shouldn't
-            // escape; ANSI connections are overwhelmingly modern
-            // (PuTTY, Tera Term, C-Kermit) and should.  The user can
-            // still override per-session with the I key on the File
-            // Transfer menu.
-            self.xmodem_iac = matches!(self.terminal_type, TerminalType::Ansi);
+            // Auto-set the IAC/CR-NUL transform default based on
+            // whether the client actually speaks the telnet protocol
+            // (RFC 854/856).  detect_terminal_type() has already sent
+            // our opening WILL/DO batch and drained the reply window,
+            // so session_read_byte has flipped telnet_negotiated on
+            // iff the peer answered with any option-negotiation or
+            // subnegotiation bytes.  Real telnet clients (PuTTY, Tera
+            // Term, C-Kermit, SecureCRT) always negotiate and need
+            // 0xFF escaped; raw TCP clients (netcat, IMP8, CCGMS,
+            // StrikeTerm, AltairDuino firmware) stay silent and get a
+            // transparent byte stream.  The I key on the File Transfer
+            // menu still lets the user override per-session.
+            self.xmodem_iac = self.telnet_negotiated;
 
             if cfg.security_enabled
                 && !self.authenticate().await?
@@ -7860,6 +7871,26 @@ impl TelnetSession {
 
     // ─── TROUBLESHOOTING ────────────────────────────────────
 
+    fn client_type_label(&self) -> &'static str {
+        if self.is_ssh {
+            "SSH"
+        } else if self.is_serial {
+            "Serial modem"
+        } else if self.telnet_negotiated {
+            "Telnet"
+        } else {
+            "Raw TCP"
+        }
+    }
+
+    fn terminal_type_label(&self) -> &'static str {
+        match self.terminal_type {
+            TerminalType::Petscii => "PETSCII",
+            TerminalType::Ansi => "ANSI",
+            TerminalType::Ascii => "ASCII",
+        }
+    }
+
     async fn troubleshooting(&mut self) -> Result<(), std::io::Error> {
         self.clear_screen().await?;
         let sep = self.separator();
@@ -7870,6 +7901,22 @@ impl TelnetSession {
         ))
         .await?;
         self.send_line(&sep).await?;
+        self.send_line("").await?;
+        self.send_line(&format!(
+            "  Client:   {}",
+            self.cyan(self.client_type_label())
+        ))
+        .await?;
+        self.send_line(&format!(
+            "  Terminal: {}",
+            self.cyan(self.terminal_type_label())
+        ))
+        .await?;
+        self.send_line(&format!(
+            "  IAC esc:  {}",
+            self.cyan(if self.xmodem_iac { "On" } else { "Off" })
+        ))
+        .await?;
         self.send_line("").await?;
         self.send_line("  Press any key to see its hex value.")
             .await?;
@@ -8883,15 +8930,17 @@ pub fn start_server(
                                     lockouts: lo,
                                     peer_addr: Some(addr.ip()),
                                     transfer_subdir: String::new(),
-                                    // Telnet wire requires 0xFF to be doubled as IAC IAC
-                                    // in both directions (RFC 854/856).  PuTTY/ExtraPuTTY,
-                                    // Tera Term, C-Kermit, and SecureCRT all escape the
-                                    // complement byte 0xFF during XMODEM/YMODEM.  Without
-                                    // this default on, the unescaped second 0xFF is eaten
-                                    // as payload[0] and every block's CRC fails.  The I
-                                    // toggle in the File Transfer menu still lets a
-                                    // (rare) non-escaping client flip it off.
-                                    xmodem_iac: true,
+                                    // Start with IAC escaping off; session_read_byte
+                                    // flips telnet_negotiated on as soon as the client
+                                    // sends any telnet option negotiation, and run()
+                                    // sets xmodem_iac from that flag after terminal
+                                    // detection.  Real telnet clients (PuTTY, Tera Term,
+                                    // C-Kermit, SecureCRT) always negotiate and get
+                                    // IAC escaping; raw TCP clients (netcat, retro
+                                    // firmware) don't and get a transparent byte
+                                    // stream.  The I toggle in the File Transfer menu
+                                    // still lets the user override per-session.
+                                    xmodem_iac: false,
                                     web_lines: Vec::new(),
                                     web_scroll: 0,
                                     web_links: Vec::new(),
@@ -8909,6 +8958,7 @@ pub fn start_server(
                                     neg_sent_wont: Box::new([false; 256]),
                                     neg_sent_dont: Box::new([false; 256]),
                                     ttype_matched: false,
+                                    telnet_negotiated: false,
                                     window_width: None,
                                     window_height: None,
                                 };
@@ -9296,6 +9346,7 @@ mod tests {
             neg_sent_wont: Box::new([false; 256]),
             neg_sent_dont: Box::new([false; 256]),
             ttype_matched: false,
+            telnet_negotiated: false,
             window_width: None,
             window_height: None,
         }
@@ -9343,6 +9394,7 @@ mod tests {
             neg_sent_wont: Box::new([false; 256]),
             neg_sent_dont: Box::new([false; 256]),
             ttype_matched: false,
+            telnet_negotiated: false,
             window_width: None,
             window_height: None,
         };
@@ -11010,6 +11062,9 @@ mod tests {
     fn test_troubleshooting_lines_fit_petscii() {
         let lines = [
             "  CHARACTER TROUBLESHOOTING",
+            "  Client:   Serial modem",
+            "  Terminal: PETSCII",
+            "  IAC esc:  Off",
             "  Press any key to see its hex value.",
             "  Press <- twice to return to menu.",
             "  Key: 0x1B ( 27) = ESC",
