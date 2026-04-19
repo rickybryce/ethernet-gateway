@@ -2683,6 +2683,19 @@ impl TelnetSession {
         if !self.is_serial && !self.is_ssh {
             self.detect_terminal_type().await?;
 
+            // Auto-set the IAC/CR-NUL transform default based on the
+            // detected terminal type.  RFC 854 requires all telnet
+            // clients to escape 0xFF on the wire, but many retro
+            // clients (IMP8, CCGMS, StrikeTerm, AltairDuino firmware,
+            // some dumb-terminal boards) don't — they treat a TCP
+            // connection to port 23 as raw bytes.  PETSCII and plain
+            // ASCII connections are overwhelmingly retro and shouldn't
+            // escape; ANSI connections are overwhelmingly modern
+            // (PuTTY, Tera Term, C-Kermit) and should.  The user can
+            // still override per-session with the I key on the File
+            // Transfer menu.
+            self.xmodem_iac = matches!(self.terminal_type, TerminalType::Ansi);
+
             if cfg.security_enabled
                 && !self.authenticate().await?
             {
