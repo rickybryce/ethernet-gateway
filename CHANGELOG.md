@@ -9,6 +9,103 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes._
 
+## [0.3.4] - 2026-04-18
+
+### Fixed
+
+#### XMODEM / YMODEM over telnet — full RFC 854 NVT compliance
+- **CR-NUL stuffing on both send and receive.** Bare `0x0D` (CR) in file data
+  is now emitted on the wire as `CR NUL` per RFC 854 §2.2, and the receive
+  path strips trailing `NUL` after `CR`. Without this, any block containing
+  a `0x0D` data byte (common in binary files — EXE, PDF, compressed
+  archives) desynced the stream by one byte per CR. Visible symptom was
+  "Transfer stalls at 3–4 blocks, client repeatedly sends `'C'`".
+- **IAC escape/unescape on both directions** matches the existing telnet
+  NVT rule already applied to `IAC` itself; the two transforms are now
+  always active together when `xmodem_iac` is on.
+- **YMODEM end-of-batch handshake on receive.** After ACKing the final
+  `EOT`, the server now sends `'C'` and consumes the "null block 0"
+  (filename starts with `NUL`) that strict senders emit per Forsberg §7.4.
+  Fixes "YMODEM upload completes all data but client hangs" on ExtraPuTTY,
+  Tera Term, and lrzsz's `sb`.
+- **YMODEM size-based truncation.** After a YMODEM transfer the receiver
+  now truncates to the exact `size` field from block 0 instead of stripping
+  trailing `SUB` (0x1A) padding. Fixes files that legitimately end in
+  `0x1A` bytes (EXEs, some archives) being silently truncated.
+
+### Added
+
+#### Session-side configuration
+- **Gateway Configuration menu** at `Configuration → G` in the telnet
+  session: toggles the outbound Telnet mode (Telnet / Raw TCP) and the
+  outbound SSH auth mode (Key / Password) at runtime, persists to
+  `xmodem.conf`, and takes effect on the next gateway connection with no
+  server restart. Replaces the per-connection interactive prompts that
+  used to live inside the Telnet Gateway and SSH Gateway flows.
+- **Config key `ssh_gateway_auth`** (`"key"` or `"password"`, default
+  `"password"`) drives the SSH Gateway auth choice. No silent fallback —
+  failures now clearly point the user at Server → More or Config → G.
+- **Pre-transfer overwrite prompt.** On upload, if the target filename is
+  already present the server asks `Overwrite? (Y/N)` *before* the transfer
+  starts. Avoids running a multi-MB transfer only to fail at the final
+  write step.
+
+#### GUI console
+- **"More..." popups** on the Server and Serial Modem frames expose the
+  full set of persistent settings that didn't fit on the main panel —
+  telnet gateway mode + negotiation, SSH gateway auth (with the gateway's
+  public key shown read-only when Key mode is selected), the extended
+  Hayes AT profile (E/V/Q, X-level, &C/&D/&K), all 27 S-registers, and
+  the four stored phone-number slots. Each popup has its own **Save**
+  button that persists without restarting the server.
+- **Popup styling** distinct from main panels — deep forest-green panel
+  background, brighter-green text-entry fields — so the user immediately
+  sees which surface they're editing.
+
+### Changed
+
+#### XMODEM transforms auto-default
+- **Default now picked from detected terminal type.** After terminal
+  detection, `xmodem_iac` is auto-set to **on** for ANSI sessions
+  (PuTTY / ExtraPuTTY, Tera Term, C-Kermit, SecureCRT — all escape per
+  RFC) and **off** for PETSCII and ASCII sessions (retro clients like
+  IMP8, CCGMS, StrikeTerm, AltairDuino firmware that speak raw bytes
+  despite the port-23 connection). User can still flip per-session with
+  the `I` key in the File Transfer menu.
+
+#### UX polish
+- **Post-transfer settle window.** Error messages after a failed upload
+  (transfer failure, save I/O error, duplicate filename) now honour the
+  same 1-second pause the success path already used, so ExtraPuTTY's
+  transfer dialog has time to close before our message prints. Also
+  drains stray bytes from the client's post-transfer chatter so
+  `wait_for_key` actually waits for a human keypress.
+- **Select Protocol menu** on download now clears the screen instead of
+  appending after the download list.
+- **Default `ssh_gateway_auth` flipped from `key` to `password`** — works
+  out of the box with any SSH server that allows password auth; Key mode
+  requires a one-time `authorized_keys` setup.
+
+### Removed
+
+- The interactive `T`-toggle prompt inside the Telnet Gateway flow and
+  the `K`-show-pubkey prompt inside the SSH Gateway flow. Both options
+  now live in config (editable via GUI Server → More or Config → G).
+
+### Documentation
+
+- User manual §8.3, §8.6 rewritten to reflect NVT symmetry, the auto-IAC
+  default, and the overwrite prompt. `index.html` brought in line.
+- Modem Emulator help in-session now lists `AT&Zn=s` / `ATDSn` /
+  `ATIn` / `ATXn` / `AT&C/&D/&K` / `A/` alongside the pre-existing
+  quick reference.
+
+### Tests
+
+- +1 regression test: `test_ymodem_round_trip_preserves_trailing_sub_bytes`
+  verifies YMODEM size-truncation preserves a payload that legitimately
+  ends in `0x1A` bytes. Total: **571** unit + proptest tests, all green.
+
 ## [0.3.3] - 2026-04-18
 
 ### Added
