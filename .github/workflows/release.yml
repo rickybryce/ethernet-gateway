@@ -84,15 +84,57 @@ jobs:
           Compress-Archive -Path "dist\$name\*" -DestinationPath "dist\$name.zip"
           Add-Content -Path $env:GITHUB_ENV -Value "ARTIFACT=dist\$name.zip"
 
+      # ─── AppImage (Linux x86_64 only) ──────────────────────
+      # Bundles the same release binary the tar.gz ships, so users who
+      # prefer an integrated AppImage launcher don't need to reach for
+      # the tar.gz + system-wide install.  Runs only on the Linux build
+      # slot because AppImage is a Linux-only container format.
+      - name: Build AppImage
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # appimagetool is a self-contained AppImage; GitHub runners
+          # lack FUSE, so extract it and invoke AppRun directly.
+          wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage -O appimagetool
+          chmod +x appimagetool
+          ./appimagetool --appimage-extract >/dev/null
+          mkdir -p AppDir/usr/bin
+          cp target/${{ matrix.target }}/release/xmodem-gateway AppDir/usr/bin/
+          cp xmodemlogo.png AppDir/xmodem-gateway.png
+          cat > AppDir/xmodem-gateway.desktop <<'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=XMODEM Gateway
+          Comment=Telnet/SSH gateway and Hayes AT modem emulator for retro terminals
+          Exec=xmodem-gateway
+          Icon=xmodem-gateway
+          Categories=Network;Utility;
+          Terminal=false
+          EOF
+          cat > AppDir/AppRun <<'EOF'
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "${0}")")"
+          exec "${HERE}/usr/bin/xmodem-gateway" "$@"
+          EOF
+          chmod +x AppDir/AppRun
+          ARCH=x86_64 ./squashfs-root/AppRun AppDir dist/XMODEM_Gateway-x86_64.AppImage
+          echo "APPIMAGE=dist/XMODEM_Gateway-x86_64.AppImage" >> "$GITHUB_ENV"
+
       - name: SHA-256 checksum
         shell: bash
         run: |
-          if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "${ARTIFACT}" > "${ARTIFACT}.sha256"
-          else
-            # macOS / Windows (git-bash) use `shasum` / `certutil` — shasum is
-            # present on both the macOS runners and Windows git-bash.
-            shasum -a 256 "${ARTIFACT}" > "${ARTIFACT}.sha256"
+          sha() {
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$1" > "$1.sha256"
+            else
+              # macOS / Windows (git-bash): shasum is present on both.
+              shasum -a 256 "$1" > "$1.sha256"
+            fi
+          }
+          sha "${ARTIFACT}"
+          if [ -n "${APPIMAGE:-}" ] && [ -f "${APPIMAGE}" ]; then
+            sha "${APPIMAGE}"
           fi
 
       - name: Upload build artifacts
@@ -102,6 +144,8 @@ jobs:
           path: |
             ${{ env.ARTIFACT }}
             ${{ env.ARTIFACT }}.sha256
+            dist/*.AppImage
+            dist/*.AppImage.sha256
           if-no-files-found: error
 
   # ─── Sign and publish a GitHub Release ───────────────────
@@ -145,7 +189,7 @@ jobs:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
           cd dist
-          for f in xmodem-gateway-*.tar.gz xmodem-gateway-*.zip; do
+          for f in xmodem-gateway-*.tar.gz xmodem-gateway-*.zip XMODEM_Gateway-*.AppImage; do
             [ -f "$f" ] || continue
             if [ -n "${GPG_PASSPHRASE}" ]; then
               echo "${GPG_PASSPHRASE}" | gpg --batch --yes --pinentry-mode loopback \
@@ -163,7 +207,7 @@ jobs:
       - name: Sigstore-sign artifacts
         run: |
           cd dist
-          for f in xmodem-gateway-*.tar.gz xmodem-gateway-*.zip; do
+          for f in xmodem-gateway-*.tar.gz xmodem-gateway-*.zip XMODEM_Gateway-*.AppImage; do
             [ -f "$f" ] || continue
             cosign sign-blob --yes --output-signature "${f}.sig" \
               --output-certificate "${f}.pem" "$f"
@@ -201,6 +245,7 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/*.zip
+            dist/*.AppImage
             dist/*.sha256
             dist/*.asc
             dist/*.sig
