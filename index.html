@@ -788,7 +788,7 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                     <div>&nbsp;&nbsp;<span class="key">D</span>&nbsp;&nbsp;<span class="label">Download a file</span></div>
                     <div>&nbsp;&nbsp;<span class="key">X</span>&nbsp;&nbsp;<span class="label">Delete a file</span></div>
                     <div>&nbsp;&nbsp;<span class="key">C</span>&nbsp;&nbsp;<span class="label">Change directory</span></div>
-                    <div>&nbsp;&nbsp;<span class="key">I</span>&nbsp;&nbsp;<span class="label">IAC escaping [<span style="color:var(--red)">OFF</span>]</span></div>
+                    <div>&nbsp;&nbsp;<span class="key">I</span>&nbsp;&nbsp;<span class="label">IAC escaping [<span style="color:var(--green)">ON</span>]</span></div>
                     <br>
                     <div>&nbsp;&nbsp;<span class="menu-dim">[R] Refresh &nbsp; [Q] Back &nbsp; [H] Help</span></div>
                 </div>
@@ -836,17 +836,24 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                     <tr><td>Padding byte</td><td>0x1A (SUB), stripped on receive</td></tr>
                 </table>
 
-                <div class="cat">IAC Escaping</div>
+                <div class="cat">IAC &amp; CR-NUL Transforms</div>
                 <p class="dim-text">
-                    Telnet uses byte 0xFF (IAC &mdash; Interpret As Command) as a control
-                    character. When transferring binary files containing 0xFF bytes, the
-                    telnet protocol can misinterpret them. Toggle IAC escaping with
-                    <strong>I</strong> to enable safe binary transfers.
+                    Telnet NVT (RFC 854) reserves byte 0xFF as the IAC command marker
+                    and requires bare CR (0x0D) to be sent as CR-NUL. Strict clients
+                    (PuTTY / ExtraPuTTY, Tera Term, C-Kermit) follow these rules; many
+                    retro clients (IMP8, CCGMS, StrikeTerm, AltairDuino firmware) just
+                    blast raw bytes. We can't tell for sure which one you're running,
+                    so the default is set from the detected terminal type &mdash; ASCII
+                    and PETSCII get escaping off, ANSI gets it on. That's right for
+                    the overwhelming majority of real-world combinations, but if a
+                    transfer fails repeatedly with bad-block / CRC errors, press
+                    <strong>I</strong> in the File Transfer menu to flip it the other
+                    way and retry.
                 </p>
-                <div class="callout callout-warn">
-                    <strong>Warning:</strong> IAC escaping is off by default. Enable it
-                    if binary file transfers are corrupted over telnet. SSH connections
-                    do not need IAC escaping.
+                <div class="callout callout-tip">
+                    <strong>Quick check:</strong> if you see consistent block-CRC
+                    failures in one direction, the two sides disagree on escaping.
+                    Toggle <strong>I</strong> and retry.
                 </div>
             </div>
 
@@ -1468,8 +1475,8 @@ xmodem_max_retries = 10</span></code></pre>
                         <td>Increase block timeout and max retries. Check for noisy/slow connection.</td>
                     </tr>
                     <tr>
-                        <td>Binary files are corrupted</td>
-                        <td>Enable IAC escaping (<strong>I</strong> in file transfer menu). Not needed for SSH.</td>
+                        <td>Consistent block-CRC failures in the same direction</td>
+                        <td>The two sides disagree on IAC / CR-NUL escaping. Press <strong>I</strong> in the File Transfer menu to flip and retry. Not a concern on SSH.</td>
                     </tr>
                     <tr>
                         <td>File exceeds size limit</td>
