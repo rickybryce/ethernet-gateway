@@ -3160,8 +3160,18 @@ impl TelnetSession {
                 return true;
             }
             let stat = unsafe { stat.assume_init() };
-            let total = stat.f_blocks * stat.f_frsize;
-            let avail = stat.f_bavail * stat.f_frsize;
+            // `f_frsize` / `f_blocks` / `f_bavail` are u64 on Linux but
+            // u32 on macOS/BSD — cast all three to u64 explicitly so
+            // the multiplication is portable across the Unix targets
+            // our release workflow builds (Linux x86_64 + macOS aarch64).
+            // The casts are no-ops on Linux; clippy flags them because
+            // it only sees the host target.
+            #[allow(clippy::unnecessary_cast)]
+            let frsize = stat.f_frsize as u64;
+            #[allow(clippy::unnecessary_cast)]
+            let total = stat.f_blocks as u64 * frsize;
+            #[allow(clippy::unnecessary_cast)]
+            let avail = stat.f_bavail as u64 * frsize;
             if total == 0 || avail >= total {
                 return total == 0;
             }
