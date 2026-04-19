@@ -2349,6 +2349,19 @@ impl TelnetSession {
         Ok(())
     }
 
+    /// Pause after an XMODEM/YMODEM transfer so the client's own
+    /// transfer dialog finishes closing and the underlying terminal is
+    /// visible again before we print status.  Drains trailing bytes
+    /// from the client's post-transfer chatter (NAWS updates, stray
+    /// CR/LF from a dialog-dismiss keypress, etc.) so the subsequent
+    /// `wait_for_key` actually waits for a human keypress instead of
+    /// being satisfied by leftover noise.
+    async fn post_transfer_settle(&mut self) {
+        self.drain_input().await;
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        self.drain_input().await;
+    }
+
     /// Show a multi-line informational message and wait for a keypress.
     async fn show_error_lines(&mut self, lines: &[&str]) -> Result<(), std::io::Error> {
         self.send_line("").await?;
@@ -3220,6 +3233,42 @@ impl TelnetSession {
 
         let filepath = self.transfer_path().join(&filename);
 
+        // Detect duplicates up-front so the user doesn't sit through a
+        // whole transfer only to have the save-step fail.  Prompt to
+        // overwrite; if declined, cancel cleanly.
+        let overwrite = if tokio::fs::try_exists(&filepath).await.unwrap_or(false) {
+            self.send_line("").await?;
+            self.send_line(&format!(
+                "  {}",
+                self.yellow(&format!("File '{}' already exists.", filename))
+            ))
+            .await?;
+            self.send(&format!(
+                "  {} ",
+                self.cyan("Overwrite? (Y/N):")
+            ))
+            .await?;
+            self.flush().await?;
+            self.drain_input().await;
+            let answer = match self.read_byte_filtered().await? {
+                Some(b) => {
+                    if self.terminal_type == TerminalType::Petscii {
+                        petscii_to_ascii_byte(b)
+                    } else {
+                        b
+                    }
+                }
+                None => return Ok(()),
+            };
+            self.send_line("").await?;
+            if answer != b'y' && answer != b'Y' {
+                return Ok(());
+            }
+            true
+        } else {
+            false
+        };
+
         self.send_line("").await?;
         self.send_line(&format!(
             "  Ready to receive: {}",
@@ -3269,22 +3318,28 @@ impl TelnetSession {
         let data = match result {
             Ok(d) => d,
             Err(e) => {
-                self.drain_input().await;
+                self.post_transfer_settle().await;
                 self.show_error(&format!("Transfer failed: {}", e))
                     .await?;
                 return Ok(());
             }
         };
 
-        match tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&filepath)
-            .await
-        {
+        // If the user opted in to overwrite, truncate; otherwise still
+        // use `create_new` so a race-condition (another session racing
+        // to create the same name during our transfer) surfaces as an
+        // error rather than clobbering work.
+        let mut opts = tokio::fs::OpenOptions::new();
+        opts.write(true);
+        if overwrite {
+            opts.create(true).truncate(true);
+        } else {
+            opts.create_new(true);
+        }
+        match opts.open(&filepath).await {
             Ok(mut file) => {
                 if let Err(e) = file.write_all(&data).await {
-                    self.drain_input().await;
+                    self.post_transfer_settle().await;
                     self.show_error(&format!("Failed to save: {}", e))
                         .await?;
                     return Ok(());
@@ -3292,22 +3347,19 @@ impl TelnetSession {
                 let _ = file.flush().await;
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                self.drain_input().await;
+                self.post_transfer_settle().await;
                 self.show_error("File already exists.").await?;
                 return Ok(());
             }
             Err(e) => {
-                self.drain_input().await;
+                self.post_transfer_settle().await;
                 self.show_error(&format!("Failed to save: {}", e))
                     .await?;
                 return Ok(());
             }
         }
 
-        self.drain_input().await;
-        // Brief pause so the remote terminal can switch back from XMODEM
-        // mode to text display before we send the completion message.
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        self.post_transfer_settle().await;
 
         let blocks = data.len().div_ceil(crate::xmodem::XMODEM_BLOCK_SIZE);
         self.send_line("").await?;
@@ -8798,12 +8850,13 @@ pub fn start_server(
                                     peer_addr: Some(addr.ip()),
                                     transfer_subdir: String::new(),
                                     // Telnet wire requires 0xFF to be doubled as IAC IAC
-                                    // in both directions (RFC 854/856).  Default on here
-                                    // so XMODEM/YMODEM transfers don't desync when the
-                                    // file data — or a random CRC byte — happens to be
-                                    // 0xFF.  The I key in the File Transfer menu still
-                                    // lets the user toggle it off for clients that don't
-                                    // escape (rare).
+                                    // in both directions (RFC 854/856).  PuTTY/ExtraPuTTY,
+                                    // Tera Term, C-Kermit, and SecureCRT all escape the
+                                    // complement byte 0xFF during XMODEM/YMODEM.  Without
+                                    // this default on, the unescaped second 0xFF is eaten
+                                    // as payload[0] and every block's CRC fails.  The I
+                                    // toggle in the File Transfer menu still lets a
+                                    // (rare) non-escaping client flip it off.
                                     xmodem_iac: true,
                                     web_lines: Vec::new(),
                                     web_scroll: 0,
