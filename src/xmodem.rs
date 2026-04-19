@@ -76,6 +76,16 @@ pub(crate) async fn xmodem_receive(
 
     let mut file_data = Vec::new();
     let mut expected_block: u8 = 1;
+    let mut state_owned = ReadState::default();
+    let state = &mut state_owned;
+    // Set when we successfully handle a YMODEM filename-header block so
+    // the EOT handler knows to run the end-of-batch handshake.
+    let mut ymodem_mode = false;
+    // Reported file length from a YMODEM block 0.  When `Some`, we
+    // truncate `file_data` to exactly this length at end of transfer
+    // (YMODEM spec §5) instead of stripping trailing SUB padding —
+    // critical for files that legitimately end in 0x1A bytes.
+    let mut ymodem_size: Option<u64> = None;
     let negotiation_deadline =
         tokio::time::Instant::now() + tokio::time::Duration::from_secs(negotiation_timeout);
 
@@ -108,7 +118,7 @@ pub(crate) async fn xmodem_receive(
 
         match tokio::time::timeout(
             std::time::Duration::from_secs(3),
-            raw_read_byte(reader, is_tcp),
+            nvt_read_byte(reader, is_tcp, state),
         )
         .await
         {
@@ -133,8 +143,8 @@ pub(crate) async fn xmodem_receive(
                     // Peek at block_num / complement so we can detect
                     // YMODEM block 0 (filename header) vs. an ordinary
                     // first data block.
-                    let block_num = raw_read_byte(reader, is_tcp).await?;
-                    let block_complement = raw_read_byte(reader, is_tcp).await?;
+                    let block_num = nvt_read_byte(reader, is_tcp, state).await?;
+                    let block_complement = nvt_read_byte(reader, is_tcp, state).await?;
                     if byte == SOH
                         && block_num == 0
                         && block_complement == 0xFF
@@ -150,18 +160,20 @@ pub(crate) async fn xmodem_receive(
                         match tokio::time::timeout(
                             std::time::Duration::from_secs(BLOCK_BODY_TIMEOUT_SECS),
                             read_ymodem_block_zero_body(
-                                reader, mode, is_tcp, verbose,
+                                reader, mode, is_tcp, verbose, state,
                             ),
                         )
                         .await
                         {
-                            Ok(Ok(true)) => {
+                            Ok(Ok((true, size))) => {
                                 raw_write_byte(writer, ACK, is_tcp).await?;
                                 // Second 'C' starts the data phase.
                                 raw_write_byte(writer, CRC_REQUEST, is_tcp).await?;
+                                ymodem_mode = true;
+                                ymodem_size = size;
                                 break;
                             }
-                            Ok(Ok(false)) => {
+                            Ok(Ok((false, _))) => {
                                 if verbose { glog!("XMODEM recv: YMODEM block 0 CRC error"); }
                                 raw_write_byte(writer, NAK, is_tcp).await?;
                                 break;
@@ -192,6 +204,7 @@ pub(crate) async fn xmodem_receive(
                             is_tcp,
                             verbose,
                             block_size,
+                            state,
                         ),
                     )
                     .await
@@ -240,7 +253,7 @@ pub(crate) async fn xmodem_receive(
 
         let byte = match tokio::time::timeout(
             std::time::Duration::from_secs(block_timeout),
-            raw_read_byte(reader, is_tcp),
+            nvt_read_byte(reader, is_tcp, state),
         )
         .await
         {
@@ -265,6 +278,7 @@ pub(crate) async fn xmodem_receive(
                         is_tcp,
                         verbose,
                         block_size,
+                        state,
                     ),
                 )
                 .await
@@ -288,7 +302,51 @@ pub(crate) async fn xmodem_receive(
                 }
             }
             EOT => {
+                if verbose { glog!("XMODEM recv: EOT received, ACKing"); }
                 raw_write_byte(writer, ACK, is_tcp).await?;
+                if ymodem_mode {
+                    // YMODEM end-of-batch handshake (Forsberg §7.4):
+                    // after ACKing the final EOT, send one more 'C' and
+                    // expect a "null" block 0 (filename starts with NUL)
+                    // meaning "no more files in this batch."  ACK it and
+                    // we're done.  Strict senders (sb, Tera Term, PuTTY
+                    // family) wait for this exchange; if we skip it they
+                    // hang after the last data block is accepted.
+                    if verbose { glog!("XMODEM recv: YMODEM end-of-batch, sending 'C'"); }
+                    raw_write_byte(writer, CRC_REQUEST, is_tcp).await?;
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(block_timeout),
+                        nvt_read_byte(reader, is_tcp, state),
+                    )
+                    .await
+                    {
+                        Ok(Ok(SOH)) => {
+                            // Consume block_num + complement + 128-byte
+                            // payload + 2-byte CRC.  We do NOT verify
+                            // the CRC or the block number — lax senders
+                            // may skip parts of this handshake, and any
+                            // read error just ends the session normally.
+                            let _ = nvt_read_byte(reader, is_tcp, state).await;
+                            let _ = nvt_read_byte(reader, is_tcp, state).await;
+                            for _ in 0..XMODEM_BLOCK_SIZE + 2 {
+                                if nvt_read_byte(reader, is_tcp, state).await.is_err() {
+                                    break;
+                                }
+                            }
+                            raw_write_byte(writer, ACK, is_tcp).await?;
+                            if verbose { glog!("XMODEM recv: YMODEM end-of-batch ACKed"); }
+                        }
+                        Ok(Ok(b)) => {
+                            if verbose { glog!("XMODEM recv: end-of-batch unexpected byte 0x{:02X}, ending session", b); }
+                        }
+                        Ok(Err(e)) => {
+                            if verbose { glog!("XMODEM recv: end-of-batch read error: {}", e); }
+                        }
+                        Err(_) => {
+                            if verbose { glog!("XMODEM recv: end-of-batch timeout — lax sender, ending session"); }
+                        }
+                    }
+                }
                 break;
             }
             CAN => {
@@ -300,9 +358,33 @@ pub(crate) async fn xmodem_receive(
         }
     }
 
-    // Strip trailing SUB (0x1A) padding from last block.
-    while file_data.last() == Some(&SUB) {
-        file_data.pop();
+    // YMODEM: truncate to the exact size reported in block 0 (Forsberg
+    // 1988 §5).  This preserves files that legitimately end in 0x1A,
+    // which SUB-stripping would corrupt.  Fall back to SUB-stripping
+    // when the sender didn't report a size, or when we're in plain
+    // XMODEM / XMODEM-1K mode (no block 0 at all).
+    let truncated_by_size = if let Some(size) = ymodem_size {
+        let target = size as usize;
+        if target <= file_data.len() {
+            file_data.truncate(target);
+            if verbose { glog!("XMODEM recv: truncated to YMODEM size {} bytes", target); }
+            true
+        } else {
+            // Reported size > received bytes — don't extend, just keep
+            // what we have and fall back to SUB-stripping.  This can
+            // happen if the last block was lost mid-transfer and the
+            // transfer somehow still "completed" from the receiver's
+            // view, or if the sender reported a bogus size.
+            if verbose { glog!("XMODEM recv: reported size {} > received {}, falling back to SUB strip", target, file_data.len()); }
+            false
+        }
+    } else {
+        false
+    };
+    if !truncated_by_size {
+        while file_data.last() == Some(&SUB) {
+            file_data.pop();
+        }
     }
 
     Ok(file_data)
@@ -312,6 +394,7 @@ pub(crate) async fn xmodem_receive(
 /// already read).  `block_size` is 128 for SOH blocks, 1024 for STX
 /// (XMODEM-1K) blocks — within a single transfer the sender may mix
 /// block sizes, so each call picks up the right size from its header.
+#[allow(clippy::too_many_arguments)]
 async fn receive_block(
     reader: &mut (impl AsyncRead + Unpin),
     expected_block: &mut u8,
@@ -319,9 +402,10 @@ async fn receive_block(
     is_tcp: bool,
     verbose: bool,
     block_size: usize,
+    state: &mut ReadState,
 ) -> Result<Vec<u8>, String> {
-    let block_num = raw_read_byte(reader, is_tcp).await?;
-    let block_complement = raw_read_byte(reader, is_tcp).await?;
+    let block_num = nvt_read_byte(reader, is_tcp, state).await?;
+    let block_complement = nvt_read_byte(reader, is_tcp, state).await?;
     receive_block_body(
         reader,
         block_num,
@@ -331,6 +415,7 @@ async fn receive_block(
         is_tcp,
         verbose,
         block_size,
+        state,
     )
     .await
 }
@@ -340,36 +425,67 @@ async fn receive_block(
 /// Returns `Ok(true)` if the checksum/CRC is valid, `Ok(false)` if it
 /// is not.  Called under a `tokio::time::timeout` so a stalled sender
 /// can't hold the session indefinitely.
+/// Outcome of parsing a YMODEM block 0 payload.  `None` means CRC /
+/// checksum mismatch; `Some(size)` carries the reported file length if
+/// it was present and well-formed (some minimal senders omit it), or
+/// `Some(None)` if the block is valid but the length field is absent.
 async fn read_ymodem_block_zero_body(
     reader: &mut (impl AsyncRead + Unpin),
     mode: TransferMode,
     is_tcp: bool,
     verbose: bool,
-) -> Result<bool, String> {
+    state: &mut ReadState,
+) -> Result<(bool, Option<u64>), String> {
     let mut payload = [0u8; XMODEM_BLOCK_SIZE];
     for b in payload.iter_mut() {
-        *b = raw_read_byte(reader, is_tcp).await?;
+        *b = nvt_read_byte(reader, is_tcp, state).await?;
     }
     let valid = match mode {
         TransferMode::Crc16 => {
-            let hi = raw_read_byte(reader, is_tcp).await?;
-            let lo = raw_read_byte(reader, is_tcp).await?;
+            let hi = nvt_read_byte(reader, is_tcp, state).await?;
+            let lo = nvt_read_byte(reader, is_tcp, state).await?;
             let recv = ((hi as u16) << 8) | lo as u16;
             recv == crc16_xmodem(&payload)
         }
         TransferMode::Checksum => {
-            let recv = raw_read_byte(reader, is_tcp).await?;
+            let recv = nvt_read_byte(reader, is_tcp, state).await?;
             let calc = payload.iter().fold(0u8, |a, &b| a.wrapping_add(b));
             recv == calc
         }
     };
-    if valid && verbose {
-        let name_len = payload.iter().position(|&b| b == 0).unwrap_or(0);
-        let name = std::str::from_utf8(&payload[..name_len])
-            .unwrap_or("<invalid>");
-        glog!("XMODEM recv: YMODEM filename='{}'", name);
+    let mut size: Option<u64> = None;
+    if valid {
+        // Forsberg YMODEM block 0 layout:
+        //   filename\0size mtime mode serial\0 <NUL padding>
+        // All fields after the filename-terminating NUL are space
+        // separated, and the whole block of fields is NUL-terminated.
+        // We parse just the size (the only field that matters for
+        // exact truncation); mtime/mode are informational.  Minimal
+        // senders may omit everything after the filename NUL — in that
+        // case we leave size as None and fall back to SUB-stripping.
+        if let Some(name_end) = payload.iter().position(|&b| b == 0) {
+            let after = &payload[name_end + 1..];
+            if let Some(fields_end) = after.iter().position(|&b| b == 0) {
+                let fields = &after[..fields_end];
+                let text = std::str::from_utf8(fields).unwrap_or("");
+                if let Some(first) = text.split_ascii_whitespace().next()
+                    && let Ok(n) = first.parse::<u64>()
+                {
+                    size = Some(n);
+                }
+            }
+            if verbose {
+                let name = std::str::from_utf8(&payload[..name_end])
+                    .unwrap_or("<invalid>");
+                glog!(
+                    "XMODEM recv: YMODEM filename='{}' size={}",
+                    name,
+                    size.map(|n| n.to_string()).unwrap_or_else(|| "<unknown>".into()),
+                );
+            }
+        }
     }
-    Ok(valid)
+    Ok((valid, size))
 }
 
 /// Same as `receive_block` but the block-number + complement bytes have
@@ -386,6 +502,7 @@ async fn receive_block_body(
     is_tcp: bool,
     verbose: bool,
     block_size: usize,
+    state: &mut ReadState,
 ) -> Result<Vec<u8>, String> {
     if verbose { glog!("XMODEM recv block: num=0x{:02X} complement=0x{:02X} expected=0x{:02X} size={} mode={}",
         block_num, block_complement, *expected_block, block_size,
@@ -393,19 +510,19 @@ async fn receive_block_body(
 
     let mut data = vec![0u8; block_size];
     for byte in data.iter_mut() {
-        *byte = raw_read_byte(reader, is_tcp).await?;
+        *byte = nvt_read_byte(reader, is_tcp, state).await?;
     }
 
     let valid = match mode {
         TransferMode::Checksum => {
-            let recv_checksum = raw_read_byte(reader, is_tcp).await?;
+            let recv_checksum = nvt_read_byte(reader, is_tcp, state).await?;
             let calc_checksum = data.iter().fold(0u8, |acc, &b| acc.wrapping_add(b));
             if verbose { glog!("XMODEM recv block: checksum recv=0x{:02X} calc=0x{:02X}", recv_checksum, calc_checksum); }
             recv_checksum == calc_checksum
         }
         TransferMode::Crc16 => {
-            let crc_hi = raw_read_byte(reader, is_tcp).await?;
-            let crc_lo = raw_read_byte(reader, is_tcp).await?;
+            let crc_hi = nvt_read_byte(reader, is_tcp, state).await?;
+            let crc_lo = nvt_read_byte(reader, is_tcp, state).await?;
             let recv_crc = ((crc_hi as u16) << 8) | crc_lo as u16;
             let calc_crc = crc16_xmodem(&data);
             if verbose { glog!("XMODEM recv block: CRC recv=0x{:04X} calc=0x{:04X}", recv_crc, calc_crc); }
@@ -452,6 +569,8 @@ pub(crate) async fn xmodem_send(
     let negotiation_timeout = cfg.xmodem_negotiation_timeout;
     let block_timeout = cfg.xmodem_block_timeout;
     let max_retries = cfg.xmodem_max_retries;
+    let mut state_owned = ReadState::default();
+    let state = &mut state_owned;
 
     let negotiation_deadline =
         tokio::time::Instant::now() + tokio::time::Duration::from_secs(negotiation_timeout);
@@ -466,7 +585,7 @@ pub(crate) async fn xmodem_send(
             return Err("Negotiation timeout: start your XMODEM receiver".into());
         }
 
-        match tokio::time::timeout(remaining, raw_read_byte(reader, is_tcp)).await {
+        match tokio::time::timeout(remaining, nvt_read_byte(reader, is_tcp, state)).await {
             Ok(Ok(byte)) => {
                 if verbose { glog!("XMODEM send: negotiation got 0x{:02X}", byte); }
                 if is_esc_key(byte, is_petscii) {
@@ -503,7 +622,7 @@ pub(crate) async fn xmodem_send(
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     while let Ok(Ok(b)) = tokio::time::timeout(
         std::time::Duration::from_millis(50),
-        raw_read_byte(reader, is_tcp),
+        nvt_read_byte(reader, is_tcp, state),
     )
     .await
     {
@@ -525,12 +644,13 @@ pub(crate) async fn xmodem_send(
             block_timeout,
             max_retries,
             verbose,
+            state,
         )
         .await?;
         // Wait for the receiver's second 'C' (data-phase request).
         match tokio::time::timeout(
             std::time::Duration::from_secs(block_timeout),
-            raw_read_byte(reader, is_tcp),
+            nvt_read_byte(reader, is_tcp, state),
         )
         .await
         {
@@ -616,7 +736,7 @@ pub(crate) async fn xmodem_send(
             // Wait for ACK/NAK
             match tokio::time::timeout(
                 std::time::Duration::from_secs(block_timeout),
-                raw_read_byte(reader, is_tcp),
+                nvt_read_byte(reader, is_tcp, state),
             )
             .await
             {
@@ -679,7 +799,7 @@ pub(crate) async fn xmodem_send(
         raw_write_byte(writer, EOT, is_tcp).await?;
         match tokio::time::timeout(
             std::time::Duration::from_secs(block_timeout),
-            raw_read_byte(reader, is_tcp),
+            nvt_read_byte(reader, is_tcp, state),
         )
         .await
         {
@@ -695,6 +815,7 @@ pub(crate) async fn xmodem_send(
                         block_timeout,
                         max_retries,
                         verbose,
+                        state,
                     )
                     .await?;
                 }
@@ -713,6 +834,7 @@ pub(crate) async fn xmodem_send(
                         block_timeout,
                         max_retries,
                         verbose,
+                        state,
                     )
                     .await;
                 }
@@ -732,6 +854,7 @@ pub(crate) async fn xmodem_send(
 /// Build and transmit YMODEM block 0 (filename + size header).
 /// Uses a 128-byte SOH block regardless of the sender's 1K preference
 /// because the YMODEM spec fixes block 0 at 128 bytes.
+#[allow(clippy::too_many_arguments)]
 async fn send_ymodem_block_zero(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),
@@ -740,6 +863,7 @@ async fn send_ymodem_block_zero(
     block_timeout: u64,
     max_retries: usize,
     verbose: bool,
+    state: &mut ReadState,
 ) -> Result<(), String> {
     // Build the 128-byte payload: "filename\0size_decimal\0" then NUL
     // padding.  Filenames are limited to what fits; anything longer is
@@ -779,7 +903,7 @@ async fn send_ymodem_block_zero(
         raw_write_bytes(writer, &packet, is_tcp).await?;
         match tokio::time::timeout(
             std::time::Duration::from_secs(block_timeout),
-            raw_read_byte(reader, is_tcp),
+            nvt_read_byte(reader, is_tcp, state),
         )
         .await
         {
@@ -808,12 +932,13 @@ async fn send_ymodem_end_of_batch(
     block_timeout: u64,
     max_retries: usize,
     verbose: bool,
+    state: &mut ReadState,
 ) -> Result<(), String> {
     // Wait for the receiver's final 'C'.  Some lax receivers skip this
     // step; don't hard-fail if it never arrives.
     match tokio::time::timeout(
         std::time::Duration::from_secs(block_timeout),
-        raw_read_byte(reader, is_tcp),
+        nvt_read_byte(reader, is_tcp, state),
     )
     .await
     {
@@ -841,7 +966,7 @@ async fn send_ymodem_end_of_batch(
         raw_write_bytes(writer, &packet, is_tcp).await?;
         match tokio::time::timeout(
             std::time::Duration::from_secs(block_timeout),
-            raw_read_byte(reader, is_tcp),
+            nvt_read_byte(reader, is_tcp, state),
         )
         .await
         {
@@ -879,7 +1004,11 @@ fn crc16_xmodem(data: &[u8]) -> u16 {
 // RAW I/O - TELNET IAC AWARE
 // =============================================================================
 
-/// Write a single raw byte, with telnet IAC escaping for TCP connections.
+/// Write a single raw byte, with telnet IAC escaping and CR-NUL
+/// stuffing for TCP connections.  The control-byte set XMODEM uses
+/// (SOH/STX/EOT/ACK/NAK/CAN/'C') never includes 0x0D, so a single-byte
+/// write only needs the IAC rule.  CR-NUL stuffing is handled by the
+/// multi-byte writer which is what sends data blocks.
 async fn raw_write_byte(
     writer: &mut (impl AsyncWrite + Unpin),
     byte: u8,
@@ -888,6 +1017,16 @@ async fn raw_write_byte(
     if is_tcp && byte == IAC {
         writer
             .write_all(&[IAC, IAC])
+            .await
+            .map_err(|e| e.to_string())?;
+    } else if is_tcp && byte == 0x0D {
+        // Defensive: if a caller ever single-writes a 0x0D data byte on
+        // a telnet stream, stuff the NUL so the peer's telnet layer
+        // doesn't eat the following byte as part of a CR LF / CR NUL
+        // pair.  In practice the multi-byte writer sees all data blocks
+        // that could contain 0x0D.
+        writer
+            .write_all(&[0x0D, 0x00])
             .await
             .map_err(|e| e.to_string())?;
     } else {
@@ -900,7 +1039,12 @@ async fn raw_write_byte(
     Ok(())
 }
 
-/// Write multiple raw bytes, with telnet IAC escaping for TCP connections.
+/// Write multiple raw bytes, applying telnet IAC escaping and NVT
+/// CR-NUL stuffing when `is_tcp` is true.  Both transforms are required
+/// for XMODEM/YMODEM over telnet NVT (RFC 854): the peer reconstructs
+/// the original bytes by collapsing `IAC IAC` to `0xFF` and dropping
+/// `NUL` after `CR`.  Skipping either causes mid-block desync at the
+/// first 0xFF or 0x0D byte in the payload.
 async fn raw_write_bytes(
     writer: &mut (impl AsyncWrite + Unpin),
     data: &[u8],
@@ -911,8 +1055,13 @@ async fn raw_write_bytes(
         for &byte in data {
             if byte == IAC {
                 buf.push(IAC);
+                buf.push(IAC);
+            } else if byte == 0x0D {
+                buf.push(0x0D);
+                buf.push(0x00);
+            } else {
+                buf.push(byte);
             }
-            buf.push(byte);
         }
         writer.write_all(&buf).await.map_err(|e| e.to_string())?;
         writer.flush().await.map_err(|e| e.to_string())?;
@@ -921,6 +1070,39 @@ async fn raw_write_bytes(
         writer.flush().await.map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+/// Per-stream state threaded through NVT reads so we can implement
+/// RFC 854's rule that a bare CR on the wire appears as `CR NUL`, and
+/// collapse the NUL so XMODEM byte counts stay aligned.  The pushback
+/// slot holds a byte we looked ahead for CR-NUL detection that turned
+/// out not to be a NUL; the next call returns it before reading more.
+#[derive(Default)]
+struct ReadState {
+    pushback: Option<u8>,
+}
+
+/// NVT-aware byte reader: wraps [`raw_read_byte`] with CR-NUL stripping
+/// for telnet streams.  After returning a CR (0x0D) we look one byte
+/// ahead; if it's NUL we swallow it, otherwise we stash it in `state`
+/// for the next call.  Production XMODEM/YMODEM transfers use this
+/// function so IAC + CR-NUL + pushback are all handled uniformly.
+async fn nvt_read_byte(
+    reader: &mut (impl AsyncRead + Unpin),
+    is_tcp: bool,
+    state: &mut ReadState,
+) -> Result<u8, String> {
+    if let Some(b) = state.pushback.take() {
+        return Ok(b);
+    }
+    let byte = raw_read_byte(reader, is_tcp).await?;
+    if is_tcp && byte == 0x0D {
+        let next = raw_read_byte(reader, is_tcp).await?;
+        if next != 0x00 {
+            state.pushback = Some(next);
+        }
+    }
+    Ok(byte)
 }
 
 /// Read a single raw byte, handling telnet IAC sequences for TCP connections.
@@ -1337,6 +1519,29 @@ mod tests {
         }
         let received = ymodem_round_trip("proto.bin", &original).await;
         assert_eq!(&received[..original.len()], original);
+    }
+
+    #[tokio::test]
+    async fn test_ymodem_round_trip_preserves_trailing_sub_bytes() {
+        // Regression: a file that legitimately ends in 0x1A bytes must
+        // round-trip exactly via YMODEM — the exact size is carried in
+        // block 0, and `xmodem_receive` uses it to truncate rather than
+        // stripping trailing SUB padding.  An EXE, a compressed archive,
+        // or random binary data that ends on 0x1A would be corrupted by
+        // the old SUB-stripping path.
+        //
+        // The payload is 50 bytes of arbitrary data followed by five
+        // 0x1A bytes.  After YMODEM round-trip, we must get the full 55
+        // bytes back including the trailing 0x1A run.
+        let mut original: Vec<u8> = (0u8..50).collect();
+        original.extend_from_slice(&[SUB; 5]);
+        let received = ymodem_round_trip("ends-in-sub.bin", &original).await;
+        assert_eq!(
+            received.len(),
+            original.len(),
+            "length mismatch: YMODEM size-truncation did not preserve trailing SUB bytes",
+        );
+        assert_eq!(received, original);
     }
 
     // ─── Checksum-mode round-trip (NAK-initiated) ─────────
