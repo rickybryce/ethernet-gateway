@@ -1,0 +1,2168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>XMODEM Gateway — User Manual</title>
+<style>
+@page {
+    size: letter;
+    margin: 0.75in;
+    @bottom-right {
+        content: counter(page);
+        font-family: Georgia, "DejaVu Serif", serif;
+        font-size: 9pt;
+        color: #555;
+    }
+    @bottom-left {
+        content: "XMODEM Gateway — User Manual";
+        font-family: Georgia, "DejaVu Serif", serif;
+        font-size: 9pt;
+        color: #555;
+    }
+}
+@page :first {
+    @bottom-right { content: none; }
+    @bottom-left  { content: none; }
+}
+
+html, body {
+    background: #ffffff;
+    color: #111111;
+    font-family: Georgia, "DejaVu Serif", serif;
+    font-size: 10.5pt;
+    line-height: 1.45;
+    margin: 0;
+    padding: 0;
+}
+
+h1, h2, h3, h4 {
+    font-family: Georgia, "DejaVu Serif", serif;
+    color: #111;
+    line-height: 1.2;
+}
+h1 {
+    font-size: 22pt;
+    margin-top: 0;
+    margin-bottom: 0.4em;
+    border-bottom: 2px solid #333;
+    padding-bottom: 4px;
+    page-break-before: always;
+}
+h1.no-break { page-break-before: auto; }
+h2 {
+    font-size: 15pt;
+    margin-top: 1.2em;
+    margin-bottom: 0.3em;
+    border-bottom: 1px solid #aaa;
+    padding-bottom: 2px;
+}
+h3 {
+    font-size: 12pt;
+    margin-top: 0.9em;
+    margin-bottom: 0.2em;
+}
+h4 {
+    font-size: 11pt;
+    margin-top: 0.7em;
+    margin-bottom: 0.1em;
+    font-style: italic;
+}
+
+p {
+    margin: 0.4em 0 0.6em 0;
+    text-align: justify;
+}
+
+ul, ol {
+    margin: 0.3em 0 0.6em 0;
+    padding-left: 1.5em;
+}
+li { margin: 0.1em 0; }
+
+a { color: #113a70; text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+code, pre, kbd, samp {
+    font-family: "DejaVu Sans Mono", "Courier New", Courier, monospace;
+    font-size: 9.5pt;
+}
+code {
+    background: #f2f2f2;
+    padding: 0 3px;
+    border-radius: 2px;
+    color: #333;
+}
+pre {
+    background: #f5f5f5;
+    border: 1px solid #ccc;
+    border-left: 3px solid #888;
+    padding: 8px 10px;
+    margin: 0.5em 0 0.9em 0;
+    overflow-x: auto;
+    page-break-inside: avoid;
+    font-size: 9pt;
+    line-height: 1.35;
+}
+pre code {
+    background: none;
+    padding: 0;
+    color: #111;
+}
+
+table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 0.5em 0 0.9em 0;
+    font-size: 9.5pt;
+    page-break-inside: avoid;
+}
+th, td {
+    border: 1px solid #bbb;
+    padding: 4px 7px;
+    text-align: left;
+    vertical-align: top;
+}
+th {
+    background: #ddd;
+    font-weight: bold;
+    color: #111;
+}
+tbody tr:nth-child(odd)  { background: #ffffff; }
+tbody tr:nth-child(even) { background: #f4f4f4; }
+td code, th code { background: none; padding: 0; }
+
+aside.note, aside.warn, aside.tip {
+    border-left: 4px solid #888;
+    background: #f7f7f7;
+    padding: 6px 10px;
+    margin: 0.6em 0 0.8em 0;
+    font-size: 10pt;
+    page-break-inside: avoid;
+}
+aside.note  { border-left-color: #3a6fb0; background: #eef3fa; }
+aside.warn  { border-left-color: #b03a3a; background: #faeeee; }
+aside.tip   { border-left-color: #3a8f47; background: #eef7ef; }
+aside .label {
+    display: block;
+    font-weight: bold;
+    font-variant: small-caps;
+    letter-spacing: 0.05em;
+    margin-bottom: 2px;
+}
+
+/* Cover page */
+.cover {
+    text-align: center;
+    padding-top: 2.8in;
+    page-break-after: always;
+}
+.cover .title {
+    font-size: 34pt;
+    font-weight: bold;
+    margin-bottom: 0.3em;
+    letter-spacing: 0.02em;
+}
+.cover .subtitle {
+    font-size: 18pt;
+    font-style: italic;
+    color: #444;
+    margin-bottom: 2em;
+}
+.cover .version {
+    font-size: 14pt;
+    margin-bottom: 0.3em;
+}
+.cover .author {
+    font-size: 13pt;
+    color: #333;
+}
+.cover .tag {
+    margin-top: 2em;
+    font-size: 10pt;
+    color: #666;
+    max-width: 4.5in;
+    margin-left: auto;
+    margin-right: auto;
+    font-style: italic;
+}
+
+/* TOC */
+.toc {
+    page-break-after: always;
+}
+.toc h1 {
+    page-break-before: auto;
+}
+.toc ol { list-style: none; padding-left: 0; }
+.toc ol ol { padding-left: 1.5em; }
+.toc li { margin: 0.15em 0; }
+.toc a { color: #222; }
+.toc .num { display: inline-block; min-width: 2.3em; color: #666; }
+
+dt { font-weight: bold; margin-top: 0.3em; }
+dd { margin-left: 1.5em; margin-bottom: 0.3em; }
+
+.small { font-size: 9pt; color: #555; }
+hr { border: 0; border-top: 1px solid #bbb; margin: 1em 0; }
+
+.kbd {
+    display: inline-block;
+    padding: 0 5px;
+    border: 1px solid #888;
+    border-bottom-width: 2px;
+    border-radius: 3px;
+    background: #f6f6f6;
+    font-family: "DejaVu Sans Mono", Courier, monospace;
+    font-size: 9pt;
+    color: #222;
+    min-width: 0.8em;
+    text-align: center;
+}
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════ Cover ═══════════════════ -->
+<div class="cover">
+    <div class="title">XMODEM Gateway</div>
+    <div class="subtitle">User Manual</div>
+    <div class="version">Version 0.3.3</div>
+    <div class="author">Ricky Bryce</div>
+    <div class="tag">
+        A telnet-based XMODEM file transfer server, SSH gateway, Hayes-compatible
+        modem emulator, text-mode web browser, and AI chat client for retro
+        hardware — PETSCII, ANSI, and ASCII terminals.
+    </div>
+</div>
+
+<!-- ═══════════════════ Table of contents ═══════════════════ -->
+<div class="toc">
+<h1 class="no-break">Table of Contents</h1>
+<ol>
+    <li><span class="num">1.</span> <a href="#ch1">Introduction</a></li>
+    <li><span class="num">2.</span> <a href="#ch2">Installation</a>
+        <ol>
+            <li><a href="#ch2-appimage">Linux AppImage</a></li>
+            <li><a href="#ch2-source">Building from Source</a></li>
+            <li><a href="#ch2-systemd">systemd Service</a></li>
+        </ol>
+    </li>
+    <li><span class="num">3.</span> <a href="#ch3">First Run &amp; Configuration File</a></li>
+    <li><span class="num">4.</span> <a href="#ch4">GUI Configuration Console</a>
+        <ol>
+            <li><a href="#ch4-frames">Configuration Frames</a></li>
+            <li><a href="#ch4-popups">"More..." Popups</a></li>
+            <li><a href="#ch4-save">Saving and Restarting</a></li>
+        </ol>
+    </li>
+    <li><span class="num">5.</span> <a href="#ch5">Telnet Access</a></li>
+    <li><span class="num">6.</span> <a href="#ch6">SSH Access</a></li>
+    <li><span class="num">7.</span> <a href="#ch7">Security</a></li>
+    <li><span class="num">8.</span> <a href="#ch8">File Transfer</a>
+        <ol>
+            <li><a href="#ch8-upload">Uploads — Auto-Detection</a></li>
+            <li><a href="#ch8-download">Downloads — Protocol Prompt</a></li>
+            <li><a href="#ch8-zmodem">ZMODEM Autostart Detection</a></li>
+            <li><a href="#ch8-tuning">Protocol Timeout Tunables</a></li>
+        </ol>
+    </li>
+    <li><span class="num">9.</span> <a href="#ch9">Serial / Hayes AT Modem Emulation</a>
+        <ol>
+            <li><a href="#ch9-setup">Enabling and Port Setup</a></li>
+            <li><a href="#ch9-dial">Dialing Commands</a></li>
+            <li><a href="#ch9-info">Identification Commands</a></li>
+            <li><a href="#ch9-behavior">Echo, Verbosity, Quiet, Result Codes</a></li>
+            <li><a href="#ch9-hardware">DTR, Flow Control, and DCD</a></li>
+            <li><a href="#ch9-sregs">S-Registers</a></li>
+            <li><a href="#ch9-escape">The +++ Escape Sequence</a></li>
+            <li><a href="#ch9-aslash">A/ Repeat-Last-Command</a></li>
+        </ol>
+    </li>
+    <li><span class="num">10.</span> <a href="#ch10">SSH Gateway (Outbound)</a></li>
+    <li><span class="num">11.</span> <a href="#ch11">Telnet Gateway (Outbound)</a></li>
+    <li><span class="num">12.</span> <a href="#ch12">AI Chat</a></li>
+    <li><span class="num">13.</span> <a href="#ch13">Web Browser</a></li>
+    <li><span class="num">14.</span> <a href="#ch14">Weather</a></li>
+    <li><span class="num">15.</span> <a href="#ch15">Signal Handling &amp; Operations</a></li>
+    <li><span class="num">16.</span> <a href="#ch16">Troubleshooting</a></li>
+    <li><span class="num">A.</span> <a href="#appA">Appendix A — Configuration Key Reference</a></li>
+    <li><span class="num">B.</span> <a href="#appB">Appendix B — AT Command Reference</a></li>
+</ol>
+</div>
+
+<!-- ═══════════════════ 1. Introduction ═══════════════════ -->
+<h1 id="ch1" class="no-break">1. Introduction</h1>
+
+<p>
+<strong>XMODEM Gateway</strong> is a standalone server written in Rust that bridges
+retro hardware and modern networks. It accepts telnet and SSH connections, speaks
+the XMODEM / XMODEM-1K / YMODEM file-transfer protocols, emulates a Hayes AT
+modem on a physical serial port, proxies outbound connections to remote telnet
+and SSH servers, renders web pages as plain text, looks up the weather, and
+provides a terminal AI-chat front end for the Groq API.
+</p>
+
+<p>
+It was designed to let 40-year-old computers use 40-minute-old networks. The
+telnet interface is the headline feature because it works out of the box with
+any machine that can speak a serial stream: Commodore 64, CP/M systems, the
+AltairDuino, RC2014 / SC126, and countless other homebrew boards. Once the
+server is running on a PC, connect from anywhere on your LAN:
+</p>
+
+<pre><code>telnet 192.168.1.160 2323</code></pre>
+
+<p>
+Or from a serial-attached retro machine, dial through the emulator:
+</p>
+
+<pre><code>ATDT 192.168.1.160:2323</code></pre>
+
+<h2>1.1 Supported Terminal Types</h2>
+
+<p>
+On every inbound connection the gateway asks the user to press
+<span class="kbd">Backspace</span> so it can auto-detect the terminal. The byte
+received uniquely identifies the client:
+</p>
+
+<table>
+    <thead><tr><th>Byte</th><th>Terminal</th><th>Typical hardware</th></tr></thead>
+    <tbody>
+        <tr><td><code>0x14</code></td><td>PETSCII</td><td>Commodore 64, VIC-20, C128 in 40-column mode</td></tr>
+        <tr><td><code>0x08</code> or <code>0x7F</code></td><td>ANSI</td><td>Modern terminal emulators, PuTTY, xterm, macOS Terminal</td></tr>
+        <tr><td>anything else</td><td>ASCII</td><td>Dumb terminals, line printers, bridge boards without colour</td></tr>
+    </tbody>
+</table>
+
+<p>
+After terminal detection the user is asked whether to enable colour. There is
+no default — the user must explicitly press <span class="kbd">Y</span> or
+<span class="kbd">N</span>. Colour output uses PETSCII colour codes on the
+Commodore, ANSI escape sequences on modern terminals, and plain text on ASCII.
+</p>
+
+<h2>1.2 Feature Overview</h2>
+
+<ul>
+    <li><strong>File transfer</strong> — XMODEM (128-byte), XMODEM-1K, and YMODEM with auto-detection on upload and a selection prompt on download.</li>
+    <li><strong>Hayes AT modem emulator</strong> — real serial port, full command set, S-registers S0–S26, stored phone-number slots, and <code>+++</code> escape.</li>
+    <li><strong>SSH server</strong> — optional encrypted access with its own credentials and a persistent Ed25519 host key.</li>
+    <li><strong>SSH gateway</strong> — outbound proxy for SSH servers, with TOFU host-key trust and Ed25519 public-key auth.</li>
+    <li><strong>Telnet gateway</strong> — outbound proxy with RFC-1143 Q-method option negotiation or a raw-TCP escape hatch.</li>
+    <li><strong>Web browser</strong> — text-mode HTTP/HTTPS/Gopher with forms, bookmarks, and 40-column-friendly layout.</li>
+    <li><strong>AI chat</strong> — Groq API, <code>llama-3.3-70b-versatile</code>, paginated answers wrapped to the terminal width.</li>
+    <li><strong>Weather</strong> — 3-day forecast from Open-Meteo for any US ZIP code.</li>
+    <li><strong>GUI console</strong> — eframe/egui configuration editor with live server log.</li>
+</ul>
+
+<aside class="warn">
+<span class="label">Security notice</span>
+Telnet transmits all data, including passwords, in cleartext. The telnet
+interface is intended for <em>local or private network use only</em>. Use the
+SSH interface for anything leaving your LAN, and keep <code>xmodem.conf</code>
+at mode <code>0600</code> because it contains plaintext credentials.
+</aside>
+
+<!-- ═══════════════════ 2. Installation ═══════════════════ -->
+<h1 id="ch2">2. Installation</h1>
+
+<h2 id="ch2-appimage">2.1 Linux AppImage (pre-built)</h2>
+
+<p>
+The simplest installation on a modern Linux distribution is the pre-built
+AppImage that ships with every release:
+</p>
+
+<pre><code>chmod +x XMODEM_Gateway-x86_64.AppImage
+./XMODEM_Gateway-x86_64.AppImage</code></pre>
+
+<p>
+AppImages bundle their own libraries and run on any mainstream glibc-based
+distribution without installation. On first run the AppImage creates
+<code>xmodem.conf</code> in the current working directory.
+</p>
+
+<aside class="note">
+<span class="label">Verification</span>
+Each release publishes a SHA-256 checksum, an optional GPG signature, and a
+Sigstore keyless signature bound to the publisher's GitHub identity. Verify
+at least the SHA-256 before running any binary from the internet:
+<code>sha256sum -c xmodem-gateway-v0.3.3-…tar.gz.sha256</code>.
+</aside>
+
+<h2 id="ch2-source">2.2 Building from Source</h2>
+
+<p>
+The project is written in pure Rust using the 2024 edition. The minimum
+supported compiler is Rust <strong>1.87</strong>.
+</p>
+
+<h3>2.2.1 Debian 13 / Ubuntu</h3>
+<pre><code>sudo apt update
+sudo apt install -y build-essential pkg-config cmake curl libudev-dev
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"</code></pre>
+
+<h3>2.2.2 Fedora / RHEL / AlmaLinux</h3>
+<pre><code>sudo dnf install -y gcc gcc-c++ make cmake pkg-config curl
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"</code></pre>
+
+<h3>2.2.3 Arch Linux</h3>
+<pre><code>sudo pacman -S --needed base-devel cmake curl
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"</code></pre>
+
+<h3>2.2.4 macOS</h3>
+<pre><code>xcode-select --install
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+brew install cmake</code></pre>
+
+<h3>2.2.5 Windows</h3>
+<ol>
+    <li>Run the rustup installer from <code>https://rustup.rs</code>.</li>
+    <li>When prompted, install the Visual Studio C++ Build Tools.</li>
+    <li>Install CMake from <code>https://cmake.org/download/</code> or via <code>winget install Kitware.CMake</code>.</li>
+    <li>Open a fresh PowerShell or cmd.exe so rustup is on your <code>PATH</code>.</li>
+</ol>
+
+<h3>2.2.6 Verify the toolchain</h3>
+<pre><code>rustc --version    # should show 1.87 or later
+cargo --version
+cmake --version</code></pre>
+
+<h3>2.2.7 Compile</h3>
+<pre><code>cargo build --release</code></pre>
+
+<p>
+The resulting binary is at <code>target/release/xmodem-gateway</code>. The
+first full build pulls a couple of hundred crates and may take 3–8 minutes
+depending on your machine; subsequent incremental builds are quick.
+</p>
+
+<h3>2.2.8 Key dependencies</h3>
+
+<p>
+The gateway pulls the following well-known crates as direct dependencies:
+<code>tokio</code> (async runtime), <code>russh</code> (SSH server and client),
+<code>serialport</code> (cross-platform serial I/O), <code>ureq</code> (blocking
+HTTP client used by the browser and AI chat), <code>html2text</code> (HTML to
+plain-text rendering), <code>eframe</code> / <code>egui_extras</code>
+(GUI), <code>signal-hook</code> (POSIX signals), and
+<code>serde_json</code>. Full transitive list is in <code>Cargo.lock</code>.
+</p>
+
+<h2 id="ch2-systemd">2.3 Running as a systemd Service (Linux)</h2>
+
+<p>
+A hardened unit file is bundled at
+<code>contrib/systemd/xmodem-gateway.service</code>. To install:
+</p>
+
+<pre><code># Create a dedicated unprivileged service user
+sudo useradd --system --home-dir /var/lib/xmodem-gateway \
+             --shell /usr/sbin/nologin xmodem-gateway
+sudo install -d -m 0750 -o xmodem-gateway -g xmodem-gateway \
+             /var/lib/xmodem-gateway
+
+# Install the binary
+sudo install -m 0755 target/release/xmodem-gateway /usr/local/bin/
+
+# Install and enable the unit
+sudo install -m 0644 contrib/systemd/xmodem-gateway.service \
+             /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now xmodem-gateway.service
+
+# Watch the log
+journalctl -u xmodem-gateway -f</code></pre>
+
+<p>
+The unit ships with defensive hardening: <code>NoNewPrivileges</code>,
+<code>PrivateTmp</code>, <code>ProtectSystem=strict</code>,
+<code>ProtectHome</code>, namespace restrictions,
+<code>SystemCallFilter=@system-service</code>, an empty capability bounding
+set, a 512 MiB memory cap, and <code>TasksMax=256</code>. The service user
+has no shell, no home directory, and write access only to
+<code>/var/lib/xmodem-gateway</code>.
+</p>
+
+<p>
+If you want to listen on privileged ports (telnet on 23 or SSH on 22), uncomment
+the <code>CapabilityBoundingSet=CAP_NET_BIND_SERVICE</code> and matching
+<code>AmbientCapabilities</code> lines in the unit.
+</p>
+
+<p>
+<code>systemctl reload xmodem-gateway</code> sends SIGHUP, which the binary
+handles as a graceful stop. Restart the service to pick up config changes.
+</p>
+
+<!-- ═══════════════════ 3. First Run & Config File ═══════════════════ -->
+<h1 id="ch3">3. First Run &amp; Configuration File</h1>
+
+<p>
+On the very first launch the gateway looks for <code>xmodem.conf</code> in the
+current working directory. If the file does not exist it is created with
+sensible defaults and a short log message is printed. On subsequent launches
+the file is read, every missing key is filled in with its default, and the file
+is rewritten so that future editors see the full set of keys and comments.
+</p>
+
+<aside class="note">
+<span class="label">Unix permissions</span>
+<code>xmodem.conf</code> holds plaintext credentials (telnet password, SSH
+password, Groq API key). On Unix the file is set to mode <code>0600</code>
+(owner-only read/write) on every write. The same applies to
+<code>dialup.conf</code>, <code>gateway_hosts</code>,
+<code>xmodem_ssh_host_key</code>, and <code>xmodem_gateway_ssh_key</code>.
+</aside>
+
+<h2>3.1 File Format</h2>
+
+<p>
+The file is a simple <code>key&nbsp;=&nbsp;value</code> text file. Blank lines
+and lines starting with <code>#</code> are comments and ignored. Values are
+trimmed of surrounding whitespace. Unknown keys are silently ignored, so you
+can annotate your own notes as needed. Boolean values accept
+<code>true</code> / <code>false</code> in any case.
+</p>
+
+<pre><code># XMODEM Gateway Configuration
+telnet_enabled = true
+telnet_port = 2323
+ssh_enabled  = false
+security_enabled = false</code></pre>
+
+<h2>3.2 Configuration Key Overview</h2>
+
+<p>
+The table below summarises every key recognised by the parser. Full details
+including sanitisation, range checks, and live-edit behaviour are in
+<a href="#appA">Appendix&nbsp;A</a>. The reserved-zero S-registers and stored
+phone-number slots are covered in chapter 9.
+</p>
+
+<table>
+    <thead><tr><th>Key</th><th>Type</th><th>Default</th><th>Description</th></tr></thead>
+    <tbody>
+        <tr><td><code>telnet_enabled</code></td><td>bool</td><td><code>true</code></td><td>Run the telnet server. Set <code>false</code> for SSH-only mode.</td></tr>
+        <tr><td><code>telnet_port</code></td><td>u16</td><td><code>2323</code></td><td>Telnet listen port. Must be &ge; 1.</td></tr>
+        <tr><td><code>telnet_gateway_negotiate</code></td><td>bool</td><td><code>false</code></td><td>Outbound gateway sends proactive <code>WILL TTYPE</code> / <code>WILL NAWS</code> / <code>DO ECHO</code>.</td></tr>
+        <tr><td><code>telnet_gateway_raw</code></td><td>bool</td><td><code>false</code></td><td>Outbound gateway bypasses all IAC parsing. Supersedes negotiate.</td></tr>
+        <tr><td><code>enable_console</code></td><td>bool</td><td><code>true</code></td><td>Open the GUI at startup. Set <code>false</code> for headless systemd operation.</td></tr>
+        <tr><td><code>security_enabled</code></td><td>bool</td><td><code>false</code></td><td>Require username/password login on telnet and SSH.</td></tr>
+        <tr><td><code>username</code>, <code>password</code></td><td>string</td><td><code>admin</code>, <code>changeme</code></td><td>Telnet credentials.</td></tr>
+        <tr><td><code>ssh_username</code>, <code>ssh_password</code></td><td>string</td><td><code>admin</code>, <code>changeme</code></td><td>SSH credentials, independent of telnet.</td></tr>
+        <tr><td><code>ssh_enabled</code></td><td>bool</td><td><code>false</code></td><td>Run the SSH server on <code>ssh_port</code>.</td></tr>
+        <tr><td><code>ssh_port</code></td><td>u16</td><td><code>2222</code></td><td>SSH listen port.</td></tr>
+        <tr><td><code>transfer_dir</code></td><td>string</td><td><code>transfer</code></td><td>Base directory for file transfers, relative to the working dir.</td></tr>
+        <tr><td><code>max_sessions</code></td><td>usize</td><td><code>50</code></td><td>Concurrent telnet session cap.</td></tr>
+        <tr><td><code>idle_timeout_secs</code></td><td>u64</td><td><code>900</code></td><td>Session idle timeout. 0 disables.</td></tr>
+        <tr><td><code>groq_api_key</code></td><td>string</td><td>empty</td><td>Key for AI chat. Empty disables the feature.</td></tr>
+        <tr><td><code>browser_homepage</code></td><td>string</td><td><code>http://telnetbible.com</code></td><td>Page loaded when the browser opens.</td></tr>
+        <tr><td><code>weather_zip</code></td><td>string</td><td>empty</td><td>Last-used US ZIP. Updated automatically.</td></tr>
+        <tr><td><code>verbose</code></td><td>bool</td><td><code>false</code></td><td>Detailed XMODEM protocol diagnostics.</td></tr>
+        <tr><td><code>xmodem_negotiation_timeout</code></td><td>u64</td><td><code>45</code></td><td>Seconds to wait for the far-end sender/receiver to start.</td></tr>
+        <tr><td><code>xmodem_block_timeout</code></td><td>u64</td><td><code>20</code></td><td>Per-block timeout.</td></tr>
+        <tr><td><code>xmodem_max_retries</code></td><td>usize</td><td><code>10</code></td><td>NAK retry cap per block.</td></tr>
+        <tr><td><code>serial_enabled</code></td><td>bool</td><td><code>false</code></td><td>Run the Hayes modem emulator on the configured serial port.</td></tr>
+        <tr><td><code>serial_port</code></td><td>string</td><td>empty</td><td>Device path (e.g. <code>/dev/ttyUSB0</code>, <code>COM3</code>).</td></tr>
+        <tr><td><code>serial_baud</code></td><td>u32</td><td><code>9600</code></td><td>Baud rate. Must be &ge; 300.</td></tr>
+        <tr><td><code>serial_databits</code></td><td>u8</td><td><code>8</code></td><td>Data bits: 5, 6, 7, or 8.</td></tr>
+        <tr><td><code>serial_parity</code></td><td>string</td><td><code>none</code></td><td><code>none</code> / <code>odd</code> / <code>even</code>.</td></tr>
+        <tr><td><code>serial_stopbits</code></td><td>u8</td><td><code>1</code></td><td>1 or 2.</td></tr>
+        <tr><td><code>serial_flowcontrol</code></td><td>string</td><td><code>none</code></td><td><code>none</code> / <code>hardware</code> / <code>software</code>.</td></tr>
+        <tr><td><code>serial_echo</code></td><td>bool</td><td><code>true</code></td><td>Saved <code>ATE</code> state. Restored by <code>ATZ</code>.</td></tr>
+        <tr><td><code>serial_verbose</code></td><td>bool</td><td><code>true</code></td><td>Saved <code>ATV</code> state.</td></tr>
+        <tr><td><code>serial_quiet</code></td><td>bool</td><td><code>false</code></td><td>Saved <code>ATQ</code> state.</td></tr>
+        <tr><td><code>serial_s_regs</code></td><td>string</td><td>see ch. 9</td><td>Comma-separated decimal S0–S26 values.</td></tr>
+        <tr><td><code>serial_x_code</code></td><td>u8 0–4</td><td><code>4</code></td><td>Saved <code>ATX</code> level.</td></tr>
+        <tr><td><code>serial_dtr_mode</code></td><td>u8 0–3</td><td><code>0</code></td><td>Saved <code>AT&amp;D</code> mode.</td></tr>
+        <tr><td><code>serial_flow_mode</code></td><td>u8 0–4</td><td><code>0</code></td><td>Saved <code>AT&amp;K</code> mode.</td></tr>
+        <tr><td><code>serial_dcd_mode</code></td><td>u8 0–1</td><td><code>1</code></td><td>Saved <code>AT&amp;C</code> mode.</td></tr>
+        <tr><td><code>serial_stored_0</code> … <code>serial_stored_3</code></td><td>string</td><td>empty</td><td>Stored phone-number slots for <code>AT&amp;Zn=s</code> / <code>ATDSn</code>.</td></tr>
+    </tbody>
+</table>
+
+<aside class="tip">
+<span class="label">Input sanitisation</span>
+String values have embedded newlines and carriage returns stripped before
+being written back to disk. That means you cannot accidentally corrupt the
+config by pasting a multi-line value into the GUI.
+</aside>
+
+<!-- ═══════════════════ 4. GUI ═══════════════════ -->
+<h1 id="ch4">4. GUI Configuration Console</h1>
+
+<p>
+Unless you have explicitly set <code>enable_console&nbsp;=&nbsp;false</code>,
+a GUI configuration window opens automatically when the gateway starts. It is
+backed by eframe/egui and provides live configuration editing plus a console
+that streams the server log in real time.
+</p>
+
+<aside class="note">
+<span class="label">Headless mode</span>
+Systemd deployments, Docker images, or any other headless setup should run
+with <code>enable_console&nbsp;=&nbsp;false</code>. Otherwise the daemon will
+block waiting for a display server that does not exist.
+</aside>
+
+<p>
+Closing the GUI window does not stop the server — it continues running in
+headless mode. To stop the gateway, send it <span class="kbd">Ctrl+C</span>,
+<code>SIGTERM</code>, or <code>SIGHUP</code> (see chapter 15).
+</p>
+
+<h2 id="ch4-frames">4.1 Configuration Frames</h2>
+
+<p>
+The window is organised into three rows of two framed cards each, plus buttons
+and a console panel at the bottom:
+</p>
+
+<ul>
+    <li><strong>Server</strong> — toggle telnet/SSH, set the ports, set the session cap, set the idle timeout. A <em>More&#8230;</em> button reveals the Telnet Gateway options popup.</li>
+    <li><strong>Security</strong> — Require Login toggle, plus separate username and password fields for telnet and SSH.</li>
+    <li><strong>File Transfer (XMODEM)</strong> — transfer directory, negotiation timeout, per-block timeout, max retries.</li>
+    <li><strong>AI Chat, Browser, and Weather</strong> — Groq API key (rendered as a password field), browser homepage URL, and weather ZIP.</li>
+    <li><strong>Serial Modem</strong> — Enabled checkbox, port dropdown with a refresh (&#8634;) button, baud, data bits, parity, stop bits, flow control. A <em>More&#8230;</em> button reveals the Hayes AT state popup.</li>
+    <li><strong>General</strong> — Verbose XMODEM Logging, Show GUI on Startup.</li>
+</ul>
+
+<p>
+At the top of the window the title shows the gateway version and the local IP
+address that telnet clients will use to reach it. The IP is re-detected on
+every paint cycle, so if your DHCP lease changes the value updates
+automatically.
+</p>
+
+<h2 id="ch4-popups">4.2 "More..." Popups</h2>
+
+<p>
+Advanced settings that are rarely changed live in popup windows opened from
+their frame's <em>More&#8230;</em> button.
+</p>
+
+<h3>4.2.1 Server — More</h3>
+
+<p>
+Mirrors the primary Server controls (so you can edit ports and toggles without
+leaving the popup) and adds two persistent outbound-gateway decisions that
+used to be asked interactively at dial time:
+</p>
+
+<ul>
+    <li><strong>Telnet Gateway → Mode</strong> — dropdown with <em>Telnet</em> or <em>Raw TCP</em>. Telnet is the default and parses IAC in both directions; Raw TCP disables the entire IAC layer for destinations that don't speak telnet at all. Sets <code>telnet_gateway_raw</code> in <code>xmodem.conf</code>.</li>
+    <li><strong>Negotiate TTYPE / NAWS with remote</strong> — checkbox, enabled only when Mode is <em>Telnet</em>. Turn on when you dial real telnet servers that want cooperative option negotiation. Sets <code>telnet_gateway_negotiate</code>.</li>
+    <li><strong>SSH Gateway → Auth</strong> — dropdown with <em>Key</em> or <em>Password</em>. Password is the default because it works out of the box with most remote accounts. When Key is selected the popup also displays the gateway's public key in a read-only text box below, ready to paste into the remote's <code>~/.ssh/authorized_keys</code>. Sets <code>ssh_gateway_auth</code>.</li>
+</ul>
+
+<p>
+Both decisions take effect on the next gateway connection — no server
+restart is needed. The session-side Gateway Configuration menu
+(<em>Configuration &rarr; G</em> from the main telnet menu) edits the same
+two values.
+</p>
+
+<aside class="note">
+<span class="label">Popup styling</span>
+Popups render on a deep forest-green panel with lighter-green text-entry
+fields so they're visually distinct from the navy main window. This is a
+UI convention — it doesn't affect any setting.
+</aside>
+
+<h3>4.2.2 Serial Modem — More</h3>
+
+<p>
+Mirrors the primary serial port, baud, framing, and flow-control controls, and
+adds the full Hayes state that <code>AT&amp;W</code> persists:
+</p>
+
+<ul>
+    <li><strong>Echo (E1) / Verbose (V1) / Quiet (Q1)</strong> — saved <code>ATE</code>, <code>ATV</code>, <code>ATQ</code> toggles.</li>
+    <li><strong>Result level (X)</strong> — 0 to 4. See ch.&nbsp;9 for what each level emits.</li>
+    <li><strong>DTR (&amp;D)</strong> — 0 to 3.</li>
+    <li><strong>Flow (&amp;K)</strong> — 0 to 4 (modem-layer; hardware-wire flow is set by the main <em>Flow</em> dropdown above).</li>
+    <li><strong>DCD (&amp;C)</strong> — 0 or 1.</li>
+    <li><strong>S-Registers</strong> — a comma-separated list of S0…S26 values, editable as free text. The format matches <code>serial_s_regs</code> in the config file.</li>
+    <li><strong>Stored Phone Numbers</strong> — four text fields for slots <code>&amp;Z0</code> through <code>&amp;Z3</code>. Leave empty for unset. <code>ATDSn</code> dials these.</li>
+</ul>
+
+<h2 id="ch4-save">4.3 Saving and Restarting</h2>
+
+<p>
+Each popup has its own <strong>Save</strong> button, which writes the current
+configuration to <code>xmodem.conf</code> <em>without restarting the server</em>.
+This is useful for changes that take effect on the next session — updating
+stored phone numbers, toggling verbose logging, or adjusting XMODEM timeouts —
+because no listener needs to be re-bound.
+</p>
+
+<p>
+The main window also has a large <strong>Save and Restart Server</strong>
+button. Changes that affect how the listeners are bound — turning SSH on or
+off, changing a listen port, enabling or disabling the serial modem, changing
+credentials — need a restart to take effect. The button saves the config, sets
+an internal restart flag, and triggers an orderly shutdown. The main loop
+detects the flag and re-spawns the server; the GUI reopens after the restart
+completes.
+</p>
+
+<aside class="note">
+<span class="label">Out-of-band changes</span>
+If a telnet or SSH session toggles a configuration value (for example the
+Telnet Gateway's <em>T</em> mode toggle, or the in-session Configuration menu),
+the GUI notices and refreshes its fields — unless you are currently editing
+them, in which case your edits are not clobbered.
+</aside>
+
+<h2>4.4 Live Console Output</h2>
+
+<p>
+The bottom pane of the window shows the server log: new sessions, auth
+failures, dialup lookups, XMODEM progress when verbose is on, SSH host-key
+trust decisions, and shutdown messages. It auto-scrolls to the tail and caps
+at 2000 lines.
+</p>
+
+<!-- ═══════════════════ 5. Telnet ═══════════════════ -->
+<h1 id="ch5">5. Telnet Access</h1>
+
+<p>
+The telnet server is on by default and listens on TCP port <strong>2323</strong>.
+Change the port via the GUI, the in-session <em>Configuration</em> menu, or by
+editing <code>telnet_port</code> in <code>xmodem.conf</code> and restarting.
+</p>
+
+<h2>5.1 Connecting</h2>
+
+<pre><code>telnet 192.168.1.160 2323</code></pre>
+
+<p>
+Any standard telnet client works: <code>telnet</code>, PuTTY, SyncTERM, CGTERM
+on the Commodore 64, NetSwitcher on CP/M, a hardware WiFi modem plus a real
+C64, etc. The first thing the server does is negotiate a few telnet options
+via IAC (<code>WILL ECHO</code>, <code>WILL SGA</code>, <code>DO SGA</code>,
+<code>DO TTYPE</code>, <code>DO NAWS</code>), then prompt for terminal
+detection.
+</p>
+
+<h2>5.2 Terminal Detection</h2>
+
+<p>
+After the initial option handshake you will see:
+</p>
+
+<pre><code>Press BACKSPACE to detect terminal:</code></pre>
+
+<p>
+The byte you send determines the terminal class, as described in chapter 1.
+If the client already replied with an <code>IAC SB TTYPE IS …</code> subnegotiation
+during the initial handshake, the terminal is determined from that and the
+prompt is skipped entirely.
+</p>
+
+<p>
+You are then asked to enable colour:
+</p>
+
+<pre><code>Use ANSI color? (Y/N):</code></pre>
+
+<p>
+No default: press <span class="kbd">Y</span> or <span class="kbd">N</span>.
+</p>
+
+<h2>5.3 Session Limits</h2>
+
+<ul>
+    <li><strong>Concurrent sessions</strong> — capped by <code>max_sessions</code> (default 50).</li>
+    <li><strong>Idle timeout</strong> — <code>idle_timeout_secs</code> seconds (default 900 = 15 minutes). Set to <code>0</code> to disable. Idle timeouts apply to every prompt the server offers, including login, so users on slow modems should raise this.</li>
+    <li><strong>Screen layout</strong> — 40 columns on PETSCII, 80 on ANSI/ASCII, 22 rows of content (the remaining 2 rows are the header and prompt). Enforced by unit tests to avoid layout regressions.</li>
+</ul>
+
+<h2>5.4 Network Gating (Unauthenticated Mode)</h2>
+
+<p>
+When <code>security_enabled</code> is <code>false</code> (the default), the
+telnet server refuses connections from public IP addresses. Only the RFC 1918
+private ranges — <code>10.0.0.0/8</code>, <code>172.16.0.0/12</code>,
+<code>192.168.0.0/16</code>, plus loopback, link-local, IPv6 loopback
+(<code>::1</code>), IPv6 link-local (<code>fe80::/10</code>), and IPv6 unique
+local (<code>fd00::/8</code>) — may connect without authentication. Gateway
+addresses ending in <code>.1</code> are also rejected so a misconfigured NAT
+cannot accidentally bridge a telnet session through your router.
+</p>
+
+<p>
+To accept connections from any IP address, enable security and configure a
+strong username and password.
+</p>
+
+<h2>5.5 The Main Menu</h2>
+
+<pre><code>  A  AI Chat
+  B  Simple Browser
+  C  Configuration
+  F  File Transfer
+  R  Troubleshooting
+  S  SSH Gateway
+  T  Telnet Gateway
+  W  Weather
+  X  Exit</code></pre>
+
+<!-- ═══════════════════ 6. SSH ═══════════════════ -->
+<h1 id="ch6">6. SSH Access</h1>
+
+<p>
+The SSH interface is the recommended way to connect to the gateway from
+outside your trusted LAN. It is <em>not</em> enabled by default — it runs on
+port <strong>2222</strong>, uses its own username and password separate from
+the telnet credentials, and exposes the same menu system as telnet.
+</p>
+
+<h2>6.1 Enabling the SSH Server</h2>
+
+<p>
+Toggle the <em>SSH</em> checkbox in the GUI Server frame, or edit
+<code>xmodem.conf</code>:
+</p>
+
+<pre><code>ssh_enabled  = true
+ssh_port     = 2222
+ssh_username = admin
+ssh_password = <em>pick-something-strong</em></code></pre>
+
+<p>
+Then click <em>Save and Restart Server</em>, or restart manually. On first
+start with SSH enabled, the gateway generates an Ed25519 host key and persists
+it to <code>xmodem_ssh_host_key</code> next to the binary (mode
+<code>0600</code> on Unix). Subsequent starts reuse the same key so clients
+can verify the server's identity.
+</p>
+
+<h2>6.2 Connecting</h2>
+
+<pre><code>ssh admin@192.168.1.160 -p 2222</code></pre>
+
+<p>
+The first time your client connects it will display the server's SHA-256
+fingerprint and ask whether to trust it. Accept, and the key is recorded in
+your client's <code>~/.ssh/known_hosts</code> as usual.
+</p>
+
+<p>
+After authentication you land on the same XMODEM Gateway menu as a telnet
+user, rendered in ANSI terminal mode. All features — file transfer, SSH
+gateway, telnet gateway, browser, AI chat, modem emulator, weather — are
+available.
+</p>
+
+<h2>6.3 Public-Key Authentication</h2>
+
+<p>
+The built-in SSH server supports password authentication only. However, the
+<em>outbound</em> SSH gateway (chapter 10) offers Ed25519 public-key auth to
+remote hosts — a separate concept.
+</p>
+
+<aside class="warn">
+<span class="label">Plaintext credentials</span>
+SSH credentials in <code>xmodem.conf</code> are stored in plaintext. The SSH
+connection itself is encrypted, but the file is not. Protect it with the
+<code>0600</code> permissions the gateway sets automatically, and do not
+reuse passwords from other services.
+</aside>
+
+<!-- ═══════════════════ 7. Security ═══════════════════ -->
+<h1 id="ch7">7. Security</h1>
+
+<p>
+Security is optional. In the default configuration the gateway trusts anyone
+on your private LAN and refuses public-Internet connections. Turn security on
+when you want explicit authentication, or when you need to accept connections
+from public addresses over SSH.
+</p>
+
+<h2>7.1 Enabling Login</h2>
+
+<p>
+Check the <em>Require Login</em> box in the GUI Security frame, or set:
+</p>
+
+<pre><code>security_enabled = true
+username = admin
+password = <em>your-password</em>
+ssh_username = admin
+ssh_password = <em>your-password</em></code></pre>
+
+<p>
+Telnet and SSH credentials are independent. Use different values if you want
+different access levels, or identical values for simplicity.
+</p>
+
+<h2>7.2 Credential Comparison</h2>
+
+<p>
+Passwords are compared byte-for-byte using a constant-time equality check
+(<code>constant_time_eq</code>) so an attacker cannot measure tiny timing
+differences to recover the password one character at a time. This matters
+less over telnet (because the password is transmitted in cleartext anyway)
+but it is a genuine defence for SSH logins.
+</p>
+
+<h2>7.3 Per-IP Lockout</h2>
+
+<p>
+The telnet and SSH servers share a single in-memory lockout table keyed on the
+remote IP address. After <strong>3</strong> failed authentication attempts
+within 5 minutes the IP is blocked across <em>both</em> protocols for 5
+minutes. An attacker cannot bounce between protocols to reset the counter.
+</p>
+
+<p>
+Once the block expires the counter resets on the next successful login.
+Lockout events are logged to the console panel so a legitimate user who locked
+themselves out can see what happened.
+</p>
+
+<h2>7.4 File Permissions</h2>
+
+<p>
+On Unix, every file the gateway writes that may contain secrets is set to mode
+<code>0600</code> (owner read/write, no access for group or other):
+</p>
+
+<ul>
+    <li><code>xmodem.conf</code> — telnet password, SSH password, Groq API key.</li>
+    <li><code>dialup.conf</code> — no secrets, but dial-up mappings.</li>
+    <li><code>gateway_hosts</code> — known host fingerprints for outbound SSH dials.</li>
+    <li><code>xmodem_ssh_host_key</code> — the SSH server's private host key.</li>
+    <li><code>xmodem_gateway_ssh_key</code> — the gateway's outbound SSH client key.</li>
+</ul>
+
+<p>
+Config file writes are done to a per-PID temporary filename and then renamed
+into place. This closes a TOCTOU window against symlink-swap attacks in
+shared working directories.
+</p>
+
+<h2>7.5 Audit Logging</h2>
+
+<p>
+Important events are written to the live console panel (and to stderr in
+headless mode):
+</p>
+
+<ul>
+    <li>Auth successes and failures, with the remote IP.</li>
+    <li>Lockout events when an IP hits the 3-failure threshold.</li>
+    <li>SSH Gateway host-key trust decisions — TOFU accept, key update, and rejection — with host, port, key algorithm, and SHA-256 fingerprint. This gives you a forensic trail if a changed host key turns out to be a man-in-the-middle attempt.</li>
+</ul>
+
+<!-- ═══════════════════ 8. File Transfer ═══════════════════ -->
+<h1 id="ch8">8. File Transfer</h1>
+
+<p>
+File transfer is the original reason this project exists. The gateway
+implements three related protocols:
+</p>
+
+<dl>
+    <dt>XMODEM (classic, 128-byte blocks)</dt>
+    <dd>The original 1977 protocol. Uses a <code>SOH</code> header, a block number and its complement, 128 bytes of payload, and either an 8-bit checksum or a CRC-16. Compatible with every retro terminal program ever made.</dd>
+    <dt>XMODEM-1K (1024-byte blocks)</dt>
+    <dd>A 1980s extension that uses an <code>STX</code> header and 1024 bytes of payload. Reduces protocol overhead by a factor of eight. Senders may mix 1K and 128-byte blocks freely within a single transfer; the gateway branches on the header byte per block.</dd>
+    <dt>YMODEM (batch + metadata)</dt>
+    <dd>XMODEM-1K plus a block-0 header. Block 0 has <code>SOH</code>, block number <code>0</code>, complement <code>0xFF</code>, and a 128-byte payload containing the filename, size, and (optionally) mtime. The receiver uses the size to truncate trailing <code>SUB</code> padding exactly.</dd>
+</dl>
+
+<h2>8.1 The Transfer Directory</h2>
+
+<p>
+All transfers are scoped to the <code>transfer_dir</code> setting (default
+<code>transfer</code>), relative to the gateway's working directory. The
+gateway canonicalises the path on every access to prevent symlinks from
+escaping the jail, and filenames are validated to reject path traversal.
+</p>
+
+<p>
+Filename rules:
+</p>
+
+<ul>
+    <li>Letters, digits, dots, hyphens, and underscores only.</li>
+    <li>Maximum 64 characters.</li>
+    <li>Cannot start with a dot.</li>
+    <li>Cannot contain <code>..</code>.</li>
+    <li>Must include at least one letter or digit.</li>
+</ul>
+
+<p>
+File size is capped at <strong>8 MB</strong>. Larger uploads are aborted
+server-side with three <code>CAN</code> bytes.
+</p>
+
+<h2>8.2 Navigation</h2>
+
+<p>
+From the main menu press <span class="kbd">F</span>:
+</p>
+
+<pre><code>  U  Upload           (receive file from your terminal)
+  D  Download         (send file to your terminal)
+  X  Delete           (remove a file from the transfer dir)
+  C  Change directory (subdirectory within transfer_dir)
+  I  Toggle IAC escaping (for binary files with 0xFF bytes)</code></pre>
+
+<h2 id="ch8-upload">8.3 Uploads — Auto-Detection</h2>
+
+<p>
+Press <span class="kbd">U</span>, enter a filename, and the server prints:
+</p>
+
+<pre><code>Begin XMODEM send now.</code></pre>
+
+<p>
+Now start the send from your terminal program (XMODEM, XMODEM-1K, or YMODEM).
+The gateway auto-detects which protocol the sender is using. The logic is:
+</p>
+
+<ol>
+    <li>The receiver first sends <code>'C'</code> (0x43) for CRC-16 mode. It retries every three seconds for two thirds of the negotiation timeout. Most modern clients respond to this.</li>
+    <li>If no response comes, the receiver falls back to sending <code>NAK</code> (0x15) to request checksum mode. This rescues very old clients that never implemented CRC.</li>
+    <li>The first header byte from the sender determines the block size: <code>SOH</code> (0x01) means a 128-byte block, <code>STX</code> (0x02) means a 1024-byte XMODEM-1K block.</li>
+    <li>If the first header is <code>SOH</code> with block number <code>0</code> and complement <code>0xFF</code>, it is a <strong>YMODEM block 0</strong>. The gateway reads the filename header, parses the file size, validates the CRC, <code>ACK</code>s, and sends a second <code>'C'</code> to start the data phase.</li>
+    <li>Within a single transfer the sender may mix 128-byte and 1024-byte blocks freely. Each block's header byte selects the payload length.</li>
+    <li>Transfer ends on <code>EOT</code> (0x04), which the server <code>ACK</code>s. For YMODEM, the server then sends <code>'C'</code> and consumes the end-of-batch "null block 0" the sender emits to signal "no more files" (Forsberg §7.4).</li>
+    <li>Once the transfer is complete, the file is truncated: YMODEM uses the exact size field from block 0 so files that legitimately end in <code>0x1A</code> bytes (EXEs, some archives) aren't corrupted; plain XMODEM and XMODEM-1K strip trailing <code>SUB</code> (0x1A) padding since there's no length metadata.</li>
+</ol>
+
+<p>
+Cancellations are handled both ways: sending <code>ESC</code> from your side
+aborts the transfer, and three <code>CAN</code> bytes from either side abort
+with "Transfer cancelled".
+</p>
+
+<aside class="note">
+<span class="label">Duplicate filename</span>
+If the name you type is already in the transfer directory, the server asks
+<code>Overwrite? (Y/N)</code> <em>before</em> starting the transfer. Answering
+<span class="kbd">N</span> cancels cleanly; answering <span class="kbd">Y</span>
+proceeds and truncates the existing file on save. This prevents a whole
+transfer from running only to fail at the final write step.
+</aside>
+
+<h2 id="ch8-download">8.4 Downloads — Protocol Selection Prompt</h2>
+
+<p>
+Press <span class="kbd">D</span>, then pick a file from the numbered list
+(paginated, 10 per page). Before the transfer starts, the gateway asks which
+protocol to use:
+</p>
+
+<pre><code>────────────────────────────────────
+  SELECT PROTOCOL
+────────────────────────────────────
+
+  X  XMODEM       (128-byte blocks)
+  1  XMODEM-1K    (1024-byte blocks)
+  Y  YMODEM       (filename + size header, 1K)
+
+  Pick one, or ESC to cancel:</code></pre>
+
+<p>
+Pick the protocol that your terminal program supports. The choice is immediate
+— one key, no Enter required. ESC (or <span class="kbd">←</span> on PETSCII,
+byte 0x5F) cancels.
+</p>
+
+<p>
+The selection affects what the sender does:
+</p>
+
+<ul>
+    <li><strong>XMODEM</strong> — the sender transmits 128-byte <code>SOH</code> blocks exclusively.</li>
+    <li><strong>XMODEM-1K</strong> — the sender transmits 1024-byte <code>STX</code> blocks, with an opportunistic 128-byte <code>SOH</code> fallback on the final short block.</li>
+    <li><strong>YMODEM</strong> — the sender begins with a block-0 <code>SOH 0x00 0xFF</code> header containing the filename and size, waits for <code>'C'</code> acknowledgement, then transmits 1K data blocks just like XMODEM-1K.</li>
+</ul>
+
+<h2 id="ch8-zmodem">8.5 ZMODEM Autostart Detection</h2>
+
+<p>
+ZMODEM (Chuck Forsberg's 1986 protocol, with its famous automatic "rz"
+trigger) is <strong>not</strong> supported. However, many terminal programs
+start a ZMODEM send by emitting the autostart sequence <code>**\x18B</code>,
+<code>**\x18A</code>, or <code>**\x18C</code>. If the gateway's idle input
+loop sees that pattern, it:
+</p>
+
+<ol>
+    <li>Logs "ZMODEM autostart detected; sending abort".</li>
+    <li>Transmits the standard abort: five <code>CAN</code> bytes (0x18 &times; 5) followed by five <code>BS</code> bytes (0x08 &times; 5) to wipe any "rz\r" prompt.</li>
+    <li>Pauses 500 ms and drains any in-flight ZMODEM frames.</li>
+    <li>Displays a friendly notice: "ZMODEM autostart detected &mdash; aborting. ZMODEM is not yet supported by this server. Please use XMODEM, XMODEM-1K, or YMODEM from the File Transfer menu instead."</li>
+</ol>
+
+<h2>8.6 Telnet NVT Transforms</h2>
+
+<p>
+Telnet's Network Virtual Terminal (RFC 854) imposes two wire-level transforms
+on any byte stream, including file transfers over a telnet connection:
+</p>
+
+<ul>
+    <li><strong>IAC escaping.</strong> Byte <code>0xFF</code> is the IAC (Interpret As Command) marker. Any <code>0xFF</code> in data — including a CRC byte that happens to be <code>0xFF</code> — must be doubled on the wire as <code>0xFF 0xFF</code>. The receiver collapses the pair back to a single <code>0xFF</code>.</li>
+    <li><strong>CR-NUL stuffing.</strong> A bare <code>0x0D</code> (CR) in data must be sent on the wire as <code>CR NUL</code> (<code>0x0D 0x00</code>). The receiver strips the NUL. Without this, the telnet parser on the peer side treats the CR as a line-ending sentinel and consumes the following byte.</li>
+</ul>
+
+<p>
+The honest reality: there's no way for the server to know for certain whether
+a given client actually follows these rules during an XMODEM/YMODEM transfer.
+Strict clients (PuTTY / ExtraPuTTY, Tera Term, C-Kermit, SecureCRT) do; many
+retro clients (IMP8, CCGMS, StrikeTerm, NovaTerm, some AltairDuino firmware)
+don't — they treat a TCP connection to port 23 as raw bytes. We pick a
+default based on the detected terminal type because it correlates well in
+practice:
+</p>
+
+<table>
+    <thead><tr><th>Terminal detected</th><th>Typical client</th><th>Auto default</th></tr></thead>
+    <tbody>
+        <tr><td>ANSI</td><td>PuTTY / ExtraPuTTY, Tera Term, C-Kermit, SecureCRT, xterm</td><td>IAC <strong>on</strong></td></tr>
+        <tr><td>PETSCII</td><td>Commodore 64/128 (IMP8, CCGMS, StrikeTerm, NovaTerm)</td><td>IAC <strong>off</strong></td></tr>
+        <tr><td>ASCII</td><td>Dumb terminals, AltairDuino, custom hardware</td><td>IAC <strong>off</strong></td></tr>
+    </tbody>
+</table>
+
+<p>
+SSH and serial sessions skip both transforms unconditionally — SSH has no
+in-band command byte, and serial streams aren't subject to NVT rules.
+</p>
+
+<p>
+If the auto default is wrong for your client — the most visible symptom is
+consistent block-CRC failures in one direction — press <span class="kbd">I</span>
+on the File Transfer menu to flip both transforms and retry. The choice is
+session-local; it isn't persisted to <code>xmodem.conf</code>, so the next
+connection from the same terminal type gets the same auto default again.
+</p>
+
+<aside class="note">
+<span class="label">What you'll see if NVT is wrong</span>
+An upload that runs fine for one or two dozen blocks and then CRC-fails
+repeatedly is usually the first block containing a raw <code>0xFF</code> or
+<code>0x0D</code> byte that isn't being escaped by one side. A download that
+stalls after 3–4 blocks with the client repeatedly sending <code>'C'</code>
+instead of <code>ACK</code> is the same thing on the send side. Toggle
+<span class="kbd">I</span> and retry.
+</aside>
+
+<h2 id="ch8-tuning">8.7 Protocol Timeout Tunables</h2>
+
+<p>
+Three config keys control transfer behaviour:
+</p>
+
+<table>
+    <thead><tr><th>Key</th><th>Default</th><th>Meaning</th></tr></thead>
+    <tbody>
+        <tr><td><code>xmodem_negotiation_timeout</code></td><td>45 s</td><td>Maximum time the receiver will wait for the first <code>SOH</code>/<code>STX</code> header from the sender, and vice versa.</td></tr>
+        <tr><td><code>xmodem_block_timeout</code></td><td>20 s</td><td>Per-block timeout. If a block header does not arrive within this long after an <code>ACK</code>/<code>NAK</code>, the receiver retries.</td></tr>
+        <tr><td><code>xmodem_max_retries</code></td><td>10</td><td>Maximum <code>NAK</code> retries per block before the receiver cancels the transfer with three <code>CAN</code>s.</td></tr>
+    </tbody>
+</table>
+
+<aside class="tip">
+<span class="label">Verbose diagnostics</span>
+Set <code>verbose&nbsp;=&nbsp;true</code> to log every header byte, CRC
+result, block number, and timeout event. This is invaluable when a transfer
+fails on a specific block and you need to know which side hiccuped.
+</aside>
+
+<!-- ═══════════════════ 9. Hayes AT modem ═══════════════════ -->
+<h1 id="ch9">9. Serial / Hayes AT Modem Emulation</h1>
+
+<p>
+The modem emulator turns the gateway into a virtual Hayes Smartmodem on a
+physical serial port. Retro hardware — a Commodore 64 with an RS-232
+cartridge, a CP/M machine, an AltairDuino 2SIO2, an RC2014 — connects as if
+the gateway were a real modem. <code>ATDT</code>, <code>ATH</code>,
+<code>+++</code>, all of it works.
+</p>
+
+<p>
+The emulator speaks a full Hayes command set: <code>AT</code>, <code>ATZ</code>,
+<code>AT&amp;F</code>, <code>AT&amp;W</code>, <code>AT&amp;V</code>,
+<code>ATE</code>, <code>ATV</code>, <code>ATQ</code>, <code>ATI</code>
+variants, <code>ATH</code>, <code>ATA</code>, <code>ATO</code>, <code>ATX</code>,
+<code>AT&amp;C</code>, <code>AT&amp;D</code>, <code>AT&amp;K</code>,
+<code>AT&amp;Z</code>, <code>ATD</code> (with <code>T</code>, <code>P</code>,
+<code>L</code>, <code>S</code> variants), <code>ATSn</code>, S-registers
+S0–S26, the <code>A/</code> repeat-last-command shortcut, and the
+<code>+++</code> escape sequence with S2/S12 guard-time semantics.
+</p>
+
+<h2 id="ch9-setup">9.1 Enabling the Emulator</h2>
+
+<p>
+From the GUI Serial Modem frame:
+</p>
+
+<ol>
+    <li>Check <em>Enabled</em>.</li>
+    <li>Pick a port from the dropdown. If your port does not appear, plug in the adapter and click the refresh (&#8634;) button.</li>
+    <li>Set the baud rate, data bits, parity, stop bits, and wire-level flow control.</li>
+    <li>Click <em>Save and Restart Server</em> so the serial thread restarts with the new settings.</li>
+</ol>
+
+<p>
+You can also configure everything live from an in-session telnet / SSH user:
+<em>Configuration</em> &rarr; <em>Modem Emulator</em>. That menu has
+<span class="kbd">E</span> to enable, <span class="kbd">S</span> to detect and
+select a port, and submenus for baud / framing / flow control. Changes
+applied through the in-session menu take effect immediately with no restart.
+</p>
+
+<aside class="warn">
+<span class="label">Serial lockout protection</span>
+When you change parameters from a serial session (i.e. through the modem
+itself), the server asks for confirmation and <em>reverts</em> if you don't
+respond within 60 seconds. If your new baud rate is wrong, your serial
+terminal will stop echoing and you will simply wait out the timer — your old
+settings come back unchanged.
+</aside>
+
+<p>
+Typical C64-friendly parameters: 2400–9600 baud, 8N1, no flow control. CP/M
+systems usually want 9600 8N1. The AltairDuino 2SIO2 is commonly configured
+for 9600 8N1 as well; remember to press <em>stop</em> and <em>aux1 up</em> on
+the front panel to configure its serial ports.
+</p>
+
+<h2 id="ch9-dial">9.2 Dialing</h2>
+
+<p>
+The emulator routes dial strings over TCP. There is no real phone line — the
+"call" is a <code>tokio::net::TcpStream::connect()</code>.
+</p>
+
+<table>
+    <thead><tr><th>Command</th><th>Action</th></tr></thead>
+    <tbody>
+        <tr><td><code>ATDT host:port</code></td><td>Connect to a remote telnet server. <code>ATDT</code> and <code>ATDP</code> are equivalent (there is no audible difference over TCP).</td></tr>
+        <tr><td><code>ATDT xmodem-gateway</code></td><td>Built-in shortcut — dials this gateway's own main menu, so the serial device can use all gateway features (file transfer, browser, AI chat, etc.) without a network detour.</td></tr>
+        <tr><td><code>ATDP host:port</code></td><td>Same as <code>ATDT</code> — pulse selector, ignored.</td></tr>
+        <tr><td><code>ATDSn</code> (n = 0–3)</td><td>Dial stored number in slot <em>n</em>. Bare <code>ATDS</code> dials slot 0.</td></tr>
+        <tr><td><code>ATDL</code></td><td>Redial the last number.</td></tr>
+        <tr><td><code>AT&amp;Zn=s</code></td><td>Store phone number or <code>host:port</code> in slot <em>n</em> (0–3). Preserves hostname case.</td></tr>
+    </tbody>
+</table>
+
+<p>
+Dial-string modifiers (only honoured when the dial string looks like a
+phone number, i.e. digits and formatting characters):
+</p>
+
+<table>
+    <thead><tr><th>Modifier</th><th>Effect</th></tr></thead>
+    <tbody>
+        <tr><td><code>,</code></td><td>Pause for S8 seconds (default 2) before continuing. Each comma adds S8 seconds.</td></tr>
+        <tr><td><code>W</code></td><td>Wait for dial tone. Adds S6 seconds to the pre-delay.</td></tr>
+        <tr><td><code>;</code></td><td>After "connect", return to command mode instead of entering online data mode. Applies to hostnames too.</td></tr>
+        <tr><td><code>*</code>, <code>#</code></td><td>DTMF digits. Preserved in the dial target for phone-number lookup.</td></tr>
+        <tr><td><code>P</code>, <code>T</code>, <code>@</code>, <code>!</code></td><td>Pulse, tone, quiet-answer, hookflash selectors. Accepted, ignored.</td></tr>
+    </tbody>
+</table>
+
+<p>
+Modifiers are <em>not</em> stripped from hostnames. Dialling
+<code>ATDT pine.example.com</code> connects to "pine.example.com" verbatim —
+the heuristic notices that the dial string contains letters and dots and
+skips modifier processing for everything except the trailing <code>;</code>.
+</p>
+
+<h3>9.2.1 Examples</h3>
+
+<pre><code>ATDT xmodem-gateway
+CONNECT 9600
+<em>(local gateway main menu appears)</em>
+
+ATDT 192.168.1.160:2323
+CONNECT 9600
+<em>(remote gateway appears)</em>
+
+ATDT bbs.example.com:23
+CONNECT 9600
+
+AT&amp;Z0=bbs.example.com:23
+OK
+ATDS0
+CONNECT 9600
+
+AT&amp;Z1=Pine.Example.com:22
+OK
+<em>(note: hostname case is preserved)</em>
+
+ATDT 5551234
+<em>(looked up in dialup.conf, or NO CARRIER if unmapped)</em></code></pre>
+
+<h3>9.2.2 Dial-up Mapping</h3>
+
+<p>
+The gateway also maintains <code>dialup.conf</code>, which maps phone numbers
+to <code>host:port</code> targets. Edit it through the Modem Emulator menu's
+<em>D</em> submenu. A built-in entry, <code>1001000</code>, always maps to
+the local gateway menu (equivalent to <code>ATDT xmodem-gateway</code>) and
+cannot be deleted. Numbers are matched by digits only — dashes, spaces,
+and parentheses are ignored — so <code>555-1234</code> and <code>5551234</code>
+hit the same entry.
+</p>
+
+<h2 id="ch9-info">9.3 Identification (ATI)</h2>
+
+<table>
+    <thead><tr><th>Command</th><th>Response</th></tr></thead>
+    <tbody>
+        <tr><td><code>ATI</code> / <code>ATI0</code></td><td>Product ID and version: <code>XMODEM Gateway Modem Emulator v0.3.3</code></td></tr>
+        <tr><td><code>ATI1</code></td><td>ROM checksum: <code>000</code> (virtual)</td></tr>
+        <tr><td><code>ATI2</code></td><td>ROM self-test: <code>OK</code></td></tr>
+        <tr><td><code>ATI3</code></td><td>Firmware identifier: <code>XMODEM Gateway 0.3.3</code></td></tr>
+        <tr><td><code>ATI4</code></td><td>Product description: <code>Hayes-compatible virtual modem over TCP</code></td></tr>
+        <tr><td><code>ATI5</code></td><td>OEM / country code: <code>B00</code></td></tr>
+        <tr><td><code>ATI6</code></td><td>Link diagnostics: <code>No link diagnostics available</code></td></tr>
+        <tr><td><code>ATI7</code></td><td>Product info: <code>Product: xmodem-gateway (software emulator)</code></td></tr>
+    </tbody>
+</table>
+
+<h2>9.4 Reset &amp; Profile Storage</h2>
+
+<table>
+    <thead><tr><th>Command</th><th>Action</th></tr></thead>
+    <tbody>
+        <tr><td><code>ATZ</code></td><td>Reset to the stored profile (read from <code>xmodem.conf</code>). Drops any active connection.</td></tr>
+        <tr><td><code>AT&amp;F</code></td><td>Factory reset to gateway-friendly defaults. Does <em>not</em> overwrite the stored profile.</td></tr>
+        <tr><td><code>AT&amp;W</code></td><td>Save current settings to <code>xmodem.conf</code>. Persists echo, verbose, quiet, all 27 S-registers, <code>X</code>, <code>&amp;C</code>, <code>&amp;D</code>, <code>&amp;K</code>, and the four stored-number slots.</td></tr>
+        <tr><td><code>AT&amp;V</code></td><td>Display current configuration — one line of mode flags, a second line listing every S-register, and a third line listing stored numbers.</td></tr>
+    </tbody>
+</table>
+
+<h2 id="ch9-behavior">9.5 Echo, Verbose, Quiet</h2>
+
+<table>
+    <thead><tr><th>Command</th><th>Effect</th></tr></thead>
+    <tbody>
+        <tr><td><code>ATE0</code> / <code>ATE1</code></td><td>Echo off / on (default on).</td></tr>
+        <tr><td><code>ATV0</code> / <code>ATV1</code></td><td>Numeric / verbose result codes (default verbose).</td></tr>
+        <tr><td><code>ATQ0</code> / <code>ATQ1</code></td><td>Result codes on / silent mode (default on).</td></tr>
+    </tbody>
+</table>
+
+<p>
+In verbose mode results are text (<code>OK</code>, <code>CONNECT</code>,
+<code>NO CARRIER</code>, <code>ERROR</code>, <code>RING</code>, <code>BUSY</code>,
+<code>NO DIALTONE</code>, <code>NO ANSWER</code>). In numeric mode they are
+digits. Quiet mode suppresses results altogether.
+</p>
+
+<h3>9.5.1 ATX Levels</h3>
+
+<table>
+    <thead><tr><th>Level</th><th>Extended codes</th><th>CONNECT format</th></tr></thead>
+    <tbody>
+        <tr><td><code>X0</code></td><td>Basic only; BUSY / NO DIALTONE / NO ANSWER collapse to NO CARRIER</td><td><code>CONNECT</code> (code 1)</td></tr>
+        <tr><td><code>X1</code></td><td>Basic + baud in CONNECT</td><td><code>CONNECT &lt;baud&gt;</code> (code per baud)</td></tr>
+        <tr><td><code>X2</code></td><td>Adds NO DIALTONE detection</td><td><code>CONNECT &lt;baud&gt;</code></td></tr>
+        <tr><td><code>X3</code></td><td>Adds BUSY detection</td><td><code>CONNECT &lt;baud&gt;</code></td></tr>
+        <tr><td><code>X4</code> (default)</td><td>Full extended set</td><td><code>CONNECT &lt;baud&gt;</code></td></tr>
+    </tbody>
+</table>
+
+<p>
+Numeric CONNECT codes follow Hayes conventions: 1 = 300 baud, 5 = 1200,
+10 = 2400, 12 = 9600, 16 = 19200, 28 = 38400, 87 = 115200. Non-standard
+baud rates report code 1.
+</p>
+
+<h2 id="ch9-hardware">9.6 DTR, Flow Control, and DCD</h2>
+
+<table>
+    <thead><tr><th>Command</th><th>Meaning</th></tr></thead>
+    <tbody>
+        <tr><td><code>AT&amp;C0</code></td><td>DCD always asserted.</td></tr>
+        <tr><td><code>AT&amp;C1</code> (Hayes default)</td><td>DCD reflects carrier state.</td></tr>
+        <tr><td><code>AT&amp;D0</code> (<em>gateway default</em>)</td><td>Ignore DTR entirely.</td></tr>
+        <tr><td><code>AT&amp;D1</code></td><td>Drop DTR &rarr; return to command mode.</td></tr>
+        <tr><td><code>AT&amp;D2</code> (Hayes default)</td><td>Drop DTR &rarr; hang up.</td></tr>
+        <tr><td><code>AT&amp;D3</code></td><td>Drop DTR &rarr; hang up and reset.</td></tr>
+        <tr><td><code>AT&amp;K0</code> (<em>gateway default</em>)</td><td>No modem-layer flow control.</td></tr>
+        <tr><td><code>AT&amp;K1</code></td><td>Reserved.</td></tr>
+        <tr><td><code>AT&amp;K3</code></td><td>Bidirectional RTS/CTS hardware flow control.</td></tr>
+        <tr><td><code>AT&amp;K4</code></td><td>Bidirectional XON/XOFF software flow control.</td></tr>
+    </tbody>
+</table>
+
+<aside class="note">
+<span class="label">Gateway-friendly default deviations</span>
+The emulator deviates from three Hayes defaults because retro clients rarely
+drive the relevant signals correctly:
+<ul>
+    <li><code>AT&amp;D0</code> instead of <code>&amp;D2</code> — many C64, CP/M, and similar clients don't wire DTR. <code>&amp;D2</code> would cause spurious disconnects.</li>
+    <li><code>AT&amp;K0</code> instead of <code>&amp;K3</code> — retro clients rarely implement hardware flow control. Physical-wire flow is still controlled by the <code>serial_flowcontrol</code> setting.</li>
+    <li><code>S7=15</code> instead of <code>S7=50</code> — keeps failed TCP dials responsive. Internally capped at 60 seconds.</li>
+</ul>
+All three can be overridden interactively (e.g. <code>AT&amp;D2</code>, <code>AT&amp;K3</code>, <code>ATS7=50</code>) and persisted with <code>AT&amp;W</code>.
+</aside>
+
+<aside class="warn">
+<span class="label">Signal pins are not driven</span>
+<code>AT&amp;C</code>, <code>AT&amp;D</code>, and <code>AT&amp;K</code> are
+parsed, stored, persisted, and shown by <code>AT&amp;V</code> — but the
+emulator does not drive the corresponding RS-232 hardware pins. DCD, RI, DSR,
+and DTR are not controlled, and RTS/CTS handshaking on the wire is governed
+by <code>serial_flowcontrol</code> rather than <code>&amp;K</code>. Most
+retro terminal software works fine without these signals; if your program
+requires DCD before communicating, look for a "force DTR" or "ignore
+carrier" option.
+</aside>
+
+<h2 id="ch9-sregs">9.7 S-Registers</h2>
+
+<p>
+Query with <code>ATSn?</code>, set with <code>ATSn=v</code>. Values are 0–255.
+<code>ATS?</code> prints a help table. <code>AT&amp;W</code> saves all 27
+values to <code>xmodem.conf</code>; <code>ATZ</code> restores them from the
+stored profile; <code>AT&amp;F</code> resets to factory defaults.
+</p>
+
+<table>
+    <thead><tr><th>Register</th><th>Default</th><th>Description</th></tr></thead>
+    <tbody>
+        <tr><td>S0</td><td>5</td><td>Auto-answer ring count (0 disables).</td></tr>
+        <tr><td>S1</td><td>0</td><td>Current ring counter.</td></tr>
+        <tr><td>S2</td><td>43</td><td>Escape character (<code>+</code>). Values &gt; 127 disable escape detection.</td></tr>
+        <tr><td>S3</td><td>13</td><td>Carriage return character.</td></tr>
+        <tr><td>S4</td><td>10</td><td>Line feed character.</td></tr>
+        <tr><td>S5</td><td>8</td><td>Backspace character.</td></tr>
+        <tr><td>S6</td><td>2</td><td>Wait-for-dial-tone seconds (used by <code>W</code> modifier).</td></tr>
+        <tr><td>S7</td><td><strong>15</strong></td><td>Wait-for-carrier seconds. Hayes default is 50; gateway reduces it for responsive TCP dials. Capped internally at 60.</td></tr>
+        <tr><td>S8</td><td>2</td><td>Comma pause time (seconds).</td></tr>
+        <tr><td>S9</td><td>6</td><td>Carrier detect response time (1/10 s).</td></tr>
+        <tr><td>S10</td><td>14</td><td>Carrier loss disconnect time (1/10 s).</td></tr>
+        <tr><td>S11</td><td>95</td><td>DTMF tone duration (ms).</td></tr>
+        <tr><td>S12</td><td>50</td><td>Escape-sequence guard time (1/50 s). 50 = 1.0 s. Set to 0 to disable escape detection.</td></tr>
+        <tr><td>S13 – S24</td><td>0</td><td>Reserved placeholders. Stored and persisted so legacy init strings don't halt with <code>ERROR</code>, but they have no effect.</td></tr>
+        <tr><td>S25</td><td>5</td><td>DTR detect time (1/100 s). Reserved — no DTR pin.</td></tr>
+        <tr><td>S26</td><td>1</td><td>RTS-to-CTS delay (1/100 s). Reserved — no RTS/CTS pins.</td></tr>
+    </tbody>
+</table>
+
+<aside class="warn">
+<span class="label">Do not collide S3/S4/S5</span>
+Command-mode line editing dispatches on the raw byte and checks the CR
+branch before the BS branch. Setting <code>S3&nbsp;=&nbsp;8</code> would make
+backspace terminate the line. Keep S3/S4/S5 distinct (the Hayes defaults
+13/10/8 do the right thing).
+</aside>
+
+<h2 id="ch9-escape">9.8 The +++ Escape Sequence</h2>
+
+<p>
+From online (data-transfer) mode, type <code>+++</code> surrounded by at least
+<strong>S12 &times; 1/50</strong> seconds of silence on either side to return
+to command mode without hanging up. Once in command mode, <code>ATO</code>
+resumes the connection and <code>ATH</code> hangs up. This follows the Hayes
+guard-time spec exactly.
+</p>
+
+<p>
+The implementation details:
+</p>
+
+<ul>
+    <li>Escape character is <code>S2</code> (default 43 = <code>+</code>).</li>
+    <li>Guard time is <code>S12 / 50</code> seconds on both sides of the triple.</li>
+    <li>Setting <code>S12&nbsp;=&nbsp;0</code> or <code>S2&nbsp;&gt;&nbsp;127</code> disables escape detection entirely.</li>
+    <li>Fewer or more than three consecutive escape characters are passed through as data.</li>
+    <li>The escape is interrupted if the sender emits any non-escape byte mid-sequence.</li>
+</ul>
+
+<h2 id="ch9-aslash">9.9 A/ — Repeat Last Command</h2>
+
+<p>
+<code>A/</code> (capital A, forward slash) with no <code>AT</code> prefix and
+no carriage return repeats the last command you entered. Real Hayes modems
+recognise this as a special two-character command. Useful for re-dialling or
+re-sending the last <code>ATZ</code> while debugging.
+</p>
+
+<h2>9.10 Ring Emulator</h2>
+
+<p>
+Telnet and SSH users can simulate an incoming phone call to the serial device
+from the Modem Emulator menu (<span class="kbd">I</span> — Ring emulator).
+The modem sends <code>RING</code> to the serial port at standard US cadence
+(every 6 seconds). After <code>S0</code> rings (default 5) the modem
+auto-answers and the serial device receives the XMODEM Gateway main menu,
+just as if it had dialled in with <code>ATDT xmodem-gateway</code>. The
+serial device can also answer manually with <code>ATA</code> during ringing.
+</p>
+
+<h2>9.11 Unknown AT Commands</h2>
+
+<p>
+Commands the emulator has no hardware to implement — <code>ATB</code>,
+<code>ATC</code>, <code>ATL</code> (speaker loudness), <code>ATM</code>
+(speaker mute), <code>AT&amp;B</code>, <code>AT&amp;G</code>,
+<code>AT&amp;J</code>, <code>AT&amp;S</code>, <code>AT&amp;T</code>,
+<code>AT&amp;Y</code>, etc. — are accepted and return <code>OK</code>. This
+keeps legacy init strings working instead of halting mid-setup with
+<code>ERROR</code>.
+</p>
+
+<!-- ═══════════════════ 10. SSH Gateway ═══════════════════ -->
+<h1 id="ch10">10. SSH Gateway (Outbound)</h1>
+
+<p>
+The SSH Gateway proxies your inbound telnet or SSH session through to a remote
+SSH server. Useful for accessing SSH boxes from a Commodore 64 or any other
+client that can only speak telnet.
+</p>
+
+<h2>10.1 Using It</h2>
+
+<p>
+From the main menu, press <span class="kbd">S</span>. The gateway shows the
+currently-configured auth mode, then prompts for the remote host, port, and
+username:
+</p>
+
+<pre><code>Auth: password
+Host: example.com
+Port (22): 22
+Username: alice</code></pre>
+
+<p>
+Auth mode is set by <code>ssh_gateway_auth</code> in the config (default
+<code>password</code>). You can change it either from the GUI's
+<em>Server &rarr; More</em> popup or from the telnet session's
+<em>Configuration &rarr; Gateway Configuration</em> menu. The two modes are
+mutually exclusive — the gateway never silently falls back from one to the
+other, so auth failures are unambiguous:
+</p>
+
+<ul>
+    <li><strong>Password</strong> — the gateway asks for the remote account's password after the username prompt. Works with any SSH server that allows password auth.</li>
+    <li><strong>Key</strong> — the gateway offers its own Ed25519 keypair (<code>xmodem_gateway_ssh_key</code>, generated on first use and persisted at mode <code>0600</code>). The remote must have the matching public half in <code>~/.ssh/authorized_keys</code> first. The public key is shown in the GUI's Server &rarr; More popup when Auth is set to Key; you can also extract it on the command line with <code>ssh-keygen -y -f xmodem_gateway_ssh_key</code>.</li>
+</ul>
+
+<p>
+Press <span class="kbd">ESC</span> twice to disconnect.
+</p>
+
+<h2>10.2 Host-Key Trust (TOFU)</h2>
+
+<p>
+The first time you dial a given host, the gateway shows the server's SHA-256
+fingerprint and asks whether to trust it. Accepted fingerprints are persisted
+to <code>gateway_hosts</code> (mode <code>0600</code>) and checked on every
+subsequent dial. A changed key triggers a prominent warning:
+</p>
+
+<pre><code>WARNING: HOST KEY HAS CHANGED!
+Previous fingerprint: SHA256:...
+Current  fingerprint: SHA256:...
+Update (U), Abort (any other key):</code></pre>
+
+<p>
+All trust decisions — first accept, update, and reject — are written to the
+server log (and the GUI console) so you have a forensic trail if a changed
+key turns out to be a man-in-the-middle attempt.
+</p>
+
+<h2>10.3 Output Filtering</h2>
+
+<p>
+For PETSCII and ASCII terminals, ANSI escape sequences from the remote are
+automatically stripped and text is converted to the appropriate encoding.
+ANSI terminals get the raw output unmodified. PTY size is set to 40&times;25
+for PETSCII and 80&times;24 for ANSI/ASCII.
+</p>
+
+<h2>10.4 Key File Summary</h2>
+
+<table>
+    <thead><tr><th>File</th><th>Role</th><th>Analogous to</th></tr></thead>
+    <tbody>
+        <tr><td><code>gateway_hosts</code></td><td>Remote host fingerprints accepted by the SSH Gateway.</td><td><code>~/.ssh/known_hosts</code></td></tr>
+        <tr><td><code>xmodem_ssh_host_key</code></td><td>Host key the SSH <em>server</em> presents to incoming clients.</td><td><code>/etc/ssh/ssh_host_ed25519_key</code></td></tr>
+        <tr><td><code>xmodem_gateway_ssh_key</code></td><td>Outbound SSH client keypair used for pubkey auth to remote hosts.</td><td><code>~/.ssh/id_ed25519</code></td></tr>
+    </tbody>
+</table>
+
+<!-- ═══════════════════ 11. Telnet Gateway ═══════════════════ -->
+<h1 id="ch11">11. Telnet Gateway (Outbound)</h1>
+
+<p>
+Press <span class="kbd">T</span> from the main menu to dial a remote telnet
+server or any raw-TCP service on port 23 (BBSes, MUDs, legacy hand-rolled
+software).
+</p>
+
+<h2>11.1 Protocol Mode</h2>
+
+<p>
+The gateway displays the currently-configured mode on entry and proceeds
+straight to the host prompt. The mode is a persistent setting, not a
+per-session choice:
+</p>
+
+<pre><code>Mode: Telnet protocol
+Host:</code></pre>
+
+<p>
+Change the mode from the GUI (<em>Server &rarr; More</em> popup, Telnet
+Gateway Mode dropdown) or from the telnet session's
+<em>Configuration &rarr; Gateway Configuration</em> menu. Changes take
+effect on the next dial — no restart needed.
+</p>
+
+<h2>11.2 The Three Modes Explained</h2>
+
+<h3>11.2.1 Reactive mode (default)</h3>
+
+<p>
+<code>telnet_gateway_negotiate = false</code> and
+<code>telnet_gateway_raw = false</code>. The gateway parses IAC in both
+directions but does not send proactive option offers. It silently accepts
+cooperative <code>WILL ECHO</code> from the remote (so BBSes that expect the
+server to echo work correctly), refuses every other peer-initiated option
+with <code>DONT</code> / <code>WONT</code>, escapes outbound <code>0xFF</code>
+data bytes as <code>IAC IAC</code>, and parses inbound IAC so protocol bytes
+don't leak to the user's terminal. Works with any real telnet server
+<em>and</em> with raw-TCP services on port 23 that never initiate telnet
+options.
+</p>
+
+<h3>11.2.2 Cooperative mode</h3>
+
+<p>
+<code>telnet_gateway_negotiate = true</code>. In addition to reactive mode's
+behaviour, the gateway sends proactive <code>IAC WILL TTYPE</code>,
+<code>IAC WILL NAWS</code>, and <code>IAC DO ECHO</code> at connect time.
+On <code>SB TTYPE SEND</code> it replies with the user's terminal type
+(<code>PETSCII</code>, <code>ANSI</code>, or <code>DUMB</code>). On
+<code>DO NAWS</code> it replies with the user's actual window dimensions, and
+it forwards in-session NAWS updates if the user resizes their terminal.
+Option state is tracked through a full RFC 1143 six-state Q-method, so a
+mind-change while a prior offer is in flight resolves cleanly.
+</p>
+
+<p>
+Enable this when dialling modern BBSes — you get echo cooperation, correct
+terminal-type adaptation, and full-screen UI at your actual window size.
+</p>
+
+<h3>11.2.3 Raw TCP</h3>
+
+<p>
+<code>telnet_gateway_raw = true</code>. The gateway disables its entire
+telnet-IAC layer: no IAC escaping on outbound, no IAC parsing on inbound.
+Supersedes <code>telnet_gateway_negotiate</code>. Intended for destinations
+that aren't really telnet — some legacy MUDs, hand-rolled BBS software, or
+services that happen to run on port 23 but speak some other byte-level
+protocol.
+</p>
+
+<p>
+Bytes written <em>to</em> the local user are still IAC-escaped so their
+telnet client does not misinterpret a stray <code>0xFF</code> as a protocol
+byte.
+</p>
+
+<h2>11.3 Dialing</h2>
+
+<p>
+After the mode prompt, enter the host and port:
+</p>
+
+<pre><code>Host: bbs.example.com
+Port (23): 23</code></pre>
+
+<p>
+Press <span class="kbd">ESC</span> twice to disconnect. For PETSCII and ASCII
+terminals, ANSI escape sequences from the remote are filtered out. The
+gateway also has an 8 KiB cap on subnegotiation body length, so a malicious
+remote cannot exhaust memory by sending huge <code>SB</code> bodies without a
+terminating <code>IAC SE</code>.
+</p>
+
+<!-- ═══════════════════ 12. AI Chat ═══════════════════ -->
+<h1 id="ch12">12. AI Chat</h1>
+
+<p>
+The AI Chat feature sends prompts to the Groq API and displays the responses
+in the terminal. It is free to use — you need a Groq account and an API key
+— and the model is <code>llama-3.3-70b-versatile</code>.
+</p>
+
+<h2>12.1 Setup</h2>
+
+<ol>
+    <li>Go to <code>https://console.groq.com/keys</code> and create a free account.</li>
+    <li>Generate an API key. It starts with <code>gsk_</code>.</li>
+    <li>In the GUI, paste the key into the <em>API Key</em> field (it displays as dots), or edit <code>xmodem.conf</code> and set <code>groq_api_key = gsk_your_key_here</code>.</li>
+    <li>Save. No restart needed.</li>
+</ol>
+
+<h2>12.2 Using AI Chat</h2>
+
+<p>
+From the main menu, press <span class="kbd">A</span>. Type a question and
+press Enter. The server shows <em>Thinking&hellip;</em> while waiting for the
+response (timeout 30 seconds). The answer is paginated:
+</p>
+
+<ul>
+    <li><span class="kbd">N</span> / <span class="kbd">P</span> — next / previous page.</li>
+    <li><span class="kbd">Q</span> — return to the main menu.</li>
+    <li>From the answer screen, type a new question to continue the conversation.</li>
+</ul>
+
+<p>
+Responses are word-wrapped to fit the terminal — 38 columns for PETSCII, 78
+for ANSI/ASCII. Long code blocks and unusual punctuation are preserved but
+may wrap awkwardly on narrow screens.
+</p>
+
+<aside class="note">
+<span class="label">No API key?</span>
+If <code>groq_api_key</code> is empty and the user presses <span class="kbd">A</span>,
+the gateway displays instructions for obtaining a key instead of attempting
+the API call.
+</aside>
+
+<!-- ═══════════════════ 13. Web browser ═══════════════════ -->
+<h1 id="ch13">13. Web Browser</h1>
+
+<p>
+The text-mode browser renders HTML as plain text with numbered link markers.
+It works on all terminal types, including 40-column PETSCII.
+</p>
+
+<h2>13.1 Opening a Page</h2>
+
+<p>
+From the main menu, press <span class="kbd">B</span>. The homepage loads
+automatically if <code>browser_homepage</code> is set (default
+<code>http://telnetbible.com</code>). You can also enter a URL or search
+query:
+</p>
+
+<ul>
+    <li>A URL without a scheme — <code>example.com</code> — gets <code>https://</code> prepended automatically.</li>
+    <li>Text without dots is treated as a search query and sent to DuckDuckGo.</li>
+    <li>A <code>gopher://</code> URL uses the Gopher protocol.</li>
+</ul>
+
+<h2>13.2 Following Links</h2>
+
+<p>
+Links are marked with numbered tags: <code>[1]</code>, <code>[2]</code>,
+<code>[3]</code>. Press <span class="kbd">L</span> and enter a number to
+follow.
+</p>
+
+<h2>13.3 Navigation Commands</h2>
+
+<table>
+    <thead><tr><th>Key</th><th>Action</th></tr></thead>
+    <tbody>
+        <tr><td><span class="kbd">N</span> / <span class="kbd">P</span></td><td>Next / previous page.</td></tr>
+        <tr><td><span class="kbd">T</span> / <span class="kbd">E</span></td><td>Jump to top / end.</td></tr>
+        <tr><td><span class="kbd">L</span></td><td>Follow link by number.</td></tr>
+        <tr><td><span class="kbd">G</span></td><td>Go to a new URL or search.</td></tr>
+        <tr><td><span class="kbd">S</span></td><td>Search for text in the page.</td></tr>
+        <tr><td><span class="kbd">F</span></td><td>Fill out and submit forms.</td></tr>
+        <tr><td><span class="kbd">K</span></td><td>Save as bookmark; on the home screen, opens the bookmarks list.</td></tr>
+        <tr><td><span class="kbd">B</span></td><td>Back to the previous page.</td></tr>
+        <tr><td><span class="kbd">R</span></td><td>Reload.</td></tr>
+        <tr><td><span class="kbd">H</span></td><td>Help.</td></tr>
+        <tr><td><span class="kbd">Q</span></td><td>Close page (back to browser home).</td></tr>
+        <tr><td><span class="kbd">ESC</span></td><td>Exit to main menu.</td></tr>
+    </tbody>
+</table>
+
+<h2>13.4 Bookmarks and Forms</h2>
+
+<p>
+Up to 100 bookmarks are saved in <code>bookmarks.txt</code> next to the
+binary. When a page has forms, press <span class="kbd">F</span> to interact —
+pick a form, edit fields by number, <span class="kbd">S</span> to submit or
+<span class="kbd">Q</span> to cancel.
+</p>
+
+<h2>13.5 Limits</h2>
+
+<ul>
+    <li>Maximum page size: 1 MB.</li>
+    <li>Maximum rendered lines: 5000.</li>
+    <li>HTTP request timeout: 15 s.</li>
+    <li>Page history depth: 50.</li>
+    <li>HTTPS connections that fail due to TLS errors retry over HTTP.</li>
+</ul>
+
+<!-- ═══════════════════ 14. Weather ═══════════════════ -->
+<h1 id="ch14">14. Weather</h1>
+
+<p>
+The Weather feature displays the current conditions and a 3-day forecast for
+any US ZIP code. Data is pulled from Open-Meteo
+(<code>https://open-meteo.com</code>), which is free and requires no API key.
+</p>
+
+<ol>
+    <li>From the main menu, press <span class="kbd">W</span>.</li>
+    <li>Enter a 5-digit US ZIP code, or press Enter to accept the last-used one.</li>
+    <li>Current temperature, humidity, wind speed and compass direction, plus a 3-day forecast are displayed.</li>
+</ol>
+
+<p>
+The last-used ZIP is persisted to <code>weather_zip</code> in
+<code>xmodem.conf</code> so subsequent calls default to the same location.
+</p>
+
+<!-- ═══════════════════ 15. Signals ═══════════════════ -->
+<h1 id="ch15">15. Signal Handling &amp; Operations</h1>
+
+<p>
+The gateway installs POSIX signal handlers at startup using the
+<code>signal-hook</code> crate. On receipt of any of <code>SIGINT</code>,
+<code>SIGTERM</code>, or <code>SIGHUP</code>, the server begins an orderly
+shutdown.
+</p>
+
+<table>
+    <thead><tr><th>Signal</th><th>Typical source</th><th>Effect</th></tr></thead>
+    <tbody>
+        <tr><td><code>SIGINT</code></td><td><span class="kbd">Ctrl+C</span> from the terminal</td><td>Shut down. Connected sessions are notified with a broadcast message.</td></tr>
+        <tr><td><code>SIGTERM</code></td><td><code>kill</code>, systemd</td><td>Shut down.</td></tr>
+        <tr><td><code>SIGHUP</code></td><td>systemd <code>reload</code>, terminal disconnect</td><td>Shut down. (The unit file maps <em>reload</em> to SIGHUP for familiar semantics.)</td></tr>
+    </tbody>
+</table>
+
+<h2>15.1 Shutdown Sequence</h2>
+
+<p>
+When a signal arrives:
+</p>
+
+<ol>
+    <li>An <code>AtomicBool</code> flag is set.</li>
+    <li>A watcher thread fires a tokio <code>Notify</code> to wake the async runtime.</li>
+    <li>Listeners stop accepting new connections.</li>
+    <li>A broadcast notification is sent to every active telnet and SSH session: "Server is shutting down. Goodbye!"</li>
+    <li>The serial modem thread exits cleanly, releasing the port.</li>
+    <li>The GUI window closes automatically.</li>
+    <li>The process exits.</li>
+</ol>
+
+<h2>15.2 Under systemd</h2>
+
+<pre><code>sudo systemctl status xmodem-gateway   # current status
+journalctl -u xmodem-gateway -f        # live log
+sudo systemctl reload xmodem-gateway   # graceful stop (SIGHUP)
+sudo systemctl restart xmodem-gateway  # restart
+sudo systemctl stop xmodem-gateway     # stop (SIGTERM)</code></pre>
+
+<p>
+The unit's <code>Restart=on-failure</code> policy respawns the process if it
+exits with a non-zero code, rate-limited to 5 starts per 60 seconds via
+<code>StartLimitIntervalSec</code> / <code>StartLimitBurst</code>.
+</p>
+
+<!-- ═══════════════════ 16. Troubleshooting ═══════════════════ -->
+<h1 id="ch16">16. Troubleshooting</h1>
+
+<h2>16.1 Telnet Session Refused (Public IP)</h2>
+
+<p>
+If an unauthenticated client sees "Connections from this address are not
+accepted", the source IP is outside the private ranges listed in chapter 5.
+Either connect from a private-network address or enable
+<code>security_enabled = true</code> and configure credentials.
+</p>
+
+<h2>16.2 Session Denied — Too Many Attempts</h2>
+
+<p>
+Per-IP lockout after three failures. Wait 5 minutes. The lockout covers both
+telnet and SSH — retrying on the other protocol will not reset the counter.
+</p>
+
+<h2>16.3 No Serial Port Detected</h2>
+
+<ul>
+    <li>Plug in the adapter before clicking the refresh (&#8634;) button in the GUI.</li>
+    <li>On Linux, make sure your user is in the <code>dialout</code> group (<code>sudo usermod -aG dialout "$USER"</code>), then log out and back in.</li>
+    <li>On Linux under systemd, the unit file sets <code>PrivateDevices=yes</code> which hides most device nodes. If you need USB-serial access, remove that hardening line or switch to a raw <code>DeviceAllow=</code> rule for your exact adapter.</li>
+    <li>On macOS, adapters typically show up as <code>/dev/tty.usbserial-XXXX</code> or <code>/dev/tty.usbmodemXXXX</code>.</li>
+    <li>On Windows, check Device Manager. Ports appear as <code>COM3</code>, <code>COM4</code>, etc.</li>
+</ul>
+
+<h2>16.4 XMODEM Transfer Times Out</h2>
+
+<p>
+Turn on verbose mode (<code>verbose = true</code> in <code>xmodem.conf</code>,
+or the <em>Verbose XMODEM Logging</em> checkbox in the GUI General frame) and
+retry. The log will show every header byte, every CRC result, every timeout.
+Common causes:
+</p>
+
+<ul>
+    <li>Client and server disagree on CRC vs. checksum — the client is very old and never implemented CRC. The gateway falls back to checksum automatically after two-thirds of the negotiation timeout.</li>
+    <li>Client uses ZMODEM autostart. The gateway aborts it cleanly and shows a notice — pick XMODEM, XMODEM-1K, or YMODEM instead.</li>
+    <li>IAC escaping mismatch when transferring binary files with <code>0xFF</code> bytes over telnet. Toggle it with <span class="kbd">I</span> in the File Transfer menu.</li>
+    <li>Slow or unreliable serial link — raise <code>xmodem_block_timeout</code> and <code>xmodem_max_retries</code>.</li>
+</ul>
+
+<h2>16.5 SSH Won't Connect</h2>
+
+<ul>
+    <li>Check <code>ssh_enabled = true</code> and that the server has been restarted since the change.</li>
+    <li>Confirm the port with <code>ss -tlnp | grep 2222</code> on Linux.</li>
+    <li>On first connect, accept the gateway's host-key fingerprint. Your client records it in <code>~/.ssh/known_hosts</code>.</li>
+    <li>If your client complains about host-key mismatch, you have probably regenerated <code>xmodem_ssh_host_key</code>. Delete the old entry from <code>known_hosts</code> or compare fingerprints carefully.</li>
+    <li>Public-key auth against the <em>server</em> is not supported — only password auth. Public-key auth is only available on the <em>outbound</em> SSH Gateway.</li>
+</ul>
+
+<h2>16.6 Modem Shows "NO CARRIER" on Every Dial</h2>
+
+<ul>
+    <li>Check the host and port — <code>ATDT host:port</code> must include the port unless the host resolves to something listening on 23.</li>
+    <li>S7 defaults to 15 seconds. Networks that need longer dial times should <code>ATS7=50</code> (or up to 60).</li>
+    <li>Verify the host is reachable from the gateway machine with <code>nc -zv host port</code> or <code>telnet host port</code>.</li>
+    <li>If you dialled a phone number (all-digit string), check <code>dialup.conf</code> — unmapped numbers return <code>NO CARRIER</code>.</li>
+</ul>
+
+<h2>16.7 GUI Won't Open</h2>
+
+<ul>
+    <li>Check that <code>enable_console = true</code>.</li>
+    <li>On headless servers, leave it at <code>false</code> — the GUI requires a display server (X11 or Wayland).</li>
+    <li>On Linux, make sure <code>libudev</code>, <code>libxkbcommon</code>, and your display-server libraries are installed.</li>
+    <li>Missing GPU support? The GUI uses <code>wgpu</code> via eframe. Software-only fallback via a different feature set would require a rebuild; most modern Linux distros work out of the box.</li>
+</ul>
+
+<h2>16.8 Stuck Serial Session After Parameter Change</h2>
+
+<p>
+If you change baud from a serial session with mismatched terminal settings,
+don't panic. The gateway waits up to 60 seconds for confirmation and reverts
+automatically on timeout. Within 60 seconds your old settings come back.
+</p>
+
+<!-- ═══════════════════ Appendix A ═══════════════════ -->
+<h1 id="appA">Appendix A — Configuration Key Reference</h1>
+
+<p>
+Every key recognised by <code>xmodem.conf</code>, sorted alphabetically. The
+parser is case-sensitive on keys but booleans (<code>true</code>/<code>false</code>)
+are compared case-insensitively. Unknown keys are silently ignored. Out-of-range
+numeric values fall back to the default.
+</p>
+
+<table>
+    <thead>
+        <tr><th>Key</th><th>Type</th><th>Default</th><th>Range / validation</th><th>Description</th></tr>
+    </thead>
+    <tbody>
+        <tr><td><code>browser_homepage</code></td><td>string</td><td><code>http://telnetbible.com</code></td><td>any URL or empty</td><td>Page loaded when the browser opens. Empty starts with a blank prompt.</td></tr>
+        <tr><td><code>enable_console</code></td><td>bool</td><td><code>true</code></td><td>true/false</td><td>Show GUI window at startup. Set false for headless operation.</td></tr>
+        <tr><td><code>groq_api_key</code></td><td>string</td><td>empty</td><td>any</td><td>Groq API key. Empty disables AI chat. Stored plaintext — protect the file.</td></tr>
+        <tr><td><code>idle_timeout_secs</code></td><td>u64</td><td><code>900</code></td><td>0 = disabled</td><td>Per-session idle timeout. Applies to every prompt, including login.</td></tr>
+        <tr><td><code>max_sessions</code></td><td>usize</td><td><code>50</code></td><td>&ge; 1</td><td>Concurrent telnet-session cap.</td></tr>
+        <tr><td><code>password</code></td><td>string</td><td><code>changeme</code></td><td>non-empty</td><td>Telnet password. Stored plaintext.</td></tr>
+        <tr><td><code>security_enabled</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Require login on telnet and SSH. Also required to accept public-IP telnet.</td></tr>
+        <tr><td><code>serial_baud</code></td><td>u32</td><td><code>9600</code></td><td>&ge; 300</td><td>Serial baud rate.</td></tr>
+        <tr><td><code>serial_databits</code></td><td>u8</td><td><code>8</code></td><td>5, 6, 7, or 8</td><td>Data bits.</td></tr>
+        <tr><td><code>serial_dcd_mode</code></td><td>u8</td><td><code>1</code></td><td>0 or 1</td><td>Saved <code>AT&amp;C</code> DCD mode.</td></tr>
+        <tr><td><code>serial_dtr_mode</code></td><td>u8</td><td><code>0</code></td><td>0–3</td><td>Saved <code>AT&amp;D</code> DTR-handling mode.</td></tr>
+        <tr><td><code>serial_echo</code></td><td>bool</td><td><code>true</code></td><td>true/false</td><td>Saved <code>ATE</code> echo state.</td></tr>
+        <tr><td><code>serial_enabled</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Run the Hayes modem emulator on the configured port.</td></tr>
+        <tr><td><code>serial_flow_mode</code></td><td>u8</td><td><code>0</code></td><td>0–4</td><td>Saved <code>AT&amp;K</code> modem-layer flow mode.</td></tr>
+        <tr><td><code>serial_flowcontrol</code></td><td>string</td><td><code>none</code></td><td>none / hardware / software</td><td>Wire-level flow control.</td></tr>
+        <tr><td><code>serial_parity</code></td><td>string</td><td><code>none</code></td><td>none / odd / even</td><td>Parity bit.</td></tr>
+        <tr><td><code>serial_port</code></td><td>string</td><td>empty</td><td>OS-specific path</td><td>Serial device. <code>/dev/ttyUSB0</code>, <code>COM3</code>, etc.</td></tr>
+        <tr><td><code>serial_quiet</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Saved <code>ATQ</code> quiet mode.</td></tr>
+        <tr><td><code>serial_s_regs</code></td><td>string</td><td>see note</td><td>CSV of 27 u8 values</td><td>S0–S26, comma-separated. Default: <code>5,0,43,13,10,8,2,15,2,6,14,95,50,0,0,0,0,0,0,0,0,0,0,0,0,5,1</code>.</td></tr>
+        <tr><td><code>serial_stopbits</code></td><td>u8</td><td><code>1</code></td><td>1 or 2</td><td>Stop bits.</td></tr>
+        <tr><td><code>serial_stored_0</code> … <code>serial_stored_3</code></td><td>string</td><td>empty</td><td>any</td><td>Stored phone-number slots.</td></tr>
+        <tr><td><code>serial_verbose</code></td><td>bool</td><td><code>true</code></td><td>true/false</td><td>Saved <code>ATV</code> verbose/numeric mode.</td></tr>
+        <tr><td><code>serial_x_code</code></td><td>u8</td><td><code>4</code></td><td>0–4</td><td>Saved <code>ATX</code> result-code level.</td></tr>
+        <tr><td><code>ssh_enabled</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Run the SSH server.</td></tr>
+        <tr><td><code>ssh_gateway_auth</code></td><td>string</td><td><code>password</code></td><td><code>key</code> or <code>password</code></td><td>Auth mode for the outbound SSH Gateway. See §10.1.</td></tr>
+        <tr><td><code>ssh_password</code></td><td>string</td><td><code>changeme</code></td><td>non-empty</td><td>SSH password. Independent of telnet. Stored plaintext.</td></tr>
+        <tr><td><code>ssh_port</code></td><td>u16</td><td><code>2222</code></td><td>&ge; 1</td><td>SSH listen port.</td></tr>
+        <tr><td><code>ssh_username</code></td><td>string</td><td><code>admin</code></td><td>non-empty</td><td>SSH username.</td></tr>
+        <tr><td><code>telnet_enabled</code></td><td>bool</td><td><code>true</code></td><td>true/false</td><td>Run the telnet server.</td></tr>
+        <tr><td><code>telnet_gateway_negotiate</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Outbound telnet gateway: send proactive TTYPE / NAWS / DO ECHO offers.</td></tr>
+        <tr><td><code>telnet_gateway_raw</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Outbound telnet gateway: raw-TCP escape hatch, no IAC layer.</td></tr>
+        <tr><td><code>telnet_port</code></td><td>u16</td><td><code>2323</code></td><td>&ge; 1</td><td>Telnet listen port.</td></tr>
+        <tr><td><code>transfer_dir</code></td><td>string</td><td><code>transfer</code></td><td>non-empty</td><td>Base directory for file transfers.</td></tr>
+        <tr><td><code>username</code></td><td>string</td><td><code>admin</code></td><td>non-empty</td><td>Telnet username.</td></tr>
+        <tr><td><code>verbose</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Detailed XMODEM protocol logging.</td></tr>
+        <tr><td><code>weather_zip</code></td><td>string</td><td>empty</td><td>5 digits</td><td>Last-used US ZIP. Updated automatically.</td></tr>
+        <tr><td><code>xmodem_block_timeout</code></td><td>u64</td><td><code>20</code></td><td>&ge; 1 (seconds)</td><td>Per-block timeout during transfer.</td></tr>
+        <tr><td><code>xmodem_max_retries</code></td><td>usize</td><td><code>10</code></td><td>&ge; 1</td><td>NAK retry cap per block.</td></tr>
+        <tr><td><code>xmodem_negotiation_timeout</code></td><td>u64</td><td><code>45</code></td><td>&ge; 1 (seconds)</td><td>Initial negotiation timeout for XMODEM/YMODEM send/receive.</td></tr>
+    </tbody>
+</table>
+
+<!-- ═══════════════════ Appendix B ═══════════════════ -->
+<h1 id="appB">Appendix B — AT Command Reference</h1>
+
+<p>
+Quick reference for every AT command the emulator understands. See chapter 9
+for detailed explanations. All commands are case-insensitive. Multiple
+commands may be combined on a single <code>AT</code> line (e.g.
+<code>ATE0Q1V0</code>).
+</p>
+
+<h2>B.1 Core Commands</h2>
+
+<table>
+    <thead><tr><th>Command</th><th>Effect</th></tr></thead>
+    <tbody>
+        <tr><td><code>AT</code></td><td>Attention. Returns <code>OK</code>.</td></tr>
+        <tr><td><code>AT?</code></td><td>Display AT command help.</td></tr>
+        <tr><td><code>ATZ</code></td><td>Reset to stored profile (saved by <code>AT&amp;W</code>).</td></tr>
+        <tr><td><code>AT&amp;F</code></td><td>Factory reset to gateway-friendly defaults.</td></tr>
+        <tr><td><code>AT&amp;W</code> / <code>AT&amp;W0</code></td><td>Save current settings to <code>xmodem.conf</code>.</td></tr>
+        <tr><td><code>AT&amp;V</code></td><td>Display current configuration.</td></tr>
+        <tr><td><code>ATH</code> / <code>ATH0</code></td><td>Hang up any active connection.</td></tr>
+        <tr><td><code>ATA</code></td><td>Answer incoming ring.</td></tr>
+        <tr><td><code>ATO</code> / <code>ATO0</code></td><td>Return to online mode (after <code>+++</code> escape).</td></tr>
+        <tr><td><code>A/</code></td><td>Repeat last command (no AT prefix, no CR).</td></tr>
+        <tr><td><code>+++</code></td><td>Escape to command mode (guard-time gated).</td></tr>
+    </tbody>
+</table>
+
+<h2>B.2 Identification</h2>
+
+<table>
+    <thead><tr><th>Command</th><th>Response</th></tr></thead>
+    <tbody>
+        <tr><td><code>ATI</code> / <code>ATI0</code></td><td>Product ID and version.</td></tr>
+        <tr><td><code>ATI1</code></td><td>ROM checksum (<code>000</code>).</td></tr>
+        <tr><td><code>ATI2</code></td><td>ROM self-test (<code>OK</code>).</td></tr>
+        <tr><td><code>ATI3</code></td><td>Firmware identifier.</td></tr>
+        <tr><td><code>ATI4</code></td><td>Product description.</td></tr>
+        <tr><td><code>ATI5</code></td><td>OEM / country code (<code>B00</code>).</td></tr>
+        <tr><td><code>ATI6</code></td><td>Link diagnostics.</td></tr>
+        <tr><td><code>ATI7</code></td><td>Product info.</td></tr>
+    </tbody>
+</table>
+
+<h2>B.3 Echo, Verbosity, Quiet, Result Codes</h2>
+
+<table>
+    <thead><tr><th>Command</th><th>Effect</th></tr></thead>
+    <tbody>
+        <tr><td><code>ATE0</code></td><td>Echo off.</td></tr>
+        <tr><td><code>ATE1</code> (default)</td><td>Echo on.</td></tr>
+        <tr><td><code>ATV0</code></td><td>Numeric result codes.</td></tr>
+        <tr><td><code>ATV1</code> (default)</td><td>Verbose (text) result codes.</td></tr>
+        <tr><td><code>ATQ0</code> (default)</td><td>Result codes enabled.</td></tr>
+        <tr><td><code>ATQ1</code></td><td>Quiet mode — all results suppressed.</td></tr>
+        <tr><td><code>ATX0</code></td><td>Basic result codes only.</td></tr>
+        <tr><td><code>ATX1</code></td><td>Basic plus baud rate in CONNECT.</td></tr>
+        <tr><td><code>ATX2</code></td><td>Adds NO DIALTONE detection.</td></tr>
+        <tr><td><code>ATX3</code></td><td>Adds BUSY detection.</td></tr>
+        <tr><td><code>ATX4</code> (default)</td><td>Full extended result codes.</td></tr>
+    </tbody>
+</table>
+
+<h2>B.4 Hardware Pin State</h2>
+
+<table>
+    <thead><tr><th>Command</th><th>Effect</th></tr></thead>
+    <tbody>
+        <tr><td><code>AT&amp;C0</code></td><td>DCD always asserted.</td></tr>
+        <tr><td><code>AT&amp;C1</code> (Hayes default)</td><td>DCD reflects carrier state.</td></tr>
+        <tr><td><code>AT&amp;D0</code> (<em>gateway default</em>)</td><td>Ignore DTR.</td></tr>
+        <tr><td><code>AT&amp;D1</code></td><td>DTR drop &rarr; command mode.</td></tr>
+        <tr><td><code>AT&amp;D2</code> (Hayes default)</td><td>DTR drop &rarr; hang up.</td></tr>
+        <tr><td><code>AT&amp;D3</code></td><td>DTR drop &rarr; hang up + reset.</td></tr>
+        <tr><td><code>AT&amp;K0</code> (<em>gateway default</em>)</td><td>No modem-layer flow control.</td></tr>
+        <tr><td><code>AT&amp;K3</code></td><td>Bidirectional RTS/CTS.</td></tr>
+        <tr><td><code>AT&amp;K4</code></td><td>Bidirectional XON/XOFF.</td></tr>
+    </tbody>
+</table>
+
+<h2>B.5 Dialing</h2>
+
+<table>
+    <thead><tr><th>Command</th><th>Effect</th></tr></thead>
+    <tbody>
+        <tr><td><code>ATD <em>target</em></code></td><td>Dial <em>target</em>. Bare <code>D</code> (no T/P).</td></tr>
+        <tr><td><code>ATDT <em>host:port</em></code></td><td>Tone-dial. Default for all TCP dials.</td></tr>
+        <tr><td><code>ATDP <em>host:port</em></code></td><td>Pulse-dial (identical to <code>ATDT</code> over TCP).</td></tr>
+        <tr><td><code>ATDT xmodem-gateway</code></td><td>Built-in shortcut: connect to this gateway's main menu.</td></tr>
+        <tr><td><code>ATDL</code></td><td>Redial last number.</td></tr>
+        <tr><td><code>ATDS</code> / <code>ATDS0</code></td><td>Dial stored number in slot 0.</td></tr>
+        <tr><td><code>ATDS1</code> … <code>ATDS3</code></td><td>Dial stored number in slots 1–3.</td></tr>
+        <tr><td><code>AT&amp;Zn=<em>s</em></code></td><td>Store phone number or host in slot <em>n</em> (0–3). Preserves hostname case.</td></tr>
+    </tbody>
+</table>
+
+<p>Dial-string modifiers (phone-number context only, except <code>;</code> which applies to hostnames too):</p>
+
+<table>
+    <thead><tr><th>Modifier</th><th>Effect</th></tr></thead>
+    <tbody>
+        <tr><td><code>,</code></td><td>Pause for S8 seconds per comma.</td></tr>
+        <tr><td><code>W</code></td><td>Wait for dial tone (adds S6 seconds).</td></tr>
+        <tr><td><code>;</code></td><td>Return to command mode after connect.</td></tr>
+        <tr><td><code>*</code>, <code>#</code></td><td>DTMF digits, preserved for dial-up lookup.</td></tr>
+        <tr><td><code>P</code>, <code>T</code>, <code>@</code>, <code>!</code></td><td>Ignored.</td></tr>
+    </tbody>
+</table>
+
+<h2>B.6 S-Registers</h2>
+
+<table>
+    <thead><tr><th>Command</th><th>Effect</th></tr></thead>
+    <tbody>
+        <tr><td><code>ATS?</code></td><td>Show S-register help.</td></tr>
+        <tr><td><code>ATS<em>n</em>?</code></td><td>Query S-register <em>n</em> (returns 3-digit decimal).</td></tr>
+        <tr><td><code>ATS<em>n</em>=<em>v</em></code></td><td>Set S-register <em>n</em> to <em>v</em> (0–255).</td></tr>
+    </tbody>
+</table>
+
+<p>Full register list is in chapter 9 (section 9.7).</p>
+
+<h2>B.7 Unknown Commands</h2>
+
+<p>
+Unrecognised AT commands return <code>OK</code> (silent-accept fallback). This
+covers commands the emulator has no hardware to implement: <code>ATB</code>,
+<code>ATC</code>, <code>ATL</code> (speaker loudness), <code>ATM</code>
+(speaker mute), <code>AT&amp;B</code>, <code>AT&amp;G</code>,
+<code>AT&amp;J</code>, <code>AT&amp;S</code>, <code>AT&amp;T</code>,
+<code>AT&amp;Y</code>, and others. The intent is to let legacy init strings
+run to completion rather than halt mid-setup with <code>ERROR</code>.
+</p>
+
+<hr>
+
+<p class="small" style="margin-top: 1.5em; text-align: center;">
+XMODEM Gateway v0.3.3 &mdash; Copyright &copy; 2026 Ricky Bryce &mdash;
+Licensed under GPL-3.0-or-later.
+</p>
+
+</body>
+</html>
