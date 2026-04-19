@@ -9,6 +9,16 @@
 //! compatibility with vintage hardware. All visible text fits within 40 columns
 //! for PETSCII terminals; ANSI/ASCII separators use 56 columns.
 
+// The telnet option handler has several `ARM if opt == FOO =>` arms whose
+// bodies are plain `if body-check { … }` blocks without an else branch.
+// Clippy (Rust 1.95+) suggests collapsing the inner `if` into an additional
+// guard on the outer match arm.  We deliberately don't, because for the
+// option-specific arms (STATUS / TIMING-MARK handling) a false guard would
+// fall through to the generic `DO =>` / `DONT =>` / `WILL =>` arm and emit
+// the opposite telnet response.  The current style is preserved for
+// behavioural clarity.
+#![allow(clippy::collapsible_match)]
+
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
