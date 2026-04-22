@@ -138,6 +138,53 @@ fn local_ip() -> String {
     "unknown".into()
 }
 
+/// Shared tokio runtime used by the folder-picker.  Creating and dropping
+/// a fresh runtime for each pick caused the XDG portal's D-Bus connection
+/// to go stale, so subsequent dialogs never resolved and the button
+/// stayed disabled forever.  A single long-lived runtime avoids that.
+static PICKER_RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> =
+    std::sync::OnceLock::new();
+
+fn picker_runtime() -> &'static tokio::runtime::Runtime {
+    PICKER_RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .thread_name("folder-picker")
+            .build()
+            .expect("folder-picker runtime")
+    })
+}
+
+/// Launch a native folder-picker dialog on the shared picker runtime so
+/// it does not block the egui event loop.  Returns the receiver end of
+/// an mpsc channel; the App polls it each frame and updates
+/// `transfer_dir` when the user has chosen a folder (or clears the
+/// in-flight marker if the user cancels).
+fn spawn_folder_picker(
+    current_dir: &str,
+) -> std::sync::mpsc::Receiver<Option<std::path::PathBuf>> {
+    let start = {
+        let p = std::path::PathBuf::from(current_dir);
+        if p.is_dir() {
+            p
+        } else {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        }
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    picker_runtime().spawn(async move {
+        let result = rfd::AsyncFileDialog::new()
+            .set_title("Select transfer directory")
+            .set_directory(&start)
+            .pick_folder()
+            .await
+            .map(|h| h.path().to_path_buf());
+        let _ = tx.send(result);
+    });
+    rx
+}
+
 /// Enumerate available serial ports, returning their device paths.
 fn detect_serial_ports() -> Vec<String> {
     match serialport::available_ports() {
@@ -178,6 +225,12 @@ struct App {
     server_popup_open: bool,
     /// Whether the Serial Modem "More..." popup is open.
     serial_popup_open: bool,
+    /// When the user clicks the folder-browse button, the native dialog
+    /// runs on a background OS thread so it can't block the egui event
+    /// loop.  This channel carries back the chosen path (or None if
+    /// cancelled).  While `Some`, the button is disabled to prevent
+    /// spawning duplicate pickers.
+    pending_dir_pick: Option<std::sync::mpsc::Receiver<Option<std::path::PathBuf>>>,
 }
 
 impl App {
@@ -212,6 +265,7 @@ impl App {
             dirty: false,
             server_popup_open: false,
             serial_popup_open: false,
+            pending_dir_pick: None,
         }
     }
 
@@ -237,10 +291,29 @@ impl App {
         }
     }
 
+    /// Check whether a backgrounded folder-picker has delivered a result.
+    /// If the user chose a folder, copy it into `transfer_dir`; if they
+    /// cancelled (or the picker failed), just drop the pending state.
+    fn poll_dir_pick(&mut self) {
+        let Some(rx) = &self.pending_dir_pick else { return };
+        match rx.try_recv() {
+            Ok(Some(path)) => {
+                self.cfg.transfer_dir = path.display().to_string();
+                self.pending_dir_pick = None;
+            }
+            Ok(None) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.pending_dir_pick = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+    }
+
     /// Render the Server frame's primary field rows (telnet/SSH ports,
     /// session cap, idle timeout).  Shared between the main layout and
-    /// the Server popup so both stay in sync.
-    fn draw_server_controls(&mut self, ui: &mut egui::Ui) {
+    /// the Server popup.  When `with_more_button` is true, a right-aligned
+    /// "More..." button is appended to the SSH row; the popup passes false
+    /// since it's already the More view.
+    fn draw_server_controls(&mut self, ui: &mut egui::Ui, with_more_button: bool) {
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.cfg.telnet_enabled, "Telnet");
             labeled_field(ui, "Port:", &mut self.telnet_port_buf, 50.0);
@@ -253,6 +326,9 @@ impl App {
             labeled_field(ui, "Port:", &mut self.ssh_port_buf, 50.0);
             ui.add_space(8.0);
             labeled_field(ui, "Idle (s):", &mut self.idle_timeout_buf, 50.0);
+            if with_more_button && right_aligned_small_button(ui, "More...") {
+                self.server_popup_open = true;
+            }
         });
     }
 
@@ -330,8 +406,10 @@ impl App {
 
     /// Render the Serial Modem frame's primary field rows (port, baud,
     /// line framing, flow control).  Shared between the main layout and
-    /// the Serial popup.
-    fn draw_serial_controls(&mut self, ui: &mut egui::Ui) {
+    /// the Serial popup.  When `with_more_button` is true, a right-aligned
+    /// "More..." button is appended to the Bits/Par/Stop/Flow row; the
+    /// popup passes false since it's already the More view.
+    fn draw_serial_controls(&mut self, ui: &mut egui::Ui, with_more_button: bool) {
         ui.horizontal(|ui| {
             ui.label("Port:");
             let selected = if self.cfg.serial_port.is_empty() {
@@ -399,6 +477,9 @@ impl App {
                         ui.selectable_value(&mut self.cfg.serial_flowcontrol, f.to_string(), f);
                     }
                 });
+            if with_more_button && right_aligned_small_button(ui, "More...") {
+                self.serial_popup_open = true;
+            }
         });
     }
 
@@ -485,14 +566,42 @@ impl App {
         }
     }
 
-    /// Persist the current in-memory config to disk.  Called by popup
-    /// Save buttons; leaves the server running (no restart).
-    fn save_config_now(&mut self) {
+    /// Flush numeric text buffers into `cfg`, persist to disk, refresh
+    /// the sync snapshot, and clear the dirty flag.  Shared prefix for
+    /// every Save action; callers follow it with a log line and any
+    /// restart signals they need.
+    fn persist_config(&mut self) {
         self.sync_numeric_fields();
         config::save_config(&self.cfg);
         self.last_synced_cfg = self.cfg.clone();
         self.dirty = false;
+    }
+
+    /// Persist config; leaves the server running (no restart).  Used by
+    /// the popup Save buttons and the per-frame Save buttons on frames
+    /// whose fields are all runtime-safe.
+    fn save_config_now(&mut self) {
+        self.persist_config();
         logger::log("Configuration saved.".into());
+    }
+
+    /// Persist config and trigger a full server restart.  Used by the
+    /// Server frame's Save and Restart button.
+    fn save_and_restart_all(&mut self) {
+        self.persist_config();
+        logger::log("Configuration saved — restarting server...".into());
+        // Set restart BEFORE shutdown so the main loop sees the intent to
+        // restart when it checks after join().
+        self.restart.store(true, Ordering::SeqCst);
+        self.shutdown.store(true, Ordering::SeqCst);
+    }
+
+    /// Persist config and signal the serial manager to reopen the port
+    /// with the new settings.  Leaves telnet/SSH sessions untouched.
+    fn save_and_restart_serial(&mut self) {
+        self.persist_config();
+        crate::serial::restart_serial();
+        logger::log("Configuration saved — serial modem reconfigured.".into());
     }
 
     /// Render the console panel as a single read-only multiline `TextEdit`.
@@ -592,6 +701,16 @@ impl App {
 fn labeled_field(ui: &mut egui::Ui, label: &str, buf: &mut String, width: f32) {
     ui.label(label);
     singleline_with_menu(ui, buf, false, Some(width));
+}
+
+/// Helper: render a small button right-aligned in the current horizontal
+/// row.  Returns true if the button was clicked this frame.
+fn right_aligned_small_button(ui: &mut egui::Ui, label: &str) -> bool {
+    ui.with_layout(
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| ui.small_button(label).clicked(),
+    )
+    .inner
 }
 
 /// Helper: labeled password field in a horizontal row.
@@ -791,6 +910,7 @@ impl eframe::App for App {
         }
 
         self.poll_logs();
+        self.poll_dir_pick();
         self.refresh_from_global();
 
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
@@ -863,17 +983,16 @@ impl eframe::App for App {
                                 ui.set_min_width(ui.available_width());
                                 ui.horizontal(|ui| {
                                     ui.label(egui::RichText::new("Server").strong().color(AMBER));
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            ui.add_space(4.0);
-                                            if ui.small_button("More...").clicked() {
-                                                self.server_popup_open = true;
-                                            }
-                                        },
+                                    ui.label(
+                                        egui::RichText::new("(Changes Require Restart)")
+                                            .italics()
+                                            .color(AMBER_DIM),
                                     );
+                                    if right_aligned_small_button(ui, "Save and Restart") {
+                                        self.save_and_restart_all();
+                                    }
                                 });
-                                self.draw_server_controls(ui);
+                                self.draw_server_controls(ui, true);
                             });
                         },
                     );
@@ -889,6 +1008,9 @@ impl eframe::App for App {
                                     ui.label(egui::RichText::new("Security").strong().color(AMBER));
                                     ui.add_space(8.0);
                                     ui.checkbox(&mut self.cfg.security_enabled, "Require Login");
+                                    if right_aligned_small_button(ui, "Save") {
+                                        self.save_config_now();
+                                    }
                                 });
                                 ui.horizontal(|ui| {
                                     ui.label(egui::RichText::new("Telnet").color(AMBER_DIM));
@@ -916,10 +1038,34 @@ impl eframe::App for App {
                             egui::Frame::group(ui.style()).show(ui, |ui| {
                                 ui.set_min_height(row_h);
                                 ui.set_min_width(ui.available_width());
-                                ui.label(egui::RichText::new("File Transfer (XMODEM)").strong().color(AMBER));
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new("File Transfer (XMODEM)").strong().color(AMBER));
+                                    if right_aligned_small_button(ui, "Save") {
+                                        self.save_config_now();
+                                    }
+                                });
                                 ui.horizontal(|ui| {
                                     ui.label("Dir:");
-                                    singleline_with_menu(ui, &mut self.cfg.transfer_dir, false, None);
+                                    let btn_w = 32.0;
+                                    let text_w =
+                                        (ui.available_width() - btn_w - 4.0).max(60.0);
+                                    singleline_with_menu(
+                                        ui,
+                                        &mut self.cfg.transfer_dir,
+                                        false,
+                                        Some(text_w),
+                                    );
+                                    let browse = ui.add_enabled(
+                                        self.pending_dir_pick.is_none(),
+                                        egui::Button::new("\u{1F4C1}").small(),
+                                    );
+                                    if browse
+                                        .on_hover_text("Browse for folder")
+                                        .clicked()
+                                    {
+                                        self.pending_dir_pick =
+                                            Some(spawn_folder_picker(&self.cfg.transfer_dir));
+                                    }
                                 });
                                 ui.horizontal(|ui| {
                                     labeled_field(ui, "Negotiate:", &mut self.negotiation_timeout_buf, 40.0);
@@ -937,7 +1083,12 @@ impl eframe::App for App {
                             egui::Frame::group(ui.style()).show(ui, |ui| {
                                 ui.set_min_height(row_h);
                                 ui.set_min_width(ui.available_width());
-                                ui.label(egui::RichText::new("AI Chat, Browser, and Weather").strong().color(AMBER));
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new("AI Chat, Browser, and Weather").strong().color(AMBER));
+                                    if right_aligned_small_button(ui, "Save") {
+                                        self.save_config_now();
+                                    }
+                                });
                                 ui.horizontal(|ui| {
                                     ui.label("API Key:");
                                     singleline_with_menu(ui, &mut self.cfg.groq_api_key, true, None);
@@ -966,17 +1117,11 @@ impl eframe::App for App {
                                     ui.label(egui::RichText::new("Serial Modem").strong().color(AMBER));
                                     ui.add_space(8.0);
                                     ui.checkbox(&mut self.cfg.serial_enabled, "Enabled");
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            ui.add_space(4.0);
-                                            if ui.small_button("More...").clicked() {
-                                                self.serial_popup_open = true;
-                                            }
-                                        },
-                                    );
+                                    if right_aligned_small_button(ui, "Save") {
+                                        self.save_and_restart_serial();
+                                    }
                                 });
-                                self.draw_serial_controls(ui);
+                                self.draw_serial_controls(ui, true);
                             });
                         },
                     );
@@ -988,8 +1133,13 @@ impl eframe::App for App {
                             egui::Frame::group(ui.style()).show(ui, |ui| {
                                 ui.set_min_height(row_h);
                                 ui.set_min_width(ui.available_width());
-                                ui.label(egui::RichText::new("General").strong().color(AMBER));
-                                ui.checkbox(&mut self.cfg.verbose, "Verbose XMODEM Logging");
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new("General").strong().color(AMBER));
+                                    if right_aligned_small_button(ui, "Save") {
+                                        self.save_config_now();
+                                    }
+                                });
+                                ui.checkbox(&mut self.cfg.verbose, "Verbose Transfer Logging");
                                 ui.checkbox(&mut self.cfg.enable_console, "Show GUI on Startup");
                             });
                         },
@@ -997,34 +1147,6 @@ impl eframe::App for App {
                 });
                 ui.add_space(6.0);
 
-                // ── Save & Restart button ─────────────────────
-                ui.horizontal(|ui| {
-                    if ui
-                        .add(egui::Button::new(
-                            egui::RichText::new("Save and Restart Server")
-                                .strong()
-                                .size(16.0)
-                                .color(AMBER_BRIGHT),
-                        ))
-                        .clicked()
-                    {
-                        self.sync_numeric_fields();
-                        config::save_config(&self.cfg);
-                        self.last_synced_cfg = self.cfg.clone();
-                        self.dirty = false;
-                        logger::log("Configuration saved — restarting server...".into());
-                        // Set restart BEFORE shutdown so main loop sees the
-                        // intent to restart when it checks after join().
-                        self.restart.store(true, Ordering::SeqCst);
-                        self.shutdown.store(true, Ordering::SeqCst);
-                    }
-                });
-                ui.label(
-                    egui::RichText::new("Saves configuration and restarts the server.")
-                        .weak()
-                        .italics()
-                        .small(),
-                );
                 // ── User Manual button ────────────────────────
                 ui.horizontal(|ui| {
                     if ui
@@ -1043,10 +1165,6 @@ impl eframe::App for App {
                 });
                 ui.add_space(20.0);
                 // ── Scripture (left) + Logo (right) ──────────
-                // Logo source is 432px tall; scale to 42.35% for the GUI.
-                // The 1.6 aspect ratio matches the original image proportions.
-                // The +84 / -84 offset on the right column shifts the logo
-                // upward without affecting the left column layout.
                 let logo_h = 432.0 * 0.4235;
                 let logo_w = logo_h * 1.6;
                 ui.horizontal_top(|ui| {
@@ -1076,10 +1194,10 @@ impl eframe::App for App {
                     );
 
                     ui.allocate_ui_with_layout(
-                        egui::vec2(half, logo_h + 84.0),
+                        egui::vec2(half, logo_h + 32.0),
                         egui::Layout::top_down(egui::Align::Max),
                         |ui| {
-                            ui.add_space(-84.0);
+                            ui.add_space(-32.0);
                             ui.add(
                                 egui::Image::new(egui::include_image!("../xmodemlogo.png"))
                                     .fit_to_exact_size(egui::vec2(logo_w, logo_h)),
@@ -1112,7 +1230,7 @@ impl eframe::App for App {
             .show(&ctx, |ui| {
                 // Lighter-green text-entry backgrounds scoped to this popup.
                 ui.visuals_mut().extreme_bg_color = POPUP_INPUT_BG;
-                self.draw_server_controls(ui);
+                self.draw_server_controls(ui, false);
                 ui.add_space(6.0);
                 ui.separator();
                 ui.add_space(4.0);
@@ -1143,7 +1261,7 @@ impl eframe::App for App {
             .frame(popup_frame)
             .show(&ctx, |ui| {
                 ui.visuals_mut().extreme_bg_color = POPUP_INPUT_BG;
-                self.draw_serial_controls(ui);
+                self.draw_serial_controls(ui, false);
                 ui.add_space(6.0);
                 ui.separator();
                 ui.add_space(4.0);

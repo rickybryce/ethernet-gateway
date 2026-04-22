@@ -1,9 +1,10 @@
 # XMODEM Gateway
 
-A telnet-based XMODEM file transfer server, SSH gateway, Hayes-compatible modem
-emulator for serial-attached retro hardware, text-mode web browser, and AI chat
-client written in Rust. Supports PETSCII (Commodore 64), ANSI, and ASCII
-terminals. Designed for local network use with retro and modern terminal clients.
+A telnet-based XMODEM/XMODEM-1K/YMODEM/ZMODEM file transfer server, SSH
+gateway, Hayes-compatible modem emulator for serial-attached retro hardware,
+text-mode web browser, and AI chat client written in Rust. Supports PETSCII
+(Commodore 64), ANSI, and ASCII terminals. Designed for local network use
+with retro and modern terminal clients.
 
 **[User Manual](http://telnetbible.com/xmodem-gateway/index.html)**
 
@@ -236,7 +237,7 @@ ships with:
 ### Verifying the checksum
 
 ```sh
-sha256sum -c xmodem-gateway-v0.3.3-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c xmodem-gateway-v0.3.5-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 ### Verifying the GPG signature (if present)
@@ -244,8 +245,8 @@ sha256sum -c xmodem-gateway-v0.3.3-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```sh
 gpg --keyserver keys.openpgp.org --recv-keys <KEY_FINGERPRINT>
 gpg --verify \
-    xmodem-gateway-v0.3.3-x86_64-unknown-linux-gnu.tar.gz.asc \
-    xmodem-gateway-v0.3.3-x86_64-unknown-linux-gnu.tar.gz
+    xmodem-gateway-v0.3.5-x86_64-unknown-linux-gnu.tar.gz.asc \
+    xmodem-gateway-v0.3.5-x86_64-unknown-linux-gnu.tar.gz
 ```
 
 ### Verifying the Sigstore signature
@@ -255,11 +256,11 @@ free):
 
 ```sh
 cosign verify-blob \
-    --certificate xmodem-gateway-v0.3.3-x86_64-unknown-linux-gnu.tar.gz.pem \
-    --signature   xmodem-gateway-v0.3.3-x86_64-unknown-linux-gnu.tar.gz.sig \
+    --certificate xmodem-gateway-v0.3.5-x86_64-unknown-linux-gnu.tar.gz.pem \
+    --signature   xmodem-gateway-v0.3.5-x86_64-unknown-linux-gnu.tar.gz.sig \
     --certificate-identity-regexp "https://github.com/rbryce/xmodem-gateway/.*" \
     --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-    xmodem-gateway-v0.3.3-x86_64-unknown-linux-gnu.tar.gz
+    xmodem-gateway-v0.3.5-x86_64-unknown-linux-gnu.tar.gz
 ```
 
 This ties the binary to a specific GitHub Actions workflow run on
@@ -445,10 +446,10 @@ browser_homepage = http://telnetbible.com
 # Last-used weather zip code (updated automatically when you check weather)
 weather_zip =
 
-# Verbose logging: set to true for detailed XMODEM protocol diagnostics
+# Verbose logging: set to true for detailed XMODEM/YMODEM/ZMODEM protocol diagnostics
 verbose = false
 
-# XMODEM protocol timeouts
+# XMODEM/YMODEM/ZMODEM negotiation + block timeouts (shared by all protocols)
 xmodem_negotiation_timeout = 45
 xmodem_block_timeout = 20
 xmodem_max_retries = 10
@@ -564,6 +565,21 @@ Y or N to continue; no default is applied.
 
 ## Transferring Files
 
+### Supported Protocols
+
+The gateway implements four members of the XMODEM family, selectable
+per-transfer from menus on the gateway side:
+
+| Protocol | Block size | CRC | Direction | Notes |
+|----------|------------|-----|-----------|-------|
+| **XMODEM** | 128 B (SOH) | CRC-16 or checksum | up/down | Auto-detects CRC vs. checksum on receive; classic single-file. |
+| **XMODEM-1K** | 1024 B (STX) | CRC-16 | up/down | Download option; on upload the XMODEM/YMODEM branch accepts STX blocks transparently. Opportunistically falls back to SOH if the peer NAKs the first STX. |
+| **YMODEM** | 1024 B + block-0 header | CRC-16 | up/down | Block 0 carries filename + size; the receive path auto-detects it. |
+| **ZMODEM** | variable subpackets (1 K default) | CRC-16 out, CRC-16 or CRC-32 in | up/down | Full Forsberg spec: ZRQINIT handshake, ZDLE escaping, ZSKIP, batch sends and receives. On upload the first file is saved under the name you entered; subsequent files in a batch use the sender's filename (validated, collisions skipped via ZSKIP). |
+
+On upload, the gateway offers **XMODEM / YMODEM** (variant auto-detected) or
+**ZMODEM**. On download, you pick the specific variant you want.
+
 ### Uploading a File to the Server
 
 1. Connect via telnet and navigate to **F** (File Transfer)
@@ -571,14 +587,17 @@ Y or N to continue; no default is applied.
 3. Enter a filename (letters, numbers, dots, hyphens, underscores only; max 64
    characters; cannot start with a dot, cannot contain `..`, must include at
    least one letter or digit)
-4. The server displays "Begin XMODEM send now" and waits up to 45 seconds
-5. In your terminal client, start an XMODEM send of the local file
+4. On the **SELECT UPLOAD PROTOCOL** screen, press **X** (XMODEM / YMODEM —
+   block size, CRC mode, and batch header are auto-detected) or **Z** (ZMODEM)
+5. The server displays "Start XMODEM/YMODEM send now" or "Start ZMODEM send
+   now" and waits up to 45 seconds
+6. In your terminal client, start the matching upload
    - Most terminal programs have a "Send File" or "Upload" option under a
      Transfer or File menu
-   - Select XMODEM as the protocol
-6. The transfer runs at 128-byte blocks with CRC-16 error checking (falls back
-   to checksum mode if the client does not support CRC)
-7. On completion, the server reports bytes, blocks, and elapsed time
+   - ExtraPutty: **File Transfer → Zmodem → Send**; SyncTerm: **Ctrl-PgUp**
+7. On completion, the server reports bytes, blocks, and elapsed time. For
+   ZMODEM batches, every file the sender transmits is listed (saved or
+   skipped)
 
 ### Downloading a File from the Server
 
@@ -586,11 +605,13 @@ Y or N to continue; no default is applied.
 2. The server lists files in the current transfer directory (paginated, 10 per
    page)
 3. Enter the number of the file to download
-4. The server displays "Start XMODEM receive now" and waits up to 45 seconds
-5. In your terminal client, start an XMODEM receive
-   - Select XMODEM as the protocol
-   - Choose where to save the file locally
-6. On completion, the server reports the transfer result
+4. On the **SELECT PROTOCOL** screen, choose **X** (XMODEM), **1** (XMODEM-1K),
+   **Y** (YMODEM), or **Z** (ZMODEM)
+5. The server prompts "Start XMODEM/YMODEM/ZMODEM receive now" and waits up
+   to 45 seconds
+6. In your terminal client, start the matching receive and choose where to
+   save the file locally (ZMODEM auto-starts in most modern terminals)
+7. On completion, the server reports the transfer result
 
 ### Other File Operations
 
