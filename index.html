@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>XMODEM Gateway v0.3.1 &mdash; User Manual</title>
+    <title>XMODEM Gateway v0.3.5 &mdash; User Manual</title>
     <meta name="description" content="Complete user manual for XMODEM Gateway — a telnet/SSH gateway server with XMODEM file transfer, AI chat, web browser, weather, and serial modem emulation.">
     <style>
         :root {
@@ -519,7 +519,7 @@
             </div>
             <h1>XMODEM Gateway</h1>
             <p class="hdr-tagline">User Manual</p>
-            <div class="hdr-version">v0.3.1</div>
+            <div class="hdr-version">v0.3.5</div>
             <div class="hdr-badges">
                 <span class="hdr-badge">Telnet</span>
                 <span class="hdr-badge">SSH</span>
@@ -580,7 +580,7 @@
                     <tr>
                         <td class="key-col">[F]</td>
                         <td class="name-col">File Transfer</td>
-                        <td class="desc-col">Upload, download, and delete files via the XMODEM protocol with CRC-16 and checksum support.</td>
+                        <td class="desc-col">Upload, download, and delete files via XMODEM, XMODEM-1K, YMODEM, or ZMODEM (batch).</td>
                     </tr>
                     <tr>
                         <td class="key-col">[S]</td>
@@ -654,7 +654,7 @@
                     automatically.
                 </p>
                 <pre><code><span class="prompt-char">$</span> ./xmodem-gateway
-<span class="output-text">XMODEM Gateway v0.3.1
+<span class="output-text">XMODEM Gateway v0.3.5
 Author: Ricky Bryce
 
 Created default configuration: xmodem.conf
@@ -758,7 +758,7 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                         <li><strong>A</strong> &mdash; AI Chat: ask questions to an AI</li>
                         <li><strong>B</strong> &mdash; Browser: browse the web</li>
                         <li><strong>C</strong> &mdash; Configuration: server settings and other options</li>
-                        <li><strong>F</strong> &mdash; File Transfer: upload/download files using the XMODEM protocol</li>
+                        <li><strong>F</strong> &mdash; File Transfer: upload/download files using XMODEM, XMODEM-1K, YMODEM, or ZMODEM</li>
                         <li><strong>R</strong> &mdash; Troubleshooting: diagnose terminal input issues</li>
                         <li><strong>S</strong> &mdash; SSH Gateway: connect to a remote server via SSH</li>
                         <li><strong>T</strong> &mdash; Telnet Gateway: connect to a remote server via telnet</li>
@@ -775,7 +775,7 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
             <!-- ══════════════════════════════════════════════ -->
             <div class="section" id="file-transfer">
                 <div class="section-title">File Transfer</div>
-                <p class="intro">Upload, download, and manage files on the server using the XMODEM protocol.</p>
+                <p class="intro">Upload, download, and manage files on the server using XMODEM, XMODEM-1K, YMODEM, or ZMODEM. The gateway supports the full Forsberg ZMODEM spec including batch sends, batch receives, and ZSKIP.</p>
 
                 <div class="menu-block">
                     <div class="sep">========================================</div>
@@ -798,10 +798,14 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                     <h3>Steps</h3>
                     <ol>
                         <li>Press <strong>U</strong> to begin an upload</li>
-                        <li>Enter the filename when prompted (max 255 characters, no path separators)</li>
-                        <li>The server waits for your terminal to begin the XMODEM transfer</li>
-                        <li>Start the XMODEM send in your terminal program</li>
-                        <li>Progress is shown as blocks are received</li>
+                        <li>Enter the filename when prompted (max 64 characters; letters, digits, dots, hyphens, underscores; cannot start with a dot; cannot contain <code>..</code>)</li>
+                        <li>If the file already exists, confirm overwrite with <strong>Y</strong></li>
+                        <li>On the <strong>SELECT UPLOAD PROTOCOL</strong> screen press
+                            <strong>X</strong> (XMODEM/YMODEM, block size + CRC mode + YMODEM block-0 header auto-detected) or
+                            <strong>Z</strong> (ZMODEM)</li>
+                        <li>The server waits up to 45 seconds (tunable via <code>xmodem_negotiation_timeout</code>) for your terminal to begin sending</li>
+                        <li>In your terminal client, start the matching send &mdash; e.g. ExtraPutty's <em>File Transfer &rsaquo; Zmodem &rsaquo; Send</em>, SyncTerm's <em>Ctrl-PgUp</em>, or any XMODEM/YMODEM &ldquo;Send File&rdquo; dialog</li>
+                        <li>For a ZMODEM batch, the first file is saved under the name you entered; any additional files the sender transmits are saved under the sender's own filename (after path-safety validation &mdash; colliding names are auto-skipped via ZSKIP)</li>
                     </ol>
                 </div>
 
@@ -810,9 +814,14 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                     <h3>Steps</h3>
                     <ol>
                         <li>Press <strong>D</strong> to begin a download</li>
-                        <li>A numbered list of files is displayed &mdash; enter the file number</li>
-                        <li>Start the XMODEM receive in your terminal program</li>
-                        <li>The file is sent block by block</li>
+                        <li>A paginated list of files is displayed &mdash; enter the file number</li>
+                        <li>On the <strong>SELECT PROTOCOL</strong> screen press
+                            <strong>X</strong> (XMODEM, 128-byte blocks),
+                            <strong>1</strong> (XMODEM-1K, 1024-byte blocks with SOH fallback),
+                            <strong>Y</strong> (YMODEM, filename + size header),
+                            or <strong>Z</strong> (ZMODEM, auto-starts in most modern terminals)</li>
+                        <li>Start the matching receive in your terminal and choose where to save the file locally</li>
+                        <li>The file is transmitted and the server reports bytes / blocks / elapsed time on completion</li>
                     </ol>
                 </div>
 
@@ -1468,7 +1477,7 @@ xmodem_max_retries = 10</span></code></pre>
                     <tr><th>Symptom</th><th>Solution</th></tr>
                     <tr>
                         <td>Transfer times out before starting</td>
-                        <td>Increase negotiation timeout. Ensure your terminal program is set to XMODEM (not YMODEM/ZMODEM).</td>
+                        <td>Pick the same protocol on both sides: the gateway's upload menu expects either XMODEM/YMODEM or ZMODEM, and the download menu lets you select XMODEM, XMODEM-1K, YMODEM, or ZMODEM explicitly. If your terminal takes a while to open its Send/Receive dialog, increase <code>xmodem_negotiation_timeout</code> in <code>xmodem.conf</code> (default 45 s).</td>
                     </tr>
                     <tr>
                         <td>Transfer fails partway through</td>
@@ -1559,7 +1568,7 @@ xmodem_max_retries = 10</span></code></pre>
         <!-- FOOTER                                            -->
         <!-- ══════════════════════════════════════════════════ -->
         <footer class="site-footer">
-            XMODEM Gateway v0.3.1 &mdash; &copy; 2025 Ricky Bryce &mdash;
+            XMODEM Gateway v0.3.5 &mdash; &copy; 2025 Ricky Bryce &mdash;
             Licensed under GPL-3.0-or-later
         </footer>
 

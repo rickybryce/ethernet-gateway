@@ -114,6 +114,19 @@ enum TerminalType {
     Petscii,
 }
 
+/// Transfer protocol selected at upload time.  The XMODEM/YMODEM
+/// branch hands off to `xmodem_receive`, which auto-detects block
+/// size (SOH vs STX), CRC vs checksum, and the YMODEM block-0
+/// filename header.  The ZMODEM branch hands off to
+/// `zmodem_receive`, which emits ZRINIT and waits for ZFILE.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum UploadProtocol {
+    /// XMODEM / YMODEM — receiver auto-detects variant.
+    XmodemYmodem,
+    /// ZMODEM — receiver initiates the session with ZRINIT.
+    Zmodem,
+}
+
 /// Transfer protocol selected at download time by the user.  Picked
 /// per-transfer via the `SELECT PROTOCOL` prompt; no persistent config.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -127,6 +140,9 @@ enum DownloadProtocol {
     /// YMODEM — block 0 with filename + size, then 1K-style data
     /// blocks.
     Ymodem,
+    /// ZMODEM — Forsberg ZMODEM with ZDLE escaping, hex + binary
+    /// headers, stop-and-wait 1K subpackets.
+    Zmodem,
 }
 
 // ─── Input mode ────────────────────────────────────────────
@@ -2928,9 +2944,7 @@ impl TelnetSession {
                 self.gateway_telnet().await?;
             }
             "x" => {
-                self.send_line("").await?;
-                self.send_line("Goodbye!").await?;
-                self.flush().await?;
+                self.send_farewell().await?;
                 return Ok(false);
             }
             _ => {
@@ -2938,6 +2952,66 @@ impl TelnetSession {
             }
         }
         Ok(true)
+    }
+
+    /// Print John 3:16 (KJV) on a fresh page when the user quits from
+    /// the main menu, then block long enough for every byte to clock
+    /// out on even a 1200 baud link before the caller drops the
+    /// connection.  A 1200 baud 8N1 link carries 120 bytes/sec; we
+    /// tally the bytes we emit and sleep `bytes / 120 s + 1 s` so the
+    /// closing `TCP FIN` / SSH EOF doesn't truncate the final line on
+    /// slow retro terminals.
+    async fn send_farewell(&mut self) -> Result<(), std::io::Error> {
+        self.clear_screen().await?;
+
+        // Wrap width leaves a two-char indent on both layouts.  36/76
+        // rather than 38/78 keeps room for color-code padding without
+        // risking an overflow wrap on narrow PETSCII screens.
+        let wrap_width = if self.terminal_type == TerminalType::Petscii {
+            36
+        } else {
+            76
+        };
+        let verse = "For God so loved the world, that he gave his only \
+                     begotten Son, that whosoever believeth in him \
+                     should not perish, but have everlasting life.";
+
+        // `byte_count` is a running tally of everything we send after
+        // the clear-screen, so the transmit-delay calculation reflects
+        // what actually went down the wire.  The clear-screen prefix
+        // itself is a handful of bytes (ANSI ESC[2J ESC[H, PETSCII 0x93,
+        // or blank for ASCII); 16 is a safe ceiling.
+        let mut byte_count: usize = 16;
+
+        self.send_line("").await?;
+        byte_count += 2;
+
+        let header = format!("  {}", self.yellow("John 3:16 (KJV)"));
+        byte_count += header.len() + 2;
+        self.send_line(&header).await?;
+
+        self.send_line("").await?;
+        byte_count += 2;
+
+        for line in crate::aichat::wrap_line(verse, wrap_width) {
+            let out = format!("  {}", line);
+            byte_count += out.len() + 2;
+            self.send_line(&out).await?;
+        }
+
+        self.send_line("").await?;
+        byte_count += 2;
+        self.flush().await?;
+
+        // transmit_ms = bytes / 120 s, rounded up.  Adding 1 s of
+        // quiet before disconnect lets the final stop-bit settle
+        // before we close the socket.
+        let transmit_ms = (byte_count as u64).saturating_mul(1000).div_ceil(120);
+        tokio::time::sleep(std::time::Duration::from_millis(
+            transmit_ms.saturating_add(1000),
+        ))
+        .await;
+        Ok(())
     }
 
     // ─── File Transfer menu ──────────────────────────────────
@@ -3245,6 +3319,77 @@ impl TelnetSession {
 
     // ─── UPLOAD ─────────────────────────────────────────────
 
+    /// Prompt the user to pick the upload protocol on its own screen.
+    /// Returns `None` if the user pressed ESC / PETSCII `<-` to cancel
+    /// back to the file-transfer menu.  Parallel to
+    /// [`Self::prompt_download_protocol`] — same screen layout,
+    /// navigation keys, and petscii/ANSI handling.
+    async fn prompt_upload_protocol(
+        &mut self,
+    ) -> Result<Option<UploadProtocol>, std::io::Error> {
+        let is_petscii = self.terminal_type == TerminalType::Petscii;
+        let esc_label = if is_petscii { "<-" } else { "ESC" };
+
+        self.clear_screen().await?;
+        let sep = self.separator();
+        self.send_line(&sep).await?;
+        self.send_line(&format!(
+            "  {}",
+            self.yellow("SELECT UPLOAD PROTOCOL")
+        ))
+        .await?;
+        self.send_line(&sep).await?;
+        self.send_line("").await?;
+        self.send_line(&format!(
+            "  {}  XMODEM/YMODEM  (128/1K blocks, CRC-16 or checksum, auto)",
+            self.cyan("X")
+        ))
+        .await?;
+        self.send_line(&format!(
+            "  {}  ZMODEM         (1K subpackets, CRC-16, auto-start)",
+            self.cyan("Z")
+        ))
+        .await?;
+        self.send_line("").await?;
+        self.send(&format!(
+            "  Pick one, or {} to cancel: ",
+            self.cyan(esc_label)
+        ))
+        .await?;
+        self.flush().await?;
+
+        loop {
+            let b = match self.read_byte_filtered().await? {
+                Some(b) => b,
+                None => return Ok(None),
+            };
+            if is_esc_key(b, is_petscii) {
+                self.send_line("").await?;
+                return Ok(None);
+            }
+            let ch = if is_petscii {
+                (petscii_to_ascii_byte(b) as char).to_ascii_lowercase()
+            } else {
+                (b as char).to_ascii_lowercase()
+            };
+            // Accept 'Y' as a synonym for 'X' so a user thinking
+            // "YMODEM" doesn't have to hunt for the right key — the
+            // XMODEM/YMODEM receive path handles both.
+            let chosen = match ch {
+                'x' | 'y' => Some(UploadProtocol::XmodemYmodem),
+                'z' => Some(UploadProtocol::Zmodem),
+                _ => None,
+            };
+            if let Some(p) = chosen {
+                self.send_raw(&[b]).await?;
+                self.send_line("").await?;
+                self.flush().await?;
+                return Ok(Some(p));
+            }
+            // Invalid key — stay at the prompt.
+        }
+    }
+
     async fn file_transfer_upload(&mut self) -> Result<(), std::io::Error> {
         self.ensure_transfer_dir().await?;
 
@@ -3314,6 +3459,17 @@ impl TelnetSession {
             false
         };
 
+        // Ask the user which protocol their sender will use.  Putting
+        // this on its own screen after the filename + overwrite prompts
+        // mirrors the download flow (file → protocol → transfer) and
+        // gives the user as long as they need to browse menus on their
+        // terminal before committing to the transfer window.  ESC /
+        // PETSCII `<-` at the protocol prompt cancels cleanly.
+        let protocol = match self.prompt_upload_protocol().await? {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+
         self.send_line("").await?;
         self.send_line(&format!(
             "  Ready to receive: {}",
@@ -3328,9 +3484,24 @@ impl TelnetSession {
         self.send_line("").await?;
         self.send_line(&format!(
             "  {}",
-            self.green("Begin XMODEM send now.")
+            self.green(match protocol {
+                UploadProtocol::XmodemYmodem =>
+                    "Start XMODEM/YMODEM send from your terminal now.",
+                UploadProtocol::Zmodem =>
+                    "Start ZMODEM send from your terminal now.",
+            })
         ))
         .await?;
+        // Make it explicit that the action happens on the user's side.
+        // For ExtraPutty it's File Transfer → Zmodem → Send; other
+        // terminals have similar menu items.  Users who know the drill
+        // can ignore this — it's here for the first-timer path.
+        if matches!(protocol, UploadProtocol::Zmodem) {
+            self.send_line(
+                "  (ExtraPutty: File Transfer > Zmodem > Send. Other clients vary.)",
+            )
+            .await?;
+        }
         self.send_line(&format!("  Start transfer within {} seconds.",
             config::get_config().xmodem_negotiation_timeout))
             .await?;
@@ -3343,25 +3514,71 @@ impl TelnetSession {
         self.send_line("").await?;
         self.flush().await?;
 
-        if config::get_config().verbose { glog!("XMODEM upload: IAC escaping={}", self.xmodem_iac); }
+        if config::get_config().verbose {
+            glog!("Upload: IAC escaping={} protocol={:?}", self.xmodem_iac, protocol);
+        }
         self.drain_input().await;
 
+        let verbose = config::get_config().verbose;
         let start = std::time::Instant::now();
         let mut writer_guard = self.writer.lock().await;
-        let verbose = config::get_config().verbose;
-        let result = crate::xmodem::xmodem_receive(
-            &mut self.reader,
-            &mut *writer_guard,
-            self.xmodem_iac,
-            self.terminal_type == TerminalType::Petscii,
-            verbose,
-        )
-        .await;
+        // Normalize both receive paths to a Vec of (sender-proposed
+        // filename, data).  XMODEM/YMODEM never carries a filename in
+        // the protocol, so we mark it as None and the user-entered
+        // name wins.  ZMODEM carries a filename per file; we keep it
+        // so batches can save files 2..N under their sender names.
+        type Received = Vec<(Option<String>, Vec<u8>)>;
+        // Decide callback for the ZMODEM receiver.  The first file
+        // (idx 0) is always accepted — the user typed a destination
+        // filename in the upload prompt, so they want this one saved
+        // regardless of what the sender called it.  Later files in a
+        // batch use the sender's name, which we sanitize through the
+        // same `validate_filename` rules as user input and reject with
+        // ZSKIP if they fail or collide with an existing file.  The
+        // path-existence check is a sync std::fs call — fast, no
+        // runtime-blocking concern.
+        let transfer_path = self.transfer_path();
+        let decide = |idx: usize,
+                      sender_name: &str,
+                      _size: Option<u64>|
+         -> bool {
+            if idx == 0 {
+                return true;
+            }
+            if Self::validate_filename(sender_name).is_err() {
+                return false;
+            }
+            !transfer_path.join(sender_name).exists()
+        };
+        let result: Result<Received, String> = match protocol {
+            UploadProtocol::Zmodem => crate::zmodem::zmodem_receive(
+                &mut self.reader,
+                &mut *writer_guard,
+                self.xmodem_iac,
+                verbose,
+                decide,
+            )
+            .await
+            .map(|rxs| {
+                rxs.into_iter()
+                    .map(|rx| (Some(rx.filename), rx.data))
+                    .collect()
+            }),
+            UploadProtocol::XmodemYmodem => crate::xmodem::xmodem_receive(
+                &mut self.reader,
+                &mut *writer_guard,
+                self.xmodem_iac,
+                self.terminal_type == TerminalType::Petscii,
+                verbose,
+            )
+            .await
+            .map(|data| vec![(None, data)]),
+        };
         drop(writer_guard);
         let elapsed = start.elapsed();
 
-        let data = match result {
-            Ok(d) => d,
+        let uploads = match result {
+            Ok(v) => v,
             Err(e) => {
                 self.post_transfer_settle().await;
                 self.show_error(&format!("Transfer failed: {}", e))
@@ -3370,56 +3587,136 @@ impl TelnetSession {
             }
         };
 
-        // If the user opted in to overwrite, truncate; otherwise still
-        // use `create_new` so a race-condition (another session racing
-        // to create the same name during our transfer) surfaces as an
-        // error rather than clobbering work.
-        let mut opts = tokio::fs::OpenOptions::new();
-        opts.write(true);
-        if overwrite {
-            opts.create(true).truncate(true);
-        } else {
-            opts.create_new(true);
-        }
-        match opts.open(&filepath).await {
-            Ok(mut file) => {
-                if let Err(e) = file.write_all(&data).await {
-                    self.post_transfer_settle().await;
-                    self.show_error(&format!("Failed to save: {}", e))
-                        .await?;
-                    return Ok(());
+        // Save each file.  The first file goes to the user-entered
+        // path with the user-chosen overwrite behavior.  Any additional
+        // files (ZMODEM batch mode per Forsberg §4) go to the sender's
+        // own filename after the same `validate_filename` sanitation
+        // we apply to user input — and if the name collides with an
+        // existing file we skip rather than clobber.  Batch files
+        // share the transfer-complete window with the first file; we
+        // don't prompt per-file.
+        let mut saved: Vec<(String, usize)> = Vec::new();
+        let mut skipped: Vec<(String, &'static str)> = Vec::new();
+
+        for (idx, (sender_name, data)) in uploads.iter().enumerate() {
+            if idx == 0 {
+                // First file: user-entered filename, honor overwrite.
+                let mut opts = tokio::fs::OpenOptions::new();
+                opts.write(true);
+                if overwrite {
+                    opts.create(true).truncate(true);
+                } else {
+                    opts.create_new(true);
                 }
-                let _ = file.flush().await;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                self.post_transfer_settle().await;
-                self.show_error("File already exists.").await?;
-                return Ok(());
-            }
-            Err(e) => {
-                self.post_transfer_settle().await;
-                self.show_error(&format!("Failed to save: {}", e))
-                    .await?;
-                return Ok(());
+                match opts.open(&filepath).await {
+                    Ok(mut file) => {
+                        if let Err(e) = file.write_all(data).await {
+                            self.post_transfer_settle().await;
+                            self.show_error(&format!("Failed to save: {}", e))
+                                .await?;
+                            return Ok(());
+                        }
+                        let _ = file.flush().await;
+                        saved.push((filename.clone(), data.len()));
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        self.post_transfer_settle().await;
+                        self.show_error("File already exists.").await?;
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        self.post_transfer_settle().await;
+                        self.show_error(&format!("Failed to save: {}", e))
+                            .await?;
+                        return Ok(());
+                    }
+                }
+            } else {
+                // Batch file 2..N: save under sender's name.  Only ZMODEM
+                // can produce these (XMODEM/YMODEM always yields a single
+                // entry), so `sender_name` will be Some here.
+                let name = match sender_name {
+                    Some(n) => n.clone(),
+                    None => continue,
+                };
+                if Self::validate_filename(&name).is_err() {
+                    skipped.push((name, "invalid filename"));
+                    continue;
+                }
+                let batch_path = self.transfer_path().join(&name);
+                let mut opts = tokio::fs::OpenOptions::new();
+                opts.write(true).create_new(true);
+                match opts.open(&batch_path).await {
+                    Ok(mut file) => {
+                        if file.write_all(data).await.is_err() {
+                            skipped.push((name, "write error"));
+                            continue;
+                        }
+                        let _ = file.flush().await;
+                        saved.push((name, data.len()));
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        skipped.push((name, "already exists"));
+                    }
+                    Err(_) => {
+                        skipped.push((name, "I/O error"));
+                    }
+                }
             }
         }
 
         self.post_transfer_settle().await;
 
-        let blocks = data.len().div_ceil(crate::xmodem::XMODEM_BLOCK_SIZE);
+        // Transfer-complete summary.  Preserve the classic single-file
+        // "N bytes, M blocks, T seconds" format when exactly one file
+        // was transferred (by far the common case); expand to a
+        // per-file list only when we actually saw a batch.
         self.send_line("").await?;
-        self.send_line(&format!(
-            "  {}",
-            self.green("Upload complete!")
-        ))
-        .await?;
-        self.send_line(&format!(
-            "  {} bytes, {} blocks, {:.1}s",
-            data.len(),
-            blocks,
-            elapsed.as_secs_f64()
-        ))
-        .await?;
+        if uploads.len() == 1 {
+            let bytes = saved.first().map(|(_, n)| *n).unwrap_or(0);
+            let blocks = bytes.div_ceil(crate::xmodem::XMODEM_BLOCK_SIZE);
+            self.send_line(&format!(
+                "  {}",
+                self.green("Upload complete!")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {} bytes, {} blocks, {:.1}s",
+                bytes,
+                blocks,
+                elapsed.as_secs_f64()
+            ))
+            .await?;
+        } else {
+            self.send_line(&format!(
+                "  {}",
+                self.green(&format!(
+                    "Upload complete: {} saved, {} skipped, {:.1}s",
+                    saved.len(),
+                    skipped.len(),
+                    elapsed.as_secs_f64()
+                ))
+            ))
+            .await?;
+            for (name, bytes) in &saved {
+                self.send_line(&format!(
+                    "  {} {} ({} bytes)",
+                    self.green("*"),
+                    name,
+                    bytes
+                ))
+                .await?;
+            }
+            for (name, reason) in &skipped {
+                self.send_line(&format!(
+                    "  {} {} ({})",
+                    self.yellow("-"),
+                    name,
+                    reason
+                ))
+                .await?;
+            }
+        }
         self.send_line("").await?;
         self.send("  Press any key to continue.").await?;
         self.flush().await?;
@@ -3594,6 +3891,11 @@ impl TelnetSession {
             self.cyan("Y")
         ))
         .await?;
+        self.send_line(&format!(
+            "  {}  ZMODEM       (autostart, 1K subpackets)",
+            self.cyan("Z")
+        ))
+        .await?;
         self.send_line("").await?;
         self.send(&format!(
             "  Pick one, or {} to cancel: ",
@@ -3620,6 +3922,7 @@ impl TelnetSession {
                 'x' => Some(DownloadProtocol::Xmodem),
                 '1' => Some(DownloadProtocol::Xmodem1k),
                 'y' => Some(DownloadProtocol::Ymodem),
+                'z' => Some(DownloadProtocol::Zmodem),
                 _ => None,
             };
             if let Some(p) = chosen {
@@ -3680,6 +3983,7 @@ impl TelnetSession {
                 DownloadProtocol::Xmodem => "Start XMODEM receive now.",
                 DownloadProtocol::Xmodem1k => "Start XMODEM-1K receive now.",
                 DownloadProtocol::Ymodem => "Start YMODEM receive now.",
+                DownloadProtocol::Zmodem => "Start ZMODEM receive now.",
             })
         ))
         .await?;
@@ -3695,39 +3999,55 @@ impl TelnetSession {
         self.send_line("").await?;
         self.flush().await?;
 
-        if config::get_config().verbose { glog!("XMODEM download: IAC escaping={} protocol={:?}", self.xmodem_iac, protocol); }
+        if config::get_config().verbose {
+            glog!("Download: IAC escaping={} protocol={:?}", self.xmodem_iac, protocol);
+        }
         self.drain_input().await;
 
         let start = std::time::Instant::now();
         let cfg = config::get_config();
         let verbose = cfg.verbose;
-        // YMODEM always uses 1K data blocks; XMODEM-1K uses 1K blocks
-        // without the filename header; classic XMODEM uses 128-byte
-        // blocks only.
-        let use_1k = matches!(
-            protocol,
-            DownloadProtocol::Xmodem1k | DownloadProtocol::Ymodem,
-        );
-        let ymodem = if matches!(protocol, DownloadProtocol::Ymodem) {
-            Some(crate::xmodem::YmodemHeader {
-                filename: filename.to_string(),
-                size: file_size,
-            })
-        } else {
-            None
-        };
         let mut writer_guard = self.writer.lock().await;
-        let result = crate::xmodem::xmodem_send(
-            &mut self.reader,
-            &mut *writer_guard,
-            &data,
-            self.xmodem_iac,
-            self.terminal_type == TerminalType::Petscii,
-            verbose,
-            use_1k,
-            ymodem,
-        )
-        .await;
+        let result = if matches!(protocol, DownloadProtocol::Zmodem) {
+            // zmodem_send is batch-capable; download always sends
+            // exactly one file, so we pass a single-element slice.
+            let batch: [(&str, &[u8]); 1] = [(filename, &data)];
+            crate::zmodem::zmodem_send(
+                &mut self.reader,
+                &mut *writer_guard,
+                &batch,
+                self.xmodem_iac,
+                verbose,
+            )
+            .await
+        } else {
+            // YMODEM always uses 1K data blocks; XMODEM-1K uses 1K
+            // blocks without the filename header; classic XMODEM uses
+            // 128-byte blocks only.
+            let use_1k = matches!(
+                protocol,
+                DownloadProtocol::Xmodem1k | DownloadProtocol::Ymodem,
+            );
+            let ymodem = if matches!(protocol, DownloadProtocol::Ymodem) {
+                Some(crate::xmodem::YmodemHeader {
+                    filename: filename.to_string(),
+                    size: file_size,
+                })
+            } else {
+                None
+            };
+            crate::xmodem::xmodem_send(
+                &mut self.reader,
+                &mut *writer_guard,
+                &data,
+                self.xmodem_iac,
+                self.terminal_type == TerminalType::Petscii,
+                verbose,
+                use_1k,
+                ymodem,
+            )
+            .await
+        };
         drop(writer_guard);
         let elapsed = start.elapsed();
 
@@ -6761,7 +7081,7 @@ impl TelnetSession {
             ))
             .await?;
             self.send_line(&format!(
-                "  {}  Toggle verbose XMODEM logging",
+                "  {}  Toggle verbose transfer logging",
                 self.cyan("V")
             ))
             .await?;
@@ -6915,7 +7235,7 @@ impl TelnetSession {
                 "     the built-in web browser",
                 "  W  Default zip code for the",
                 "     weather feature",
-                "  V  Toggle verbose XMODEM log",
+                "  V  Toggle verbose transfer log",
                 "  G  Toggle GUI on startup",
                 "     (requires restart)",
                 "  R  Restart the server",
@@ -6927,7 +7247,7 @@ impl TelnetSession {
                 "  B  Default homepage URL for the",
                 "     built-in web browser",
                 "  W  Default zip code for weather",
-                "  V  Toggle verbose XMODEM logging",
+                "  V  Toggle verbose transfer logging",
                 "  G  Toggle GUI on startup (requires",
                 "     a server restart)",
                 "  R  Restart the server",
@@ -9989,7 +10309,7 @@ mod tests {
             "  A  Set AI API key (Groq)",
             "  B  Set browser homepage",
             "  W  Set weather zip code",
-            "  V  Toggle verbose XMODEM logging",
+            "  V  Toggle verbose transfer logging",
             "  G  Toggle GUI on startup",
             // Security menu
             "  L  Toggle require login",
@@ -10378,7 +10698,7 @@ mod tests {
             "     the built-in web browser",
             "  W  Default zip code for the",
             "     weather feature",
-            "  V  Toggle verbose XMODEM log",
+            "  V  Toggle verbose transfer log",
             "  G  Toggle GUI on startup",
             "     (requires restart)",
             "  R  Restart the server",
@@ -10503,7 +10823,7 @@ mod tests {
             "     the built-in web browser",
             "  W  Default zip code for the",
             "     weather feature",
-            "  V  Toggle verbose XMODEM log",
+            "  V  Toggle verbose transfer log",
             "  G  Toggle GUI on startup",
             "     (requires restart)",
             "  R  Restart the server",
