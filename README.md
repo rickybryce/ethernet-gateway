@@ -1,24 +1,34 @@
 # XMODEM Gateway
 
-A telnet-based XMODEM/XMODEM-1K/YMODEM/ZMODEM file transfer server, SSH
-gateway, Hayes-compatible modem emulator for serial-attached retro hardware,
-text-mode web browser, and AI chat client written in Rust. Supports PETSCII
-(Commodore 64), ANSI, and ASCII terminals. Designed for local network use
-with retro and modern terminal clients.
+A telnet-based XMODEM file transfer server, SSH gateway, Hayes-compatible
+modem emulator for serial-attached retro hardware, text-mode web browser,
+and AI chat client written in Rust. Supports PETSCII (Commodore 64), ANSI,
+and ASCII terminals. Designed for local network use with retro and modern
+terminal clients.
 
 **[User Manual](http://telnetbible.com/xmodem-gateway/index.html)**
 
-Once you run the server on your PC, you can telnet to that server from anywhere 
-on your network (allow firewall port 2323).  Example:  ATDT 192.168.1.160:2323
+Once you run the server on your PC, you can telnet to that server from
+anywhere on your network (allow firewall port 2323).
 
-This program also serves as a modem emulator.  For an Altairduino PRO, connect 
-directly to the altairduino, and set your modem port to be 2SIO2. (A6/A7 on 
-mine).  Remember, you can configure the serial ports by pressing stop and aux1
-up.
+Example: `telnet 192.168.1.160:2323`
+
+This program also serves as a modem emulator. For an Altairduino PRO,
+connect directly to the altairduino, and set your modem port to be 2SIO2.
+(A6/A7 on mine). Remember, you can configure the serial ports by pressing
+stop and aux1 up.
+
+Run IMP8, then hit T for terminal mode on the Altairduino.
+
+Example: `ATDT :2323` — for gateway options: `ATDT xmodem-gateway`
+
+Note: For the Altairduino, I simply connected my USB to RS232 adapter to
+the 9 pin RS232 connector.
+
+For other machines, you may need to use a NULL modem adapter (Cross RX
+and TX).
 
 This should also work with the RC2014 / SC126, etc as well.
-
-
 
 Author: Ricky Bryce
 
@@ -351,6 +361,10 @@ opens on startup. The GUI provides:
   saved without editing the file by hand
 - **Serial port auto-detection** -- the Serial Modem section lists detected
   serial ports in a dropdown; click the refresh button to re-scan
+- **"More..." popups** -- the Server, File Transfer, and Serial Modem frames
+  each have a **More...** button that opens an advanced-options window. The
+  File Transfer popup exposes the XMODEM-family timeouts plus the independent
+  ZMODEM tunables (handshake, frame timeout, retry cap) side by side.
 - **User Manual button** -- opens the PDF user manual on GitHub in your browser
 - **Save and Restart Server** -- writes changes to `xmodem.conf` and restarts
   the server so all changes (including security, ports, and credentials) take
@@ -388,9 +402,19 @@ Most settings can be changed from within a telnet or SSH session using the
 **C** (Configuration) menu, which provides submenus for:
 
 - **E** Security -- toggle login requirement, set telnet/SSH credentials
+- **G** Gateway Configuration -- outbound Telnet and SSH Gateway options
 - **M** Modem Emulator -- serial port selection and parameters
 - **S** Server Configuration -- enable/disable telnet and SSH, set ports
-- **X** XMODEM Settings -- transfer directory, timeouts, retry limit
+- **F** File Transfer -- submenu with shared transfer directory and
+  per-protocol settings pages:
+  - **X** XMODEM settings -- negotiation timeout, retry interval
+    (C/NAK poke cadence), block timeout, and retry limit (shared with
+    XMODEM-1K and YMODEM, which use the same protocol code)
+  - **Y** YMODEM settings -- same keys as XMODEM; page calls out the
+    shared-family behavior
+  - **Z** ZMODEM settings -- independent handshake timeout, retry
+    interval (ZRINIT/ZRQINIT re-send cadence), per-frame read timeout,
+    and ZRQINIT/ZRPOS/ZDATA retry cap
 - **O** Other Settings -- AI API key, browser homepage, weather zip, verbose
   logging, GUI on startup
 - **R** Reset Defaults -- restore all settings to factory defaults
@@ -449,10 +473,28 @@ weather_zip =
 # Verbose logging: set to true for detailed XMODEM/YMODEM/ZMODEM protocol diagnostics
 verbose = false
 
-# XMODEM/YMODEM/ZMODEM negotiation + block timeouts (shared by all protocols)
+# XMODEM-family protocol timeouts (apply to XMODEM, XMODEM-1K, and YMODEM —
+# they share the same protocol code path).
+# xmodem_negotiation_timeout:        seconds to wait for the peer to start sending.
+# xmodem_block_timeout:              seconds to wait for each data block.
+# xmodem_max_retries:                retry limit per block.
+# xmodem_negotiation_retry_interval: seconds between C/NAK pokes during the
+#                                    initial handshake (spec ~10 s, default 7).
 xmodem_negotiation_timeout = 45
 xmodem_block_timeout = 20
 xmodem_max_retries = 10
+xmodem_negotiation_retry_interval = 7
+
+# ZMODEM protocol tunables (independent of the XMODEM family).
+# zmodem_negotiation_timeout:        seconds to wait for ZRQINIT / ZRINIT handshake.
+# zmodem_frame_timeout:              seconds to wait for each header / subpacket.
+# zmodem_max_retries:                retry limit for ZRQINIT / ZRPOS / ZDATA frames.
+# zmodem_negotiation_retry_interval: seconds between ZRINIT / ZRQINIT re-sends
+#                                    during the handshake (default 5).
+zmodem_negotiation_timeout = 45
+zmodem_frame_timeout = 30
+zmodem_max_retries = 10
+zmodem_negotiation_retry_interval = 5
 
 # Serial modem emulation (Hayes AT commands)
 # Set serial_enabled = true and configure the port to activate.
