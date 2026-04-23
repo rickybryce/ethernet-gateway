@@ -43,7 +43,7 @@ pub fn run(cfg: Config, shutdown: Arc<AtomicBool>, restart: Arc<AtomicBool>) {
         let options = eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_title(format!("XMODEM Gateway v{}", env!("CARGO_PKG_VERSION")))
-                .with_inner_size([990.0, 810.0])
+                .with_inner_size([1120.0, 810.0])
                 .with_min_inner_size([640.0, 480.0]),
             ..Default::default()
         };
@@ -215,6 +215,11 @@ struct App {
     negotiation_timeout_buf: String,
     block_timeout_buf: String,
     max_retries_buf: String,
+    negotiation_retry_interval_buf: String,
+    zmodem_negotiation_timeout_buf: String,
+    zmodem_frame_timeout_buf: String,
+    zmodem_max_retries_buf: String,
+    zmodem_negotiation_retry_interval_buf: String,
     serial_baud_buf: String,
     // Detected serial ports for the dropdown
     serial_ports: Vec<String>,
@@ -225,6 +230,8 @@ struct App {
     server_popup_open: bool,
     /// Whether the Serial Modem "More..." popup is open.
     serial_popup_open: bool,
+    /// Whether the File Transfer "More..." popup is open.
+    file_transfer_popup_open: bool,
     /// When the user clicks the folder-browse button, the native dialog
     /// runs on a background OS thread so it can't block the egui event
     /// loop.  This channel carries back the chosen path (or None if
@@ -242,6 +249,13 @@ impl App {
         let negotiation_timeout_buf = cfg.xmodem_negotiation_timeout.to_string();
         let block_timeout_buf = cfg.xmodem_block_timeout.to_string();
         let max_retries_buf = cfg.xmodem_max_retries.to_string();
+        let negotiation_retry_interval_buf =
+            cfg.xmodem_negotiation_retry_interval.to_string();
+        let zmodem_negotiation_timeout_buf = cfg.zmodem_negotiation_timeout.to_string();
+        let zmodem_frame_timeout_buf = cfg.zmodem_frame_timeout.to_string();
+        let zmodem_max_retries_buf = cfg.zmodem_max_retries.to_string();
+        let zmodem_negotiation_retry_interval_buf =
+            cfg.zmodem_negotiation_retry_interval.to_string();
         let serial_baud_buf = cfg.serial_baud.to_string();
         let serial_ports = detect_serial_ports();
         let last_synced_cfg = cfg.clone();
@@ -260,11 +274,17 @@ impl App {
             negotiation_timeout_buf,
             block_timeout_buf,
             max_retries_buf,
+            negotiation_retry_interval_buf,
+            zmodem_negotiation_timeout_buf,
+            zmodem_frame_timeout_buf,
+            zmodem_max_retries_buf,
+            zmodem_negotiation_retry_interval_buf,
             serial_baud_buf,
             serial_ports,
             dirty: false,
             server_popup_open: false,
             serial_popup_open: false,
+            file_transfer_popup_open: false,
             pending_dir_pick: None,
         }
     }
@@ -277,6 +297,11 @@ impl App {
         if let Ok(v) = self.negotiation_timeout_buf.parse::<u64>() && v >= 1 { self.cfg.xmodem_negotiation_timeout = v; }
         if let Ok(v) = self.block_timeout_buf.parse::<u64>() && v >= 1 { self.cfg.xmodem_block_timeout = v; }
         if let Ok(v) = self.max_retries_buf.parse::<usize>() && v >= 1 { self.cfg.xmodem_max_retries = v; }
+        if let Ok(v) = self.negotiation_retry_interval_buf.parse::<u64>() && v >= 1 { self.cfg.xmodem_negotiation_retry_interval = v; }
+        if let Ok(v) = self.zmodem_negotiation_timeout_buf.parse::<u64>() && v >= 1 { self.cfg.zmodem_negotiation_timeout = v; }
+        if let Ok(v) = self.zmodem_frame_timeout_buf.parse::<u64>() && v >= 1 { self.cfg.zmodem_frame_timeout = v; }
+        if let Ok(v) = self.zmodem_max_retries_buf.parse::<u32>() && v >= 1 { self.cfg.zmodem_max_retries = v; }
+        if let Ok(v) = self.zmodem_negotiation_retry_interval_buf.parse::<u64>() && v >= 1 { self.cfg.zmodem_negotiation_retry_interval = v; }
         if let Ok(v) = self.serial_baud_buf.parse::<u32>() && v >= 300 { self.cfg.serial_baud = v; }
     }
 
@@ -566,6 +591,118 @@ impl App {
         }
     }
 
+    /// Render the File Transfer frame's primary rows.  The main layout
+    /// shows the transfer directory plus a quick-glance timeouts row
+    /// (Negotiate / Block / Retries) carrying the XMODEM-family values;
+    /// the popup shows only the directory row because the timeouts are
+    /// repeated in the per-protocol advanced section just below it.
+    ///
+    /// When `with_more_button` is true, a right-aligned "More..." button
+    /// is appended to the timeouts row; the popup passes false (no More
+    /// button needed once you're already in the More view).
+    fn draw_file_transfer_controls(&mut self, ui: &mut egui::Ui, with_more_button: bool) {
+        ui.horizontal(|ui| {
+            ui.label("Dir:");
+            let btn_w = 32.0;
+            let text_w = (ui.available_width() - btn_w - 4.0).max(60.0);
+            singleline_with_menu(ui, &mut self.cfg.transfer_dir, false, Some(text_w));
+            let browse = ui.add_enabled(
+                self.pending_dir_pick.is_none(),
+                egui::Button::new("\u{1F4C1}").small(),
+            );
+            if browse.on_hover_text("Browse for folder").clicked() {
+                self.pending_dir_pick = Some(spawn_folder_picker(&self.cfg.transfer_dir));
+            }
+        });
+        if with_more_button {
+            ui.horizontal(|ui| {
+                labeled_field(ui, "Negotiate:", &mut self.negotiation_timeout_buf, 40.0);
+                labeled_field(ui, "Block:", &mut self.block_timeout_buf, 40.0);
+                labeled_field(ui, "Retries:", &mut self.max_retries_buf, 40.0);
+                if right_aligned_small_button(ui, "More...") {
+                    self.file_transfer_popup_open = true;
+                }
+            });
+        }
+    }
+
+    /// Render the File Transfer frame's advanced options — a per-
+    /// protocol breakdown with XMODEM/YMODEM/ZMODEM sections.  Shown
+    /// only in the File Transfer popup.  XMODEM and YMODEM share the
+    /// same `xmodem_*` keys since they use the same protocol code
+    /// path in `xmodem.rs`; ZMODEM has its own independent timeouts
+    /// defined in `config.rs`.
+    fn draw_file_transfer_advanced(&mut self, ui: &mut egui::Ui) {
+        ui.label(egui::RichText::new("XMODEM / XMODEM-1K / YMODEM").strong().color(AMBER));
+        ui.label(
+            egui::RichText::new(
+                "Shared timeouts — XMODEM, XMODEM-1K, and YMODEM all use the same code path.",
+            )
+            .italics()
+            .small(),
+        );
+        ui.horizontal(|ui| {
+            labeled_field(ui, "Negotiate (s):", &mut self.negotiation_timeout_buf, 50.0);
+            labeled_field(ui, "Block (s):", &mut self.block_timeout_buf, 50.0);
+            labeled_field(ui, "Retries:", &mut self.max_retries_buf, 50.0);
+        });
+        ui.horizontal(|ui| {
+            labeled_field(
+                ui,
+                "Retry interval (s):",
+                &mut self.negotiation_retry_interval_buf,
+                50.0,
+            );
+            ui.label(
+                egui::RichText::new(
+                    "(seconds between C/NAK pokes during handshake; spec suggests ~10)",
+                )
+                .italics()
+                .small(),
+            );
+        });
+
+        ui.add_space(6.0);
+        ui.separator();
+        ui.add_space(2.0);
+        ui.label(egui::RichText::new("ZMODEM").strong().color(AMBER));
+        ui.label(
+            egui::RichText::new(
+                "Independent ZMODEM tunables (handshake budget, per-frame read timeout, retry cap).",
+            )
+            .italics()
+            .small(),
+        );
+        ui.horizontal(|ui| {
+            labeled_field(
+                ui,
+                "Negotiate (s):",
+                &mut self.zmodem_negotiation_timeout_buf,
+                50.0,
+            );
+            labeled_field(
+                ui,
+                "Frame (s):",
+                &mut self.zmodem_frame_timeout_buf,
+                50.0,
+            );
+            labeled_field(ui, "Retries:", &mut self.zmodem_max_retries_buf, 50.0);
+        });
+        ui.horizontal(|ui| {
+            labeled_field(
+                ui,
+                "Retry interval (s):",
+                &mut self.zmodem_negotiation_retry_interval_buf,
+                50.0,
+            );
+            ui.label(
+                egui::RichText::new("(ZRINIT / ZRQINIT re-send gap; default 5)")
+                    .italics()
+                    .small(),
+            );
+        });
+    }
+
     /// Flush numeric text buffers into `cfg`, persist to disk, refresh
     /// the sync snapshot, and clear the dirty flag.  Shared prefix for
     /// every Save action; callers follow it with a log line and any
@@ -693,6 +830,13 @@ impl App {
         self.negotiation_timeout_buf = self.cfg.xmodem_negotiation_timeout.to_string();
         self.block_timeout_buf = self.cfg.xmodem_block_timeout.to_string();
         self.max_retries_buf = self.cfg.xmodem_max_retries.to_string();
+        self.negotiation_retry_interval_buf =
+            self.cfg.xmodem_negotiation_retry_interval.to_string();
+        self.zmodem_negotiation_timeout_buf = self.cfg.zmodem_negotiation_timeout.to_string();
+        self.zmodem_frame_timeout_buf = self.cfg.zmodem_frame_timeout.to_string();
+        self.zmodem_max_retries_buf = self.cfg.zmodem_max_retries.to_string();
+        self.zmodem_negotiation_retry_interval_buf =
+            self.cfg.zmodem_negotiation_retry_interval.to_string();
         self.serial_baud_buf = self.cfg.serial_baud.to_string();
     }
 }
@@ -1040,38 +1184,16 @@ impl eframe::App for App {
                                 ui.set_min_width(ui.available_width());
                                 ui.horizontal(|ui| {
                                     ui.label(egui::RichText::new("File Transfer (XMODEM)").strong().color(AMBER));
+                                    ui.label(
+                                        egui::RichText::new("(More for YMODEM / ZMODEM)")
+                                            .italics()
+                                            .color(AMBER_DIM),
+                                    );
                                     if right_aligned_small_button(ui, "Save") {
                                         self.save_config_now();
                                     }
                                 });
-                                ui.horizontal(|ui| {
-                                    ui.label("Dir:");
-                                    let btn_w = 32.0;
-                                    let text_w =
-                                        (ui.available_width() - btn_w - 4.0).max(60.0);
-                                    singleline_with_menu(
-                                        ui,
-                                        &mut self.cfg.transfer_dir,
-                                        false,
-                                        Some(text_w),
-                                    );
-                                    let browse = ui.add_enabled(
-                                        self.pending_dir_pick.is_none(),
-                                        egui::Button::new("\u{1F4C1}").small(),
-                                    );
-                                    if browse
-                                        .on_hover_text("Browse for folder")
-                                        .clicked()
-                                    {
-                                        self.pending_dir_pick =
-                                            Some(spawn_folder_picker(&self.cfg.transfer_dir));
-                                    }
-                                });
-                                ui.horizontal(|ui| {
-                                    labeled_field(ui, "Negotiate:", &mut self.negotiation_timeout_buf, 40.0);
-                                    labeled_field(ui, "Block:", &mut self.block_timeout_buf, 40.0);
-                                    labeled_field(ui, "Retries:", &mut self.max_retries_buf, 40.0);
-                                });
+                                self.draw_file_transfer_controls(ui, true);
                             });
                         },
                     );
@@ -1283,6 +1405,41 @@ impl eframe::App for App {
             });
         self.serial_popup_open = serial_open;
 
+        let mut ft_open = self.file_transfer_popup_open;
+        egui::Window::new(
+            egui::RichText::new("File Transfer — More")
+                .strong()
+                .color(AMBER_BRIGHT),
+        )
+        .open(&mut ft_open)
+        .resizable(true)
+        .collapsible(false)
+        .default_width(520.0)
+        .frame(popup_frame)
+        .show(&ctx, |ui| {
+            ui.visuals_mut().extreme_bg_color = POPUP_INPUT_BG;
+            self.draw_file_transfer_controls(ui, false);
+            ui.add_space(6.0);
+            ui.separator();
+            ui.add_space(4.0);
+            self.draw_file_transfer_advanced(ui);
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(4.0);
+            if ui
+                .add(egui::Button::new(
+                    egui::RichText::new("Save")
+                        .strong()
+                        .size(16.0)
+                        .color(AMBER_BRIGHT),
+                ))
+                .clicked()
+            {
+                self.save_config_now();
+            }
+        });
+        self.file_transfer_popup_open = ft_open;
+
         // Detect whether the user has unsaved edits.  Compare bound
         // config fields against the last-synced snapshot so that
         // refresh_from_global will not overwrite in-progress changes.
@@ -1295,6 +1452,11 @@ impl eframe::App for App {
                 || self.negotiation_timeout_buf != self.last_synced_cfg.xmodem_negotiation_timeout.to_string()
                 || self.block_timeout_buf != self.last_synced_cfg.xmodem_block_timeout.to_string()
                 || self.max_retries_buf != self.last_synced_cfg.xmodem_max_retries.to_string()
+                || self.negotiation_retry_interval_buf != self.last_synced_cfg.xmodem_negotiation_retry_interval.to_string()
+                || self.zmodem_negotiation_timeout_buf != self.last_synced_cfg.zmodem_negotiation_timeout.to_string()
+                || self.zmodem_frame_timeout_buf != self.last_synced_cfg.zmodem_frame_timeout.to_string()
+                || self.zmodem_max_retries_buf != self.last_synced_cfg.zmodem_max_retries.to_string()
+                || self.zmodem_negotiation_retry_interval_buf != self.last_synced_cfg.zmodem_negotiation_retry_interval.to_string()
                 || self.serial_baud_buf != self.last_synced_cfg.serial_baud.to_string();
         }
     }
@@ -1327,6 +1489,20 @@ mod tests {
         assert_eq!(app.negotiation_timeout_buf, app.cfg.xmodem_negotiation_timeout.to_string());
         assert_eq!(app.block_timeout_buf, app.cfg.xmodem_block_timeout.to_string());
         assert_eq!(app.max_retries_buf, app.cfg.xmodem_max_retries.to_string());
+        assert_eq!(
+            app.negotiation_retry_interval_buf,
+            app.cfg.xmodem_negotiation_retry_interval.to_string()
+        );
+        assert_eq!(
+            app.zmodem_negotiation_timeout_buf,
+            app.cfg.zmodem_negotiation_timeout.to_string()
+        );
+        assert_eq!(app.zmodem_frame_timeout_buf, app.cfg.zmodem_frame_timeout.to_string());
+        assert_eq!(app.zmodem_max_retries_buf, app.cfg.zmodem_max_retries.to_string());
+        assert_eq!(
+            app.zmodem_negotiation_retry_interval_buf,
+            app.cfg.zmodem_negotiation_retry_interval.to_string()
+        );
         assert_eq!(app.serial_baud_buf, app.cfg.serial_baud.to_string());
     }
 
@@ -1352,6 +1528,11 @@ mod tests {
         app.negotiation_timeout_buf = "60".into();
         app.block_timeout_buf = "30".into();
         app.max_retries_buf = "5".into();
+        app.negotiation_retry_interval_buf = "9".into();
+        app.zmodem_negotiation_timeout_buf = "90".into();
+        app.zmodem_frame_timeout_buf = "45".into();
+        app.zmodem_max_retries_buf = "7".into();
+        app.zmodem_negotiation_retry_interval_buf = "8".into();
         app.serial_baud_buf = "115200".into();
         app.sync_numeric_fields();
         assert_eq!(app.cfg.telnet_port, 8080);
@@ -1361,6 +1542,11 @@ mod tests {
         assert_eq!(app.cfg.xmodem_negotiation_timeout, 60);
         assert_eq!(app.cfg.xmodem_block_timeout, 30);
         assert_eq!(app.cfg.xmodem_max_retries, 5);
+        assert_eq!(app.cfg.xmodem_negotiation_retry_interval, 9);
+        assert_eq!(app.cfg.zmodem_negotiation_timeout, 90);
+        assert_eq!(app.cfg.zmodem_frame_timeout, 45);
+        assert_eq!(app.cfg.zmodem_max_retries, 7);
+        assert_eq!(app.cfg.zmodem_negotiation_retry_interval, 8);
         assert_eq!(app.cfg.serial_baud, 115200);
     }
 
@@ -1374,6 +1560,27 @@ mod tests {
         app.sync_numeric_fields();
         assert_eq!(app.cfg.telnet_port, orig_port);
         assert_eq!(app.cfg.serial_baud, orig_baud);
+    }
+
+    /// Invalid or zero ZMODEM buffers must not clobber the existing
+    /// config values.  Matches the xmodem_* buffer guarantees so the
+    /// two families behave identically for bad input.
+    #[test]
+    fn test_sync_zmodem_invalid_leaves_original() {
+        let mut app = test_app();
+        let orig_neg = app.cfg.zmodem_negotiation_timeout;
+        let orig_frame = app.cfg.zmodem_frame_timeout;
+        let orig_retries = app.cfg.zmodem_max_retries;
+        let orig_retry = app.cfg.zmodem_negotiation_retry_interval;
+        app.zmodem_negotiation_timeout_buf = "nope".into();
+        app.zmodem_frame_timeout_buf = "0".into(); // below min
+        app.zmodem_max_retries_buf = "-3".into(); // negative parse-fails as u32
+        app.zmodem_negotiation_retry_interval_buf = "0".into(); // below min
+        app.sync_numeric_fields();
+        assert_eq!(app.cfg.zmodem_negotiation_timeout, orig_neg);
+        assert_eq!(app.cfg.zmodem_frame_timeout, orig_frame);
+        assert_eq!(app.cfg.zmodem_max_retries, orig_retries);
+        assert_eq!(app.cfg.zmodem_negotiation_retry_interval, orig_retry);
     }
 
     #[test]

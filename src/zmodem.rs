@@ -78,10 +78,10 @@ const DONT: u8 = 254;
 const MAX_FILE_SIZE: u64 = 8 * 1024 * 1024;
 const SUBPACKET_DATA_SIZE: usize = 1024;
 const MAX_SUBPACKET_DATA: usize = 8192;
-const FRAME_TIMEOUT_SECS: u64 = 30;
-const ZRQINIT_MAX_RETRIES: u32 = 10;
-const ZRPOS_MAX_RETRIES: u32 = 10;
-const ZDATA_MAX_RETRIES: u32 = 10;
+// Protocol timeouts and retry caps are no longer compile-time constants —
+// they're read from `config::get_config()` so the operator can tune them
+// at runtime through the GUI "More..." popup and the telnet
+// `File Transfer > ZMODEM Settings` menu (see `config.rs` for defaults).
 
 // =============================================================================
 // CRC-16 (CCITT, polynomial 0x1021, seed 0 — same as XMODEM/YMODEM CRC)
@@ -736,13 +736,14 @@ where
     // two harmless visible characters before the hex frame.
     //
     // The overall negotiation budget comes from
-    // `xmodem_negotiation_timeout` (default 45 s) and only applies
+    // `zmodem_negotiation_timeout` (default 45 s) and only applies
     // until the first ZFILE arrives — once the sender is engaged, the
     // per-frame timeouts take over so a slow sender transmitting a
     // large batch isn't killed by a wall-clock deadline.
     let cfg = config::get_config();
     let negotiation_deadline = tokio::time::Instant::now()
-        + tokio::time::Duration::from_secs(cfg.xmodem_negotiation_timeout);
+        + tokio::time::Duration::from_secs(cfg.zmodem_negotiation_timeout);
+    let negotiation_retry_interval = cfg.zmodem_negotiation_retry_interval;
     raw_write_bytes(writer, b"rz\r", is_tcp).await?;
     send_zrinit(writer, is_tcp, verbose).await?;
 
@@ -761,7 +762,11 @@ where
         let deadline_active = files.is_empty();
 
         let read_res = tokio::time::timeout(
-            tokio::time::Duration::from_secs(if deadline_active { 5 } else { 10 }),
+            tokio::time::Duration::from_secs(if deadline_active {
+                negotiation_retry_interval
+            } else {
+                10
+            }),
             read_header(reader, is_tcp, &mut state, verbose),
         )
         .await;
@@ -901,6 +906,10 @@ async fn receive_one_file<F>(
 where
     F: FnMut(usize, &str, Option<u64>) -> bool,
 {
+    let cfg = config::get_config();
+    let frame_timeout = cfg.zmodem_frame_timeout;
+    let max_retries = cfg.zmodem_max_retries;
+
     // Read ZFILE subpacket: filename \0 size [modtime [mode [...]]] \0
     let sub = read_subpacket(reader, is_tcp, state, crc_kind, MAX_SUBPACKET_DATA).await?;
     let (filename, expected_size) = parse_zfile_info(&sub.data)?;
@@ -952,7 +961,7 @@ where
 
     'data_loop: loop {
         let hdr = match tokio::time::timeout(
-            tokio::time::Duration::from_secs(FRAME_TIMEOUT_SECS),
+            tokio::time::Duration::from_secs(frame_timeout),
             read_header(reader, is_tcp, state, verbose),
         )
         .await
@@ -963,7 +972,7 @@ where
                     glog!("ZMODEM recv: header read error: {}", e);
                 }
                 zrpos_attempts += 1;
-                if zrpos_attempts >= ZRPOS_MAX_RETRIES {
+                if zrpos_attempts >= max_retries {
                     send_cancel(writer, is_tcp).await.ok();
                     return Err("ZMODEM: too many header errors during receive".into());
                 }
@@ -1169,21 +1178,24 @@ pub(crate) async fn zmodem_send(
         );
     }
     let cfg = config::get_config();
-    let negotiation_timeout = cfg.xmodem_negotiation_timeout;
+    let negotiation_timeout = cfg.zmodem_negotiation_timeout;
+    let frame_timeout = cfg.zmodem_frame_timeout;
+    let max_retries = cfg.zmodem_max_retries;
+    let negotiation_retry_interval = cfg.zmodem_negotiation_retry_interval;
 
     // ─── Phase 1: ZRQINIT → ZRINIT (once, per session) ──────
     let deadline = tokio::time::Instant::now()
         + tokio::time::Duration::from_secs(negotiation_timeout);
     let mut attempts: u32 = 0;
     loop {
-        if tokio::time::Instant::now() >= deadline || attempts >= ZRQINIT_MAX_RETRIES {
+        if tokio::time::Instant::now() >= deadline || attempts >= max_retries {
             return Err("ZMODEM: no ZRINIT from receiver".into());
         }
         send_zrqinit(writer, is_tcp, verbose).await?;
         attempts += 1;
 
         match tokio::time::timeout(
-            tokio::time::Duration::from_secs(5),
+            tokio::time::Duration::from_secs(negotiation_retry_interval),
             read_header(reader, is_tcp, &mut state, verbose),
         )
         .await
@@ -1238,7 +1250,7 @@ pub(crate) async fn zmodem_send(
         let start_pos: u32;
         let mut skipped = false;
         loop {
-            if zfile_attempts >= ZRPOS_MAX_RETRIES {
+            if zfile_attempts >= max_retries {
                 send_cancel(writer, is_tcp).await.ok();
                 return Err("ZMODEM: no ZRPOS from receiver".into());
             }
@@ -1312,7 +1324,7 @@ pub(crate) async fn zmodem_send(
             if pos >= data.len() {
                 break;
             }
-            if zdata_attempts >= ZDATA_MAX_RETRIES {
+            if zdata_attempts >= max_retries {
                 send_cancel(writer, is_tcp).await.ok();
                 return Err("ZMODEM: too many retransmissions".into());
             }
@@ -1352,7 +1364,7 @@ pub(crate) async fn zmodem_send(
                 }
 
                 match tokio::time::timeout(
-                    tokio::time::Duration::from_secs(FRAME_TIMEOUT_SECS),
+                    tokio::time::Duration::from_secs(frame_timeout),
                     read_header(reader, is_tcp, &mut state, verbose),
                 )
                 .await
@@ -1421,7 +1433,7 @@ pub(crate) async fn zmodem_send(
                         }
                         pos += chunk_len;
                         if let Ok(Ok(hdr)) = tokio::time::timeout(
-                            tokio::time::Duration::from_secs(FRAME_TIMEOUT_SECS),
+                            tokio::time::Duration::from_secs(frame_timeout),
                             read_header(reader, is_tcp, &mut state, verbose),
                         )
                         .await
