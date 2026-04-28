@@ -444,6 +444,7 @@
             <a href="#overview">Overview</a>
             <a href="#server-mode">Server Mode</a>
             <a href="#peer-commands">Peer Commands</a>
+            <a href="#packet-types">Packet Types</a>
             <a href="#g-subcommands">G Subcommands</a>
             <a href="#capabilities">Capabilities</a>
             <a href="#config">Config</a>
@@ -619,6 +620,238 @@
                     <code>..</code>, leading dots, separator characters, or NUL bytes
                     is refused with an E-packet, and the server keeps idling for the
                     next command (per spec §6.7).
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- PACKET TYPES                                  -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="packet-types">
+                <div class="section-title">Packet Types</div>
+
+                <p>
+                    Every byte on a Kermit connection belongs to a <em>packet</em>.
+                    All packets share the same frame: a MARK byte (SOH, 0x01),
+                    length and sequence fields, a one-character TYPE, the
+                    payload, a block-check (checksum or CRC), and an
+                    end-of-line terminator. The TYPE byte determines what
+                    role the packet plays — whether it's negotiating
+                    capabilities, carrying file content, acknowledging a
+                    previous packet, or signalling an error. Below is what
+                    each TYPE letter means and why it exists.
+                </p>
+
+                <pre><code>MARK  LEN  SEQ  TYPE  DATA…  CHECK  EOL
+ \x01  N+3   s    T   payload   c1[c2c3]  \r</code></pre>
+
+                <p class="dim-text">
+                    LEN and SEQ are <code>tochar()</code>-encoded
+                    (value+0x20) so every framing byte stays in the
+                    printable ASCII range — the protocol survives
+                    7-bit, control-stripping links by construction. SEQ is
+                    a 6-bit counter that wraps mod-64 across every packet
+                    in the conversation, including ACKs and NAKs.
+                </p>
+
+                <div class="cat">S &mdash; Send-Init</div>
+                <p>
+                    The opening packet of every transfer. Its payload is
+                    the sender's capability proposal: maximum payload
+                    length, packet timeout, padding requirements, end-of-line
+                    terminator, control-quote character, 8-bit-quote
+                    character, block-check type, repeat-count prefix, plus
+                    a CAPAS bitmap advertising long packets, sliding
+                    windows, attribute packets, locking shifts, and
+                    streaming. The receiver replies with its own
+                    Send-Init in the Y-ACK; the intersection of the two
+                    proposals governs the rest of the transfer.
+                </p>
+
+                <div class="cat">F &mdash; File header</div>
+                <p>
+                    Names the file the sender is about to deliver. The
+                    payload is the filename, plain (un-quoted) — most
+                    implementations don't escape it because filenames
+                    rarely contain QCTL or control bytes. In a multi-file
+                    batch, each file gets its own F between the initial S
+                    and the closing B; the receiver opens a new output
+                    file each time.
+                </p>
+
+                <div class="cat">A &mdash; Attribute</div>
+                <p>
+                    Carries metadata <em>about</em> the file that just
+                    arrived in F: size, modification time, mode bits,
+                    encoding, record format, system-id, charset, creator,
+                    account, and ~10 other typed sub-fields (each
+                    introduced by a single-byte tag — <code>!</code> for
+                    length, <code>#</code> for date, <code>+</code> for
+                    mode, <code>"</code> for binary-vs-text, and so on).
+                    Optional but useful: it's how mtime and mode survive
+                    the transfer end-to-end. The receiver's Y-ACK to the A
+                    can also carry <code>disposition='R'</code> + an
+                    offset to ask the sender to <em>resume</em> from a
+                    partial file already on disk.
+                </p>
+
+                <div class="cat">D &mdash; Data</div>
+                <p>
+                    One chunk of file content, sized up to the negotiated
+                    MAXL. Control bytes are quoted with QCTL, optionally
+                    8-bit-quoted with QBIN to survive 7-bit links, and
+                    optionally repeat-compressed (a run of N identical
+                    bytes encodes as <code>~ count byte</code>). One or
+                    more D-packets sit between the A (or F if no A was
+                    sent) and the closing Z. In streaming mode the per-D
+                    ACK is suppressed; otherwise every D gets a Y-ACK
+                    before the next is sent.
+                </p>
+
+                <div class="cat">Z &mdash; EOF</div>
+                <p>
+                    Marks the end of one file. Empty payload on a normal
+                    finish; <code>D</code> in the payload signals
+                    "discard" — the sender aborted mid-file and the
+                    receiver should drop what it has rather than save a
+                    truncated file. After Z the sender either starts the
+                    next file with a new F (still inside the same
+                    session) or closes the session with B.
+                </p>
+
+                <div class="cat">B &mdash; EOT (Break)</div>
+                <p>
+                    Ends the entire send session. Empty payload. The
+                    receiver Y-ACKs and both sides return to idle. In
+                    server-mode dispatch, B is also accepted as a
+                    standalone "end of session" signal — the same effect
+                    as a <code>G F</code> finish.
+                </p>
+
+                <div class="cat">Y &mdash; ACK</div>
+                <p>
+                    Affirmative acknowledgement. The receiver sends a Y
+                    for every non-streaming packet from the sender,
+                    echoing the same SEQ. Most Y-packets have an empty
+                    payload, but two are special: the Y to the initial S
+                    carries the receiver's counter Send-Init (its own
+                    capabilities), and the Y to A can carry a disposition
+                    + offset to drive RESEND.
+                </p>
+
+                <div class="cat">N &mdash; NAK</div>
+                <p>
+                    Negative acknowledgement: the receiver got a corrupt
+                    packet, an out-of-order packet, or timed out waiting
+                    for the next expected SEQ. The sender retransmits the
+                    packet at the NAK'd SEQ. With sliding windows, NAK
+                    drives selective-repeat — only the missing packet is
+                    re-sent, not everything after it.
+                </p>
+
+                <div class="cat">E &mdash; Error</div>
+                <p>
+                    Fatal abort. Payload is a human-readable error message,
+                    control-quoted. Sent in either direction when something
+                    irrecoverable happens (filename refused for
+                    path-traversal, file too large, host commands disabled,
+                    peer abort). The recipient of an E does <em>not</em>
+                    reply — per spec, ACKing an E risks an error loop. The
+                    session ends silently after the receiver logs the
+                    message.
+                </p>
+
+                <div class="cat">R &mdash; Receive-Init</div>
+                <p>
+                    Client-side download request. Payload is the filename
+                    the client wants from the server. The server validates
+                    the filename, looks the file up under the current
+                    transfer directory, and (if it exists) plays the role
+                    of <em>sender</em> for the rest of the exchange — its
+                    S follows the R in the same monotonic SEQ stream
+                    rather than restarting at zero. R is what
+                    C-Kermit's <code>get</code> command emits.
+                </p>
+
+                <div class="cat">G &mdash; Generic command</div>
+                <p>
+                    Server-mode command dispatch. Payload is a single
+                    action byte (<code>F</code>/<code>L</code>/<code>B</code>
+                    end the session, <code>C</code> changes directory,
+                    <code>D</code> lists the directory, <code>$</code>
+                    reports free space, <code>K</code> identifies the
+                    server, <code>H</code> or <code>?</code> shows help)
+                    optionally followed by an argument. Short replies
+                    (CWD, finish) are a single Y-ACK; long replies (DIR,
+                    HELP) drive an inverse file transfer back to the peer
+                    — see the <a href="#g-subcommands">G-subcommand
+                    reference</a> for the per-letter semantics.
+                </p>
+
+                <div class="cat">I &mdash; Init</div>
+                <p>
+                    Mid-session re-initialisation. Same payload shape as S,
+                    but it doesn't start a transfer — the peer just wants
+                    a fresh Send-Init to refresh its picture of our
+                    capabilities. C-Kermit emits an I before each
+                    server-mode command. The server replies with its
+                    current caps in the Y-ACK and keeps idling.
+                </p>
+
+                <div class="cat">X &mdash; Text header</div>
+                <p>
+                    Same role as F, but flags the body as
+                    <em>text-for-display</em> rather than save-to-disk
+                    (Frank da Cruz §5.3). Used when the server is
+                    answering a generic-command text query
+                    (<code>remote dir</code>, <code>remote space</code>,
+                    <code>remote help</code>): the body comes back as a
+                    full inverse file transfer (S → X → D…D → Z → B), and
+                    a spec-aware peer prints it on screen instead of
+                    writing it to a file.
+                </p>
+
+                <div class="cat">C &mdash; Host command</div>
+                <p>
+                    A request for the server to execute an arbitrary
+                    shell command. This is a remote-code-execution
+                    primitive by design, and the gateway
+                    <strong style="color: var(--red);">always refuses
+                    it</strong> with an E-packet "Host commands disabled".
+                    No configuration switch enables host commands —
+                    actually running peer-supplied shell commands is out
+                    of scope and unsafe regardless of who you trust.
+                </p>
+
+                <div class="cat">T &mdash; Timeout</div>
+                <p>
+                    Reserved by the spec for "I timed out reading the
+                    line" — a way for the receiver to admit the line went
+                    quiet without speculating about why. Never appears on
+                    the wire in this implementation; NAK serves the same
+                    role and is what every modern peer expects.
+                </p>
+
+                <div class="cat">Q &mdash; Reserved</div>
+                <p>
+                    Reserved by the spec for future use. Not emitted by
+                    the gateway and not handled in dispatch — receiving a
+                    Q falls into the unknown-type fallback (NAK back at
+                    the expected SEQ to drive a retransmit).
+                </p>
+
+                <div class="callout callout-info">
+                    <strong>Putting it together:</strong>
+                    A normal single-file upload looks like
+                    <code>S &rarr; Y &rarr; F &rarr; Y &rarr; A &rarr; Y &rarr; D &rarr; Y &rarr; … &rarr; D &rarr; Y &rarr; Z &rarr; Y &rarr; B &rarr; Y</code>.
+                    The same shape repeats per file in a multi-file batch
+                    — F-headed sub-transfers chained between the opening
+                    S and the closing B. A download is the same wire
+                    sequence preceded by an R from the client. A
+                    server-mode session is a loop of these exchanges
+                    interleaved with G commands, terminated by
+                    <code>G F</code> / <code>B</code> or peer disconnect.
                 </div>
             </div>
 

@@ -4031,15 +4031,10 @@ fn kermit_g_help_text() -> &'static str {
 }
 
 /// Server-mode dispatch: idle waiting for an incoming command from a
-/// Kermit client and acting on it.  This commit wires the lightweight
-/// half of the spec — Host-command refusal (`C`), re-init (`I`),
-/// graceful EOT (`B`), peer-abort handling (`E`), and the generic
-/// `G F`/`G L` finish/logout that already lived in `kermit_receive`.
-/// The S-packet (peer wants to send us a file) and R-packet (peer
-/// wants us to send a file) currently respond with an E-packet stub
-/// "not yet implemented" and exit; the real handlers are wired in
-/// the follow-up commit that refactors `kermit_receive` /
-/// `kermit_send` to accept a pre-read first packet.
+/// Kermit client and acting on it.  Handles every spec-defined first-
+/// packet type: `S` (peer uploads), `R` (peer requests download), `G`
+/// (generic command — F/L/B/C/D/$/K/H/?), `I` (re-init), `B` (clean
+/// EOT), `E` (peer abort), and `C` (host command — always refused).
 ///
 /// Returns the list of files received from the peer over the lifetime
 /// of the session (one S command per file batch — multiple batches
@@ -4692,10 +4687,12 @@ async fn kermit_client_send_g_simple(
     Ok(())
 }
 
-/// Send a Generic-command packet that expects a text reply via X-Z
-/// (D=DIR, `$`=SPACE, K=KERMIT version).  Drives the full
-/// G→ACK→X→ACK→Z→ACK exchange and returns the decoded X payload as
-/// a UTF-8 string.  Bubbles E-packets and protocol mismatches as Err.
+/// Send a Generic-command packet that expects a long text reply
+/// (D=DIR, `$`=SPACE, K=KERMIT, H=HELP).  No Y-ACK comes back to the
+/// G itself — per C-Kermit's I-G-S protocol convention the server
+/// drives a fresh inverse file transfer (S → X → D…D → Z → B) to
+/// deliver the body.  Returns the body as a UTF-8 string; bubbles
+/// E-packets and protocol mismatches as `Err`.
 async fn kermit_client_send_g_text(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),
@@ -4758,7 +4755,7 @@ async fn kermit_client_send_g_text(
     }
     if s_pkt.kind != TYPE_SEND_INIT {
         return Err(format!(
-            "Kermit client: G '{}' expected S after ACK, got '{}'",
+            "Kermit client: G '{}' expected S, got '{}'",
             action as char, s_pkt.kind as char
         ));
     }
@@ -6471,6 +6468,221 @@ mod tests {
         })
         .await;
         result.unwrap();
+    }
+
+    /// Drive `kermit_send_with_starting_seq` against a minimal
+    /// Send-Init responder that ACKs each subsequent packet at the
+    /// negotiated session settings, capturing the type byte of every
+    /// packet that arrived.  Returns the captured sequence.  Used to
+    /// assert wire-level guarantees of the `text_response` parameter.
+    async fn capture_send_packet_kinds(text_response: bool) -> Vec<u8> {
+        let _guard = CONFIG_LOCK.lock().await;
+        init_test_config();
+        let (sx, rx) = duplex(65536);
+        let (mut rx_r_for_send, mut sx_w_for_send) = split(sx);
+        let (mut sx_r_for_recv, mut rx_w_for_recv) = split(rx);
+
+        let send_task = tokio::spawn(async move {
+            let file = KermitSendFile {
+                name: "BODY",
+                data: b"hello, world\n",
+                modtime: None,
+                mode: None,
+            };
+            kermit_send_with_starting_seq(
+                &mut rx_r_for_send,
+                &mut sx_w_for_send,
+                &[file],
+                false,
+                false,
+                false,
+                0,
+                text_response,
+            )
+            .await
+        });
+
+        let recv_task = tokio::spawn(async move {
+            let mut kinds: Vec<u8> = Vec::new();
+            let mut state = ReadState::default();
+            let our_caps = config_capabilities();
+            let deadline = || tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+            // 1. Read S, reply with Send-Init counter.
+            let s_pkt = read_packet(
+                &mut sx_r_for_recv,
+                false,
+                false,
+                b'1',
+                CR,
+                false,
+                &mut state,
+                Some(deadline()),
+            )
+            .await
+            .unwrap();
+            kinds.push(s_pkt.kind);
+            assert_eq!(s_pkt.kind, TYPE_SEND_INIT);
+            let session = intersect_capabilities(&our_caps, &parse_send_init_payload(&s_pkt.payload));
+            let ack_payload = build_send_init_payload(&our_caps);
+            send_ack_with_payload(
+                &mut rx_w_for_recv,
+                s_pkt.seq,
+                &ack_payload,
+                b'1',
+                0,
+                0,
+                CR,
+                false,
+            )
+            .await
+            .unwrap();
+            // 2. ACK every subsequent packet at session settings until
+            //    we see B (EOT).
+            loop {
+                let pkt = read_packet(
+                    &mut sx_r_for_recv,
+                    false,
+                    false,
+                    session.chkt,
+                    session.eol,
+                    false,
+                    &mut state,
+                    Some(deadline()),
+                )
+                .await
+                .unwrap();
+                kinds.push(pkt.kind);
+                send_ack(
+                    &mut rx_w_for_recv,
+                    pkt.seq,
+                    session.chkt,
+                    session.npad,
+                    session.padc,
+                    session.eol,
+                    false,
+                )
+                .await
+                .unwrap();
+                if pkt.kind == TYPE_EOT {
+                    break;
+                }
+            }
+            kinds
+        });
+
+        let send_result = send_task.await.unwrap();
+        let kinds = recv_task.await.unwrap();
+        send_result.expect("kermit_send_with_starting_seq failed");
+        kinds
+    }
+
+    #[tokio::test]
+    async fn test_text_response_true_uses_x_header_and_skips_a_packet() {
+        // text_response = true must:
+        //   * send X (TYPE_TEXT) as the per-file header instead of F,
+        //   * skip the A-packet entirely (text replies don't carry
+        //     length/mtime/mode metadata).
+        // Locks in Frank da Cruz §5.3 wire shape for inverse-file-
+        // transfer text replies (DIR / SPACE / KERMIT / HELP).
+        let kinds = capture_send_packet_kinds(true).await;
+        assert!(
+            kinds.contains(&TYPE_TEXT),
+            "expected X (text header) on the wire, got kinds: {:?}",
+            kinds.iter().map(|k| *k as char).collect::<Vec<_>>()
+        );
+        assert!(
+            !kinds.contains(&TYPE_FILE),
+            "text_response=true must not emit F header, got kinds: {:?}",
+            kinds.iter().map(|k| *k as char).collect::<Vec<_>>()
+        );
+        assert!(
+            !kinds.contains(&TYPE_ATTRIBUTE),
+            "text_response=true must skip A-packet, got kinds: {:?}",
+            kinds.iter().map(|k| *k as char).collect::<Vec<_>>()
+        );
+        // Sanity: still a complete S → X → D… → Z → B exchange.
+        assert_eq!(kinds.first().copied(), Some(TYPE_SEND_INIT));
+        assert_eq!(kinds.last().copied(), Some(TYPE_EOT));
+        assert!(kinds.contains(&TYPE_DATA));
+        assert!(kinds.contains(&TYPE_EOF));
+    }
+
+    #[tokio::test]
+    async fn test_text_response_false_uses_f_header_and_includes_a_packet() {
+        // Counterpart to the above — when text_response is the default
+        // (false), the file-upload path must emit F + A normally.
+        // Guards against accidentally collapsing the two code paths in
+        // a future refactor.
+        let kinds = capture_send_packet_kinds(false).await;
+        assert!(
+            kinds.contains(&TYPE_FILE),
+            "expected F header on the wire, got kinds: {:?}",
+            kinds.iter().map(|k| *k as char).collect::<Vec<_>>()
+        );
+        assert!(
+            !kinds.contains(&TYPE_TEXT),
+            "text_response=false must not emit X header, got kinds: {:?}",
+            kinds.iter().map(|k| *k as char).collect::<Vec<_>>()
+        );
+        assert!(
+            kinds.contains(&TYPE_ATTRIBUTE),
+            "text_response=false must include A-packet (default caps advertise attrs), got kinds: {:?}",
+            kinds.iter().map(|k| *k as char).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_kermit_client_remote_helpers_against_real_server() {
+        // Public client API surface — `kermit_client_dir`,
+        // `kermit_client_space`, `kermit_client_help`,
+        // `kermit_client_version` — drives the same I-G-S inverse-
+        // file-transfer flow that `run_g_text_command` exercises, but
+        // through the shipped client functions a caller would actually
+        // use.  Verifies the public API hasn't drifted from the test
+        // helper's lower-level wire-driving.
+        let _guard = CONFIG_LOCK.lock().await;
+        init_test_config();
+        let (server_side, client_side) = duplex(65536);
+        let (mut s_read, mut s_write) = split(server_side);
+        let (mut c_read, mut c_write) = split(client_side);
+        let server_task = tokio::spawn(async move {
+            kermit_server(&mut s_read, &mut s_write, false, false, false).await
+        });
+
+        let help = kermit_client_help(&mut c_read, &mut c_write, false, false, false)
+            .await
+            .expect("kermit_client_help failed");
+        assert!(
+            help.to_ascii_lowercase().contains("kermit"),
+            "help body must mention kermit, got: {:?}",
+            help
+        );
+
+        let version = kermit_client_version(&mut c_read, &mut c_write, false, false, false)
+            .await
+            .expect("kermit_client_version failed");
+        assert!(
+            version.contains(env!("CARGO_PKG_VERSION")),
+            "version body must contain crate version, got: {:?}",
+            version
+        );
+
+        // Close the session cleanly so the server task finishes.
+        let g_finish = wire_packet(TYPE_GENERIC, 0, b"F");
+        c_write.write_all(&g_finish).await.unwrap();
+        let mut state = ReadState::default();
+        let _ = read_packet(
+            &mut c_read,
+            false,
+            false,
+            b'1',
+            CR,
+            false,
+            &mut state,
+            Some(tokio::time::Instant::now() + tokio::time::Duration::from_secs(5)),
+        )
+        .await;
+        server_task.await.unwrap().expect("kermit_server returned err");
     }
 
     #[tokio::test]
