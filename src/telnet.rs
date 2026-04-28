@@ -4418,42 +4418,72 @@ impl TelnetSession {
         self.send_line("").await?;
         self.send_line(&format!(
             "  {}",
-            self.green("Kermit server ready. Send commands or files.")
+            self.green("Listening for Kermit packets.")
+        ))
+        .await?;
+        self.send_line(&format!(
+            "  {}",
+            self.dim("Your screen will be quiet — that's normal.")
         ))
         .await?;
         self.send_line("").await?;
-        self.send_line("  Drive from your Kermit client, e.g. C-Kermit:").await?;
         self.send_line(&format!(
-            "    {} — upload a file to us",
+            "  {}",
+            self.amber("Needs a Kermit-aware client at your end.")
+        ))
+        .await?;
+        self.send_line("  A plain telnet client cannot drive this.").await?;
+        self.send_line("").await?;
+        self.send_line("  Compatible clients:").await?;
+        self.send_line(&format!(
+            "    {} use the built-in Kermit menu",
+            self.cyan("ExtraPuTTY / SyncTerm / Tera Term / IMP8 —")
+        ))
+        .await?;
+        self.send_line(&format!(
+            "    {} run from a separate shell:",
+            self.cyan("C-Kermit —")
+        ))
+        .await?;
+        self.send_line(&format!(
+            "      {}",
+            self.amber("kermit -j host:port -g file")
+        ))
+        .await?;
+        self.send_line("").await?;
+        self.send_line("  Remote commands once your client is talking:").await?;
+        self.send_line(&format!(
+            "    {}  upload to us",
             self.cyan("send <file>")
         ))
         .await?;
         self.send_line(&format!(
-            "    {} — download a file from us",
+            "    {}  download from us",
             self.cyan("get <file>")
         ))
         .await?;
         self.send_line(&format!(
-            "    {} — list files in current dir",
-            self.cyan("remote dir")
+            "    {}  list / change dir / show help",
+            self.cyan("remote dir / cwd / help")
         ))
         .await?;
         self.send_line(&format!(
-            "    {} — change our working subdir",
-            self.cyan("remote cwd <subdir>")
-        ))
-        .await?;
-        self.send_line(&format!(
-            "    {} — end server session",
+            "    {}  end the session",
             self.cyan("finish | bye")
         ))
         .await?;
         self.send_line("").await?;
+        let esc_label = match self.terminal_type {
+            TerminalType::Petscii => "<-",
+            _ => "ESC",
+        };
         self.send_line(&format!(
-            "  Inactivity timeout: {} s.",
+            "  {} aborts. Idle timeout: {}s.",
+            self.cyan(esc_label),
             config::get_config().kermit_negotiation_timeout
         ))
         .await?;
+        self.send_line("  See kermit.html for full client setup.").await?;
         self.send_line("").await?;
         self.flush().await?;
 
@@ -9205,7 +9235,7 @@ impl TelnetSession {
             self.send_line("").await?;
 
             self.send_line(&format!(
-                "  {}  Negotiate timeout    {}  Packet timeout",
+                "  {}  Negotiate timeout   {}  Packet timeout",
                 self.cyan("N"),
                 self.cyan("P")
             ))

@@ -1976,7 +1976,8 @@ pub(crate) async fn kermit_send(
     is_petscii: bool,
     verbose: bool,
 ) -> Result<(), String> {
-    kermit_send_with_starting_seq(reader, writer, files, is_tcp, is_petscii, verbose, 0).await
+    kermit_send_with_starting_seq(reader, writer, files, is_tcp, is_petscii, verbose, 0, false)
+        .await
 }
 
 /// Same as `kermit_send` but lets the caller seed the initial sequence
@@ -1984,6 +1985,13 @@ pub(crate) async fn kermit_send(
 /// dispatches on a peer-supplied R packet: the response S must follow
 /// the R in the same monotonically-increasing seq stream, so it can't
 /// be hard-coded to 0.  All other callers should use `kermit_send`.
+///
+/// `text_response = true` switches the file header from F to X (per
+/// Frank da Cruz §5.3: text-display response to a generic command) and
+/// suppresses the A-packet — text replies don't carry mtime/mode/length
+/// the way file uploads do.  Used by the four G-text dispatch sites
+/// (DIR / SPACE / KERMIT / HELP) to drive a spec-correct inverse file
+/// transfer back to the peer.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn kermit_send_with_starting_seq(
     reader: &mut (impl AsyncRead + Unpin),
@@ -1993,6 +2001,7 @@ pub(crate) async fn kermit_send_with_starting_seq(
     is_petscii: bool,
     verbose: bool,
     starting_seq: u8,
+    text_response: bool,
 ) -> Result<(), String> {
     let cfg = config::get_config();
     if files.is_empty() {
@@ -2114,10 +2123,14 @@ pub(crate) async fn kermit_send_with_starting_seq(
             );
         }
         // F-packet (filename, plain — not encoded through quoting).
+        // Switch to X (TEXT header) for G-text replies — Frank da Cruz
+        // §5.3 says the receiver should display, not save, anything
+        // introduced by an X header.
+        let header_type = if text_response { TYPE_TEXT } else { TYPE_FILE };
         let _ = send_and_await_ack(
             reader,
             writer,
-            TYPE_FILE,
+            header_type,
             seq,
             f.name.as_bytes(),
             session.chkt,
@@ -2140,8 +2153,13 @@ pub(crate) async fn kermit_send_with_starting_seq(
         // Receiver may reply with disposition='R' + length=N to ask us
         // to resume — we honor that by slicing `f.data[N..]` for the
         // D-packets below.
+        //
+        // Text responses skip A entirely: there's no on-disk file to
+        // resume against, no mtime/mode to carry, and the spec marks A
+        // as optional.  Keeps the wire short and avoids confusing peers
+        // that don't expect attributes on an X-headed display response.
         let mut data_offset: usize = 0;
-        if session.attribute_packets {
+        if session.attribute_packets && !text_response {
             let attrs = Attributes {
                 length: Some(f.data.len() as u64),
                 date: f.modtime.map(unix_secs_to_kermit_date),
@@ -3416,7 +3434,15 @@ pub(crate) async fn kermit_receive_with_init(
         }
 
         match pkt.kind {
-            TYPE_FILE => {
+            // F (file header) and X (text-display header, Frank da Cruz
+            // §5.3) introduce a transfer the same way: they carry a
+            // synthetic name and trigger the D-loop.  X marks the body
+            // as text-for-display rather than save-to-disk; we don't
+            // currently differentiate at this layer (the caller can
+            // decide what to do with the bytes), but accepting both
+            // makes us interoperate with Kermit servers' G-text
+            // replies (`remote dir`, `remote space`, etc.).
+            TYPE_FILE | TYPE_TEXT => {
                 // Spec allows F-packet filenames to be data-quoted, but
                 // most implementations send them raw since filenames
                 // rarely contain QCTL or control bytes.  Try the
@@ -3428,7 +3454,11 @@ pub(crate) async fn kermit_receive_with_init(
                     _ => String::from_utf8_lossy(&pkt.payload).into_owned(),
                 };
                 if verbose {
-                    glog!("Kermit recv: F-packet '{}'", fname);
+                    glog!(
+                        "Kermit recv: {}-packet '{}'",
+                        pkt.kind as char,
+                        fname
+                    );
                 }
                 if received.len() >= MAX_BATCH_FILES {
                     send_error(
@@ -3943,137 +3973,42 @@ fn fs_free_bytes(_path: &std::path::Path) -> Option<u64> {
     None
 }
 
-/// Maximum X-packet payload size for dispatch-level G responses.
-/// Dispatch packets run at protocol defaults (no Send-Init negotiation
-/// for the G itself), so the peer may not accept extended-length
-/// packets.  Targeting a payload that fits in classic 94-byte MAXL
-/// after `build_packet` overhead (mark + len + seq + type + check +
-/// eol = 6 bytes) keeps us safe with strict-spec peers.  Conservative
-/// margin allows for ctl-quote / qbin / repeat-prefix expansion in
-/// the encoded form.
-const G_RESPONSE_MAX_PAYLOAD: usize = 80;
-
-/// Split a UTF-8 text body into one or more encoded X-packet
-/// payloads, each fitting within `G_RESPONSE_MAX_PAYLOAD`.  Walks the
-/// source byte-at-a-time and starts a new chunk whenever encoding
-/// the next byte would push the current chunk over the cap.
-/// Per-chunk locking-shift state is reset (encoder closes the open
-/// shift before chunk boundary) so each X-packet is self-contained.
-fn paginate_g_text_response(text: &str, q: Quoting) -> Vec<Vec<u8>> {
-    let mut chunks: Vec<Vec<u8>> = Vec::new();
-    let mut current: Vec<u8> = Vec::new();
-    let mut mode = ShiftMode::Normal;
-    for &b in text.as_bytes() {
-        // Tentative encode of the next byte to see if it still fits.
-        let mut tentative = current.clone();
-        let mut tent_mode = mode;
-        encode_one_byte(&mut tentative, b, q, &mut tent_mode);
-        if tentative.len() > G_RESPONSE_MAX_PAYLOAD {
-            // Doesn't fit — close the current chunk (emit closing SI
-            // if locking shifts left us in shifted state), push it,
-            // and start a fresh chunk for this byte.
-            if q.locking_shifts && mode != ShiftMode::Normal {
-                current.push(q.qctl);
-                current.push(ctl(SI));
-            }
-            chunks.push(std::mem::take(&mut current));
-            mode = ShiftMode::Normal;
-            encode_one_byte(&mut current, b, q, &mut mode);
-        } else {
-            current = tentative;
-            mode = tent_mode;
-        }
-    }
-    if q.locking_shifts && mode != ShiftMode::Normal {
-        current.push(q.qctl);
-        current.push(ctl(SI));
-    }
-    if !current.is_empty() {
-        chunks.push(current);
-    }
-    if chunks.is_empty() {
-        // Empty input — emit a single empty X so the receiver still
-        // sees a well-formed X→Z response shape.
-        chunks.push(Vec::new());
-    }
-    chunks
-}
-
-/// Send an X+...+Z response after a G command that produces text
-/// output (DIR/SPACE/KERMIT/HELP).  Per Frank da Cruz §6 the spec
-/// allows multiple X-packets to deliver a long body, terminated by
-/// a single Z signalling end-of-response.  Each packet seq follows
-/// from the client's G: G@N → ACK@N → X@N+1 → ACK@N+1 → ...
-/// → X@N+k → ACK@N+k → Z@N+k+1 → ACK@N+k+1.
-#[allow(clippy::too_many_arguments)]
-async fn send_g_text_response(
+/// Send a long G-command response back to the peer as an inverse file
+/// transfer (Frank da Cruz §5.3): the server has already ACKed the G,
+/// then drives a fresh `S → X(name) → D…D → Z → B` exchange to deliver
+/// the text body.  X (text header) replaces F so a spec-aware peer
+/// displays the body on screen instead of saving it as a file.
+///
+/// Each transfer is a self-contained Send-Init negotiation starting at
+/// seq 0, matching the convention the R-handler also follows (see
+/// `kermit_server`'s R-arm comment).  After this returns the dispatch
+/// loop reads the peer's next G/S/R/B and the session continues.
+async fn send_g_inverse_file_response(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),
-    text: &str,
-    after_g_seq: u8,
+    name: &str,
+    body: &[u8],
     is_tcp: bool,
     is_petscii: bool,
     verbose: bool,
-    state: &mut ReadState,
-    max_retries: u32,
-    pkt_timeout: tokio::time::Duration,
 ) -> Result<(), String> {
-    let q = Quoting {
-        qctl: DEFAULT_QCTL,
-        qbin: None,
-        rept: Some(DEFAULT_REPT),
-        locking_shifts: false,
+    let file = KermitSendFile {
+        name,
+        data: body,
+        modtime: None,
+        mode: None,
     };
-    let chunks = paginate_g_text_response(text, q);
-    let mut seq = (after_g_seq + 1) & 0x3F;
-    if verbose && chunks.len() > 1 {
-        glog!(
-            "Kermit server: paginating G text response across {} X-packets",
-            chunks.len()
-        );
-    }
-    for chunk in &chunks {
-        let _ = send_and_await_ack(
-            reader,
-            writer,
-            TYPE_TEXT,
-            seq,
-            chunk,
-            b'1',
-            0,
-            0,
-            CR,
-            is_tcp,
-            is_petscii,
-            verbose,
-            state,
-            Some(tokio::time::Instant::now() + pkt_timeout),
-            max_retries,
-            false,
-        )
-        .await?;
-        seq = (seq + 1) & 0x3F;
-    }
-    let _ = send_and_await_ack(
+    kermit_send_with_starting_seq(
         reader,
         writer,
-        TYPE_EOF,
-        seq,
-        &[],
-        b'1',
-        0,
-        0,
-        CR,
+        &[file],
         is_tcp,
         is_petscii,
         verbose,
-        state,
-        Some(tokio::time::Instant::now() + pkt_timeout),
-        max_retries,
-        false,
+        0,
+        true,
     )
-    .await?;
-    Ok(())
+    .await
 }
 
 /// Multi-line help text sent in response to `G H` (or `G ?`).  Lists
@@ -4262,7 +4197,6 @@ pub(crate) async fn kermit_server(
                 let raw = decode_data(&pkt.payload, recv_q).unwrap_or_default();
                 let action = raw.first().copied().unwrap_or(0);
                 let arg: &[u8] = if raw.len() > 1 { &raw[1..] } else { &[] };
-                let pkt_timeout = tokio::time::Duration::from_secs(cfg.kermit_packet_timeout);
                 match action {
                     b'F' | b'L' | b'B' => {
                         send_ack(writer, pkt.seq, b'1', 0, 0, CR, is_tcp).await?;
@@ -4303,63 +4237,62 @@ pub(crate) async fn kermit_server(
                         continue;
                     }
                     b'D' => {
-                        send_ack(writer, pkt.seq, b'1', 0, 0, CR, is_tcp).await?;
+                        // No Y-ACK to the G — go straight to S.
+                        // C-Kermit's <rgen>Y handler routes any Y the
+                        // client receives in this state through
+                        // rcv_shortreply(), which interprets the Y's
+                        // payload as the *entire* response and ends
+                        // the command.  An empty Y would therefore
+                        // close the conversation before we ever drive
+                        // the inverse transfer.  ckcpro.w protocol
+                        // comment: "packet number stays at zero
+                        // through I-G-S sequence" — there's no Y in
+                        // between G and S for long replies.
                         let dir_path = effective_transfer_path(&cfg, &subdir);
                         let listing = format_dir_listing(&dir_path);
-                        send_g_text_response(
+                        send_g_inverse_file_response(
                             reader,
                             writer,
-                            &listing,
-                            pkt.seq,
+                            "DIR",
+                            listing.as_bytes(),
                             is_tcp,
                             is_petscii,
                             verbose,
-                            &mut state,
-                            cfg.kermit_max_retries,
-                            pkt_timeout,
                         )
                         .await?;
                         continue;
                     }
                     b'$' => {
-                        send_ack(writer, pkt.seq, b'1', 0, 0, CR, is_tcp).await?;
                         let dir_path = effective_transfer_path(&cfg, &subdir);
                         let body = match fs_free_bytes(&dir_path) {
                             Some(b) => b.to_string(),
                             None => "unknown".to_string(),
                         };
-                        send_g_text_response(
+                        send_g_inverse_file_response(
                             reader,
                             writer,
-                            &body,
-                            pkt.seq,
+                            "SPACE",
+                            body.as_bytes(),
                             is_tcp,
                             is_petscii,
                             verbose,
-                            &mut state,
-                            cfg.kermit_max_retries,
-                            pkt_timeout,
                         )
                         .await?;
                         continue;
                     }
                     b'K' => {
-                        send_ack(writer, pkt.seq, b'1', 0, 0, CR, is_tcp).await?;
                         let body = format!(
                             "Ethernet Gateway Kermit {}",
                             env!("CARGO_PKG_VERSION")
                         );
-                        send_g_text_response(
+                        send_g_inverse_file_response(
                             reader,
                             writer,
-                            &body,
-                            pkt.seq,
+                            "KERMIT",
+                            body.as_bytes(),
                             is_tcp,
                             is_petscii,
                             verbose,
-                            &mut state,
-                            cfg.kermit_max_retries,
-                            pkt_timeout,
                         )
                         .await?;
                         continue;
@@ -4369,18 +4302,14 @@ pub(crate) async fn kermit_server(
                         // subcommands.  C-Kermit's `remote help`
                         // sends G ?; some implementations use G H.
                         // We accept both.
-                        send_ack(writer, pkt.seq, b'1', 0, 0, CR, is_tcp).await?;
-                        send_g_text_response(
+                        send_g_inverse_file_response(
                             reader,
                             writer,
-                            kermit_g_help_text(),
-                            pkt.seq,
+                            "HELP",
+                            kermit_g_help_text().as_bytes(),
                             is_tcp,
                             is_petscii,
                             verbose,
-                            &mut state,
-                            cfg.kermit_max_retries,
-                            pkt_timeout,
                         )
                         .await?;
                         continue;
@@ -4529,6 +4458,7 @@ pub(crate) async fn kermit_server(
                     is_petscii,
                     verbose,
                     starting_seq,
+                    false,
                 )
                 .await?;
                 continue;
@@ -4780,93 +4710,66 @@ async fn kermit_client_send_g_text(
     let mut payload = Vec::with_capacity(1 + arg.len());
     payload.push(action);
     payload.extend_from_slice(arg);
-    // 1. Send G + await ACK.  send_and_await_ack auto-translates
-    //    E-packet to Err so we don't have to second-guess that path.
-    let _g_ack = send_and_await_ack(
+    // 1. Send G — no Y-ACK from the server for long replies.  Per
+    //    C-Kermit's ckcpro.w protocol comment ("packet number stays at
+    //    zero through I-G-S sequence") and the rgen-state Y handler,
+    //    a Y arriving here would be consumed as a short-form reply.
+    //    The server instead drives an inverse file transfer directly
+    //    with S → X(name) → D…D → Z → B.
+    let g_pkt = build_packet(TYPE_GENERIC, 0, &payload, b'1', 0, 0, CR);
+    raw_write_bytes(writer, &g_pkt, is_tcp)
+        .await
+        .map_err(|e| format!("Kermit client: G '{}' send failed: {}", action as char, e))?;
+    // 2. Read the server's S directly.  `kermit_receive_with_init`
+    //    accepts both F- and X-headed transfers (text-display vs
+    //    save-to-disk is a caller concern).
+    let s_pkt = read_packet(
         reader,
-        writer,
-        TYPE_GENERIC,
-        0,
-        &payload,
-        b'1',
-        0,
-        0,
-        CR,
         is_tcp,
         is_petscii,
+        b'1',
+        CR,
         verbose,
         &mut state,
         Some(
             tokio::time::Instant::now()
                 + tokio::time::Duration::from_secs(cfg.kermit_negotiation_timeout),
         ),
-        cfg.kermit_max_retries,
-        false,
     )
-    .await?;
-    // 2. Read X-packets until we see a Z.  Per Frank da Cruz §6 the
-    //    server may paginate a long response across multiple X
-    //    packets, terminated by a single Z.  We accumulate the
-    //    decoded bodies in order.
-    let q = Quoting {
-        qctl: DEFAULT_QCTL,
-        qbin: None,
-        rept: Some(DEFAULT_REPT),
-        locking_shifts: false,
-    };
-    let mut body: Vec<u8> = Vec::new();
-    loop {
-        let pkt = read_packet(
-            reader,
-            is_tcp,
-            is_petscii,
-            b'1',
-            CR,
-            verbose,
-            &mut state,
-            Some(
-                tokio::time::Instant::now()
-                    + tokio::time::Duration::from_secs(cfg.kermit_negotiation_timeout),
-            ),
+    .await
+    .map_err(|e| {
+        format!(
+            "Kermit client: G '{}' read response S failed: {}",
+            action as char, e
         )
-        .await
-        .map_err(|e| {
-            format!(
-                "Kermit client: G '{}' read X/Z failed: {}",
-                action as char, e
-            )
-        })?;
-        match pkt.kind {
-            TYPE_TEXT => {
-                let decoded = decode_data(&pkt.payload, q)?;
-                body.extend(decoded);
-                send_ack(writer, pkt.seq, b'1', 0, 0, CR, is_tcp).await?;
-            }
-            TYPE_EOF => {
-                send_ack(writer, pkt.seq, b'1', 0, 0, CR, is_tcp).await?;
-                break;
-            }
-            TYPE_ERROR => {
-                let qe = Quoting {
-                    qctl: DEFAULT_QCTL,
-                    qbin: None,
-                    rept: None,
-                    locking_shifts: false,
-                };
-                let msg = decode_error_message(&pkt.payload, qe);
-                return Err(format!(
-                    "Kermit client: server E on G '{}': {}",
-                    action as char, msg
-                ));
-            }
-            other => {
-                return Err(format!(
-                    "Kermit client: G '{}' expected X/Z, got '{}'",
-                    action as char, other as char
-                ));
-            }
-        }
+    })?;
+    if s_pkt.kind == TYPE_ERROR {
+        let qe = Quoting {
+            qctl: DEFAULT_QCTL,
+            qbin: None,
+            rept: None,
+            locking_shifts: false,
+        };
+        let msg = decode_error_message(&s_pkt.payload, qe);
+        return Err(format!(
+            "Kermit client: server E on G '{}': {}",
+            action as char, msg
+        ));
     }
+    if s_pkt.kind != TYPE_SEND_INIT {
+        return Err(format!(
+            "Kermit client: G '{}' expected S after ACK, got '{}'",
+            action as char, s_pkt.kind as char
+        ));
+    }
+    let received = kermit_receive_with_init(reader, writer, is_tcp, is_petscii, verbose, Some(s_pkt))
+        .await
+        .map_err(|e| format!("Kermit client: G '{}' inverse receive: {}", action as char, e))?;
+    let body = received
+        .into_iter()
+        .next()
+        .map(|f| f.data)
+        .unwrap_or_default();
     String::from_utf8(body).map_err(|e| {
         format!(
             "Kermit client: G '{}' response not UTF-8: {}",
@@ -6403,8 +6306,10 @@ mod tests {
     }
 
     /// Helper: run a G subcommand that produces a text response
-    /// (DIR/SPACE/KERMIT).  Drives the full G→ACK→X→ACK→Z→ACK
-    /// exchange and returns the decoded X-packet body.
+    /// (DIR/SPACE/KERMIT/HELP).  Sends G then reads the server's S
+    /// directly — no Y-ACK in between, matching C-Kermit's I-G-S
+    /// expectation.  Hands the S off to `kermit_receive_with_init`
+    /// and returns the single-file body as a String.
     async fn run_g_text_command(
         w: &mut tokio::io::WriteHalf<tokio::io::DuplexStream>,
         r: &mut tokio::io::ReadHalf<tokio::io::DuplexStream>,
@@ -6416,27 +6321,17 @@ mod tests {
         w.write_all(&wire_packet(TYPE_GENERIC, 0, &payload))
             .await
             .unwrap();
-        let g_ack = read_server_packet(r).await;
-        assert_eq!(g_ack.kind, TYPE_ACK, "expected ACK to G, got '{}'", g_ack.kind as char);
-        // Server may paginate the X body across multiple packets;
-        // accumulate decoded chunks until we see the terminating Z.
-        let q = Quoting::default();
-        let mut body = Vec::new();
-        loop {
-            let pkt = read_server_packet(r).await;
-            match pkt.kind {
-                TYPE_TEXT => {
-                    body.extend(decode_data(&pkt.payload, q).unwrap());
-                    w.write_all(&wire_packet(TYPE_ACK, pkt.seq, &[])).await.unwrap();
-                }
-                TYPE_EOF => {
-                    w.write_all(&wire_packet(TYPE_ACK, pkt.seq, &[])).await.unwrap();
-                    break;
-                }
-                other => panic!("expected X/Z, got '{}'", other as char),
-            }
-        }
-        String::from_utf8(body).unwrap()
+        let s_pkt = read_server_packet(r).await;
+        assert_eq!(
+            s_pkt.kind, TYPE_SEND_INIT,
+            "expected S after G (no intermediate Y), got '{}'",
+            s_pkt.kind as char
+        );
+        let received = kermit_receive_with_init(r, w, false, false, false, Some(s_pkt))
+            .await
+            .expect("inverse file receive failed");
+        assert_eq!(received.len(), 1, "expected exactly one G-text reply file");
+        String::from_utf8(received.into_iter().next().unwrap().data).unwrap()
     }
 
     /// Helper: close a server-mode session cleanly with G F.
@@ -6579,48 +6474,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_paginate_g_text_response_single_chunk_under_cap() {
-        // Short text fits in one X-packet.  Sanity check.
-        let q = Quoting::default();
-        let chunks = paginate_g_text_response("Hello world", q);
-        assert_eq!(chunks.len(), 1);
-        let decoded = decode_data(&chunks[0], q).unwrap();
-        assert_eq!(&decoded[..], b"Hello world");
-    }
-
-    #[tokio::test]
-    async fn test_paginate_g_text_response_multi_chunk_round_trip() {
-        // Long text: must split across multiple chunks AND each
-        // chunk's encoded payload must round-trip back to the source.
-        let q = Quoting::default();
-        let mut text = String::new();
-        for i in 0..50 {
-            text.push_str(&format!("file_{:02}.bin\t{}\n", i, i * 100));
-        }
-        let chunks = paginate_g_text_response(&text, q);
-        assert!(
-            chunks.len() > 1,
-            "expected multiple chunks for 50-line listing, got {}",
-            chunks.len()
-        );
-        for chunk in &chunks {
-            assert!(
-                chunk.len() <= G_RESPONSE_MAX_PAYLOAD,
-                "chunk exceeded MAXL cap: {} > {}",
-                chunk.len(),
-                G_RESPONSE_MAX_PAYLOAD
-            );
-        }
-        // Reassemble: decode each chunk and concatenate.  Result must
-        // equal the original source byte-for-byte.
-        let mut reassembled = Vec::new();
-        for chunk in &chunks {
-            reassembled.extend(decode_data(chunk, q).unwrap());
-        }
-        assert_eq!(String::from_utf8(reassembled).unwrap(), text);
-    }
-
-    #[tokio::test]
     async fn test_server_g_dir_paginates_large_listing() {
         // DIR with 30 files produces a listing too long for a single
         // classic-MAXL X.  Server must paginate; client must
@@ -6637,32 +6490,14 @@ mod tests {
 
         let ((), result) = run_server_with_client(async move |w, r| {
             config::update_config_value("transfer_dir", &dir_str);
-            // Hand-roll the multi-X read since `run_g_text_command`
-            // assumes a single X.  Drives G@0 → ACK → loop X+ACK →
-            // Z → ACK.
-            w.write_all(&wire_packet(TYPE_GENERIC, 0, b"D")).await.unwrap();
-            let g_ack = read_server_packet(r).await;
-            assert_eq!(g_ack.kind, TYPE_ACK);
-            let mut body = Vec::new();
-            let q = Quoting::default();
-            let mut x_count = 0;
-            loop {
-                let pkt = read_server_packet(r).await;
-                match pkt.kind {
-                    TYPE_TEXT => {
-                        body.extend(decode_data(&pkt.payload, q).unwrap());
-                        w.write_all(&wire_packet(TYPE_ACK, pkt.seq, &[])).await.unwrap();
-                        x_count += 1;
-                    }
-                    TYPE_EOF => {
-                        w.write_all(&wire_packet(TYPE_ACK, pkt.seq, &[])).await.unwrap();
-                        break;
-                    }
-                    other => panic!("unexpected packet '{}' during DIR pagination", other as char),
-                }
-            }
-            assert!(x_count > 1, "expected multiple X-packets, got {}", x_count);
-            let body_text = String::from_utf8(body).unwrap();
+            // 30-file listing exercises the full inverse file transfer
+            // (S → X → D…D → Z → B).  `run_g_text_command` drives that
+            // via `kermit_receive_with_init`, which handles whatever
+            // D-packet count the negotiated MAXL produces.  We assert
+            // the reassembled body contains both ends of the listing
+            // — the multi-D-packet round-trip is exercised end-to-end
+            // by the regular kermit_send tests.
+            let body_text = run_g_text_command(w, r, b'D', &[]).await;
             assert!(body_text.contains("file_000.bin"));
             assert!(body_text.contains("file_029.bin"));
             close_server_session(w, r).await;
@@ -9405,6 +9240,14 @@ mod tests {
     /// the peer (see `test_server_g_*` and `test_client_*` above) —
     /// the wire flow is identical, so the test value is in the
     /// protocol-level coverage rather than the cross-process exercise.
+    ///
+    /// As of the G-text inverse-file-transfer fix, all four G-text
+    /// responses (DIR / SPACE / KERMIT / HELP) drive the *same*
+    /// `kermit_send_with_starting_seq` path that the R-handler uses
+    /// (just with `text_response = true` to swap F→X and skip the
+    /// A-packet).  `test_ckermit_server_get_interop` exercises that
+    /// path against real C-Kermit 10.0 end-to-end, so the wire format
+    /// the G-text dispatch emits is interop-validated by transitivity.
     #[cfg(unix)]
     #[tokio::test]
     #[ignore]
