@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Ethernet Gateway v0.5.1 &mdash; Kermit Protocol Reference</title>
+    <title>Ethernet Gateway v0.5.2 &mdash; Kermit Protocol Reference</title>
     <meta name="description" content="Kermit file-transfer protocol reference for Ethernet Gateway: server-mode commands, client primitives, G subcommands, RESEND, locking shifts, and capability negotiation.">
     <style>
         :root {
@@ -429,7 +429,7 @@
             </div>
             <h1>Kermit Reference</h1>
             <p class="hdr-tagline">Ethernet Gateway &mdash; Protocol Commands</p>
-            <div class="hdr-version">v0.5.1</div>
+            <div class="hdr-version">v0.5.2</div>
             <div class="hdr-badges">
                 <span class="hdr-badge">Server Mode</span>
                 <span class="hdr-badge">Client Mode</span>
@@ -605,7 +605,7 @@
                         <tr><td><code>remote dir</code></td><td>G D</td><td>List files in the current effective directory. Hidden files (leading dot) are filtered out.</td></tr>
                         <tr><td><code>remote cd &lt;subdir&gt;</code></td><td>G C</td><td>Change the gateway's working sub-directory for subsequent commands. Path-traversal is refused.</td></tr>
                         <tr><td><code>remote space</code></td><td>G $</td><td>Report free disk space at the current effective directory in bytes.</td></tr>
-                        <tr><td><code>remote kermit</code></td><td>G K</td><td>Identify the server: <code>Ethernet Gateway Kermit 0.5.1</code>.</td></tr>
+                        <tr><td><code>remote kermit</code></td><td>G K</td><td>Identify the server: <code>Ethernet Gateway Kermit 0.5.2</code>.</td></tr>
                         <tr><td><code>remote help</code></td><td>G H / G ?</td><td>Display the list of supported subcommands.</td></tr>
                         <tr><td><code>finish</code></td><td>G F</td><td>End the protocol session politely.</td></tr>
                         <tr><td><code>logout</code></td><td>G L</td><td>End the session (semantically: log out the connection).</td></tr>
@@ -880,7 +880,7 @@
                         <tr><td><code>C</code></td><td>CWD</td><td>ACK</td><td>Argument is a relative subdir. Empty argument resets to <code>transfer_dir</code> root. Validates against path-traversal.</td></tr>
                         <tr><td><code>D</code></td><td>Directory</td><td>ACK + X+ + Z</td><td>Returns one entry per line: <code>name &lt;TAB&gt; size|&lt;dir&gt;</code>, sorted, hidden files skipped. Paginated across multiple X-packets when needed.</td></tr>
                         <tr><td><code>$</code></td><td>SPACE</td><td>ACK + X + Z</td><td>Returns free-bytes count as a decimal string, or <code>unknown</code> on platforms without <code>statvfs</code>.</td></tr>
-                        <tr><td><code>K</code></td><td>KERMIT</td><td>ACK + X + Z</td><td>Returns server identity + version (<code>Ethernet Gateway Kermit 0.5.1</code>).</td></tr>
+                        <tr><td><code>K</code></td><td>KERMIT</td><td>ACK + X + Z</td><td>Returns server identity + version (<code>Ethernet Gateway Kermit 0.5.2</code>).</td></tr>
                         <tr><td><code>H</code> / <code>?</code></td><td>Help</td><td>ACK + X+ + Z</td><td>Returns the list of supported subcommands. Both <code>H</code> and <code>?</code> are accepted for compatibility.</td></tr>
                         <tr><td>other</td><td>(unknown)</td><td>ACK</td><td>Per spec, unknown G subcommands are silently acknowledged and ignored.</td></tr>
                     </tbody>
@@ -1033,7 +1033,7 @@
                 <pre><code><span class="prompt-char">$</span> kermit
 <span class="output-text">C-Kermit&gt;</span> set host 192.168.1.160:2323 /telnet
 <span class="output-text">C-Kermit&gt;</span> remote kermit
-<span class="output-text">Ethernet Gateway Kermit 0.5.1</span>
+<span class="output-text">Ethernet Gateway Kermit 0.5.2</span>
 <span class="output-text">C-Kermit&gt;</span> remote dir
 <span class="output-text">alpha.bin    1024
 beta.bin     2048
@@ -1095,7 +1095,7 @@ docs         &lt;dir&gt;</span>
         <!-- FOOTER                                            -->
         <!-- ══════════════════════════════════════════════════ -->
         <footer class="site-footer">
-            Ethernet Gateway v0.5.1 &mdash; &copy; 2026 Ricky Bryce &mdash;
+            Ethernet Gateway v0.5.2 &mdash; &copy; 2026 Ricky Bryce &mdash;
             Licensed under GPL-3.0-or-later
             &mdash; <a href="index.html">Back to User Manual</a>
         </footer>
