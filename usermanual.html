@@ -226,7 +226,7 @@ hr { border: 0; border-top: 1px solid #bbb; margin: 1em 0; }
 <div class="cover">
     <div class="title">Ethernet Gateway</div>
     <div class="subtitle">User Manual</div>
-    <div class="version">Version 0.5.1</div>
+    <div class="version">Version 0.5.2</div>
     <div class="author">Ricky Bryce</div>
     <div class="tag">
         A telnet/SSH file-transfer gateway, SSH proxy, Hayes-compatible
@@ -390,7 +390,7 @@ distribution without installation. On first run the AppImage creates
 Each release publishes a SHA-256 checksum, an optional GPG signature, and a
 Sigstore keyless signature bound to the publisher's GitHub identity. Verify
 at least the SHA-256 before running any binary from the internet:
-<code>sha256sum -c ethernet-gateway-v0.5.1-…tar.gz.sha256</code>.
+<code>sha256sum -c ethernet-gateway-v0.5.2-…tar.gz.sha256</code>.
 </aside>
 
 <h2 id="ch2-source">2.2 Building from Source</h2>
@@ -1288,7 +1288,7 @@ files.
         <tr><td><code>remote dir</code></td><td>G D</td><td>List files in the current effective directory.</td></tr>
         <tr><td><code>remote cd &lt;subdir&gt;</code></td><td>G C</td><td>Change the gateway's working sub-directory for subsequent commands.</td></tr>
         <tr><td><code>remote space</code></td><td>G $</td><td>Report free disk bytes at the current effective directory.</td></tr>
-        <tr><td><code>remote kermit</code></td><td>G K</td><td>Identify the server (<code>Ethernet Gateway Kermit 0.5.1</code>).</td></tr>
+        <tr><td><code>remote kermit</code></td><td>G K</td><td>Identify the server (<code>Ethernet Gateway Kermit 0.5.2</code>).</td></tr>
         <tr><td><code>remote help</code></td><td>G H / G ?</td><td>List supported subcommands.</td></tr>
         <tr><td><code>finish</code> / <code>logout</code> / <code>bye</code></td><td>G F / G L / G B</td><td>End the protocol session politely.</td></tr>
     </tbody>
@@ -1486,7 +1486,7 @@ hit the same entry.
 <table>
     <thead><tr><th>Command</th><th>Response</th></tr></thead>
     <tbody>
-        <tr><td><code>ATI</code> / <code>ATI0</code></td><td>Product ID and version: <code>Ethernet Gateway Modem Emulator v0.5.1</code></td></tr>
+        <tr><td><code>ATI</code> / <code>ATI0</code></td><td>Product ID and version: <code>Ethernet Gateway Modem Emulator v0.5.2</code></td></tr>
         <tr><td><code>ATI1</code></td><td>ROM checksum: <code>000</code> (virtual)</td></tr>
         <tr><td><code>ATI2</code></td><td>ROM self-test: <code>OK</code></td></tr>
         <tr><td><code>ATI3</code></td><td>Firmware identifier: <code>Ethernet Gateway 0.3.3</code></td></tr>
@@ -2326,7 +2326,7 @@ run to completion rather than halt mid-setup with <code>ERROR</code>.
 <hr>
 
 <p class="small" style="margin-top: 1.5em; text-align: center;">
-Ethernet Gateway v0.5.1 &mdash; Copyright &copy; 2026 Ricky Bryce &mdash;
+Ethernet Gateway v0.5.2 &mdash; Copyright &copy; 2026 Ricky Bryce &mdash;
 Licensed under GPL-3.0-or-later.
 </p>
 
