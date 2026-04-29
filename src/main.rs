@@ -1,8 +1,11 @@
-//! XMODEM File Server
+//! Ethernet Gateway
 //!
-//! A telnet-based XMODEM file transfer server supporting PETSCII, ANSI, and
-//! ASCII terminals. Listens on a configurable port (default 2323) and provides
-//! upload, download, delete, and directory navigation over XMODEM protocol.
+//! Standalone telnet/SSH gateway for retro hardware (Commodore 64, CP/M,
+//! RC2014, AltairDuino) and modern terminals.  Bundles XMODEM/YMODEM/ZMODEM
+//! and Kermit file transfer, an SSH server + outbound SSH proxy, a Hayes-
+//! compatible serial-modem emulator, a text-mode web browser, an AI chat
+//! client, and a weather service — all driven from a single telnet menu
+//! that auto-detects PETSCII/ANSI/ASCII terminals.
 //!
 //! Author: Ricky Bryce
 

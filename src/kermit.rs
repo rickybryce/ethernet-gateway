@@ -14,15 +14,21 @@
 //! - Sliding windows (up to 31 outstanding packets).
 //! - Streaming Kermit (CAPAS streaming bit) — sender skips waiting for
 //!   per-packet ACKs on reliable links; receiver only sends NAK on error.
-//! - Attribute packets (file size, date, mode, system ID, encoding).
-//! - Server-mode subset: accept incoming G F (finish) and G L (logout)
-//!   politely; full server-mode is not implemented.
+//! - Attribute packets (file size, date, mode, system ID, encoding) per
+//!   spec §5.1, including the disposition='R' RESEND tag for resuming
+//!   partial uploads.
+//! - Full server-mode dispatch: accepts S (peer upload), R (peer download
+//!   request), G (DIR / SPACE / KERMIT / HELP / finish / cwd / ...), I
+//!   (re-init), B (clean EOT), E (peer abort).  Refuses C (host commands)
+//!   by design.
 //! - Telnet NVT awareness matches `xmodem.rs` / `zmodem.rs`: the raw I/O
 //!   layer handles IAC escaping and CR-NUL stuffing.
 //!
 //! Public surface (used by `telnet.rs`):
 //! - [`kermit_receive`] — read one or more files from the peer (upload).
 //! - [`kermit_send`] — send one or more files to the peer (download).
+//! - [`kermit_server`] — idle as a Kermit server until the peer sends
+//!   commands (file uploads, downloads, generic commands).
 //!
 //! Within a session we auto-detect the peer's flavor (C-Kermit, G-Kermit,
 //! Kermit-86, C64-Kermit, etc.) from its Send-Init parameters; flavor is
@@ -117,15 +123,15 @@ pub(crate) const CAPAS_LOCKING_SHIFT: u8 = 0x20;
 /// placement.
 pub(crate) const CAPAS_STREAMING_BYTE3_BIT: u8 = 0x04;
 
-// Telnet IAC + CAN handling now lives in `crate::tnio` (shared with
+// Telnet IAC + CAN handling lives in `crate::tnio` (shared with
 // xmodem.rs and zmodem.rs).  Kermit's CAN×2 abort uses
-// `tnio::is_can_abort`; raw I/O uses `tnio::raw_read_byte`,
-// `tnio::raw_write_bytes`, and `tnio::nvt_read_byte`.
+// `tnio::is_can_abort`; raw I/O uses `tnio::nvt_read_byte` +
+// `tnio::raw_write_bytes`.
 
 // Limits
-/// Maximum file size for a single Kermit transfer.  Matches the cap used
-/// for XMODEM / ZMODEM in this codebase.
-const MAX_FILE_SIZE: u64 = 8 * 1024 * 1024;
+/// Maximum file size for a single Kermit transfer.  Imported from
+/// `tnio` so all four protocols share the same cap.
+use crate::tnio::MAX_FILE_SIZE;
 /// Lower bound on negotiable packet length.  Spec says 10; below this
 /// the per-packet header overhead is too high to be useful.
 pub(crate) const MIN_PACKET_LEN: usize = 10;
@@ -1444,9 +1450,8 @@ pub(crate) struct KermitSendFile<'a> {
     pub mode: Option<u32>,
 }
 
-// Note: the high-level send/receive state machines are added in the
-// next module section — see implementations below the SEND-INIT
-// negotiation tests.
+// The high-level send/receive state machines live further down in
+// this file, after the SEND-INIT negotiation helpers.
 
 /// Build a Kermit Send-Init capability struct from the gateway's
 /// configured options.  Used by both `kermit_send` and `kermit_receive`
@@ -3175,11 +3180,11 @@ pub(crate) async fn kermit_receive_with_init(
             Some(neg_deadline),
         )
         .await
-        .map_err(|e| format!("Kermit recv: Send-Init read failed: {}", e))?,
+        .map_err(|e| format!("Kermit: Send-Init read failed: {}", e))?,
     };
     if s_pkt.kind != TYPE_SEND_INIT {
         return Err(format!(
-            "Kermit recv: expected Send-Init, got '{}'",
+            "Kermit: expected Send-Init, got '{}'",
             s_pkt.kind as char
         ));
     }
@@ -3240,7 +3245,7 @@ pub(crate) async fn kermit_receive_with_init(
     // file is found on disk; consumed in the A-packet handler to
     // advertise disposition='R' + length=offset back to the sender.
     // Cleared after the A-packet is acknowledged so subsequent files
-    // in a batch each get their own lookup (commit-3 territory).
+    // in a batch each get their own lookup.
     let mut pending_resume_offset: Option<u64> = None;
     // Bound the read-error retry chain so a wedged peer can't keep
     // us NAKing forever.  Resets on any successful packet.
@@ -3322,7 +3327,7 @@ pub(crate) async fn kermit_receive_with_init(
 
         if pkt.kind == TYPE_ERROR {
             let msg = decode_error_message(&pkt.payload, recv_q);
-            return Err(format!("Kermit recv: peer sent E-packet: {}", msg));
+            return Err(format!("Kermit: peer sent E-packet: {}", msg));
         }
 
         if pkt.seq != expected_seq {
@@ -3684,7 +3689,7 @@ pub(crate) async fn kermit_receive_with_init(
                         is_tcp,
                     )
                     .await?;
-                    return Err("Kermit recv: D-packet before F-packet".into());
+                    return Err("Kermit: D-packet before F-packet".into());
                 };
                 if last.data.len() + raw.len() > MAX_FILE_SIZE as usize {
                     send_error(
@@ -3698,7 +3703,7 @@ pub(crate) async fn kermit_receive_with_init(
                         is_tcp,
                     )
                     .await?;
-                    return Err("Kermit recv: file size cap exceeded".into());
+                    return Err("Kermit: file size cap exceeded".into());
                 }
                 d_packets_received += 1;
                 if verbose && d_packets_received <= D_PACKET_TRACE_LIMIT {
@@ -3744,7 +3749,7 @@ pub(crate) async fn kermit_receive_with_init(
                         is_tcp,
                     )
                     .await?;
-                    return Err("Kermit recv: Z-packet before F-packet".into());
+                    return Err("Kermit: Z-packet before F-packet".into());
                 }
                 if verbose {
                     glog!("Kermit recv: Z-packet — file complete");
@@ -3999,9 +4004,10 @@ async fn send_g_inverse_file_response(
 
 /// Multi-line help text sent in response to `G H` (or `G ?`).  Lists
 /// every G subcommand we recognise so a peer doing `remote help`
-/// gets a useful answer instead of a no-op ACK.  Kept ASCII-only and
-/// short enough to span just a couple paginated X-packets at the
-/// 80-byte classic-MAXL ceiling.
+/// gets a useful answer instead of a no-op ACK.  Kept ASCII-only —
+/// the body rides D-packets inside the inverse-file-transfer reply
+/// shape (S → X → D…D → Z → B), so length is bounded by the negotiated
+/// MAXL rather than the classic 94-byte short-packet ceiling.
 fn kermit_g_help_text() -> &'static str {
     "Ethernet Gateway Kermit server.\n\
      Supported generic commands (G):\n\
@@ -4166,7 +4172,10 @@ pub(crate) async fn kermit_server(
                 // Generic-command dispatch.  Per Frank da Cruz spec §6:
                 // F=Finish, L=Logout, B=BYE end the session;
                 // C=CWD updates per-session subdir;
-                // D=DIR / $=SPACE / K=KERMIT reply with X+Z text data.
+                // D=DIR / $=SPACE / K=KERMIT / H=HELP / ?=HELP drive an
+                // inverse file transfer (S → X → D…D → Z → B) carrying
+                // the text body — the X header marks it as text-for-
+                // display per Frank da Cruz §5.3.
                 // Anything else is acknowledged and ignored — that's
                 // the spec-compliant fallback for unknown subcommands.
                 let recv_q = Quoting {
@@ -4494,9 +4503,9 @@ pub(crate) async fn kermit_server(
 /// typically a single entry, but the receiver naturally tolerates a
 /// batch if the server sends one.
 //
-// `#[allow(dead_code)]` lifts the warning until telnet.rs grows a
-// "Pull from remote Kermit" menu entry (Gap 3b commit 3 or later).
-// The fn is already exercised by the unit tests below.
+// `#[allow(dead_code)]` keeps the function as intentional client-side
+// API surface even though no telnet.rs menu entry currently calls it.
+// The unit tests below exercise it end-to-end.
 #[allow(dead_code)]
 pub(crate) async fn kermit_client_get(
     reader: &mut (impl AsyncRead + Unpin),
@@ -6016,10 +6025,10 @@ mod tests {
         assert!(parse_kermit_date("").is_none());
     }
 
-    // CAN×2 abort state machine moved to tnio.rs (shared across
+    // CAN×2 abort state machine lives in tnio.rs (shared across
     // xmodem and kermit).  See `tnio::tests::test_can_abort_state_machine`.
 
-    // ---------- Server-mode dispatch (Gap 3a commit 1) ----------
+    // ---------- Server-mode dispatch ----------
 
     use tokio::io::{duplex, split, AsyncReadExt, AsyncWriteExt};
 
@@ -6175,8 +6184,8 @@ mod tests {
         // Verify by sending a follow-up B and expecting a second ACK.
         let ((), result) = run_server_with_client(async |w, r| {
             // Custom unknown G subcommand 'X' — server must ACK and
-            // continue, not exit.  BYE/CWD/DIR/SPACE/KERMIT will be
-            // wired in commit 3.
+            // continue, not exit.  Spec §6.7 fallback for unknown G
+            // subcommands: silent ACK.
             w.write_all(&wire_packet(TYPE_GENERIC, 0, b"X")).await.unwrap();
             let resp = read_server_packet(r).await;
             assert_eq!(resp.kind, TYPE_ACK, "G X should be ACKed");
@@ -7125,7 +7134,7 @@ mod tests {
         result.unwrap();
     }
 
-    // ---------- Client-mode dispatch (Gap 3b commit 1) ----------
+    // ---------- Client-mode dispatch ----------
 
     /// Drive both a `kermit_client_get` and a `kermit_server` in
     /// duplex pipes.  Returns the client's GET result so tests can
@@ -7625,7 +7634,6 @@ mod tests {
         config::update_config_value("kermit_attribute_packets", "true");
         config::update_config_value("kermit_repeat_compression", "true");
         config::update_config_value("kermit_8bit_quote", "auto");
-        config::update_config_value("kermit_iac_escape", "false");
     }
 
     /// Serialises tests that mutate the global config singleton.  Held

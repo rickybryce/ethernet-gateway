@@ -31,7 +31,10 @@ pub(crate) const XMODEM_BLOCK_SIZE: usize = 128;
 /// branches on the `SOH` / `STX` header byte to know which one arrived.
 pub(crate) const XMODEM_1K_BLOCK_SIZE: usize = 1024;
 
-const MAX_FILE_SIZE: usize = 8 * 1024 * 1024;
+/// Hard cap on file size — sourced from `tnio::MAX_FILE_SIZE` so all
+/// four protocols agree on a single value.  Cast to `usize` once here
+/// because XMODEM's frame counter is already `usize`.
+const MAX_FILE_SIZE: usize = crate::tnio::MAX_FILE_SIZE as usize;
 /// Time allowed for the full 131-byte block body (after SOH) to arrive.
 const BLOCK_BODY_TIMEOUT_SECS: u64 = 60;
 
@@ -707,7 +710,7 @@ pub(crate) async fn xmodem_send(
 
     // Drain any trailing negotiation bytes (e.g. IMP8 sends 'C' then 'K' for
     // XMODEM-1K; we accepted 'C' but 'K' is still in the buffer).
-    // Uses raw_read_byte to properly handle any IAC sequences on TCP.
+    // Uses nvt_read_byte to properly handle any IAC sequences on TCP.
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     while let Ok(Ok(b)) = tokio::time::timeout(
         std::time::Duration::from_millis(50),

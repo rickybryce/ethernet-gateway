@@ -102,16 +102,11 @@ const DEFAULT_KERMIT_REPEAT_COMPRESSION: bool = true;
 /// Kermit 8th-bit quoting policy: "auto" (only when peer asks),
 /// "on" (always), "off" (never).
 const DEFAULT_KERMIT_8BIT_QUOTE: &str = "auto";
-/// Kermit per-session telnet IAC escape — separate from XMODEM's
-/// `xmodem_iac` so an operator can run telnet ↔ raw-bytes Kermit
-/// transfers independently of the XMODEM family setting.
-const DEFAULT_KERMIT_IAC_ESCAPE: bool = false;
 /// Resume partial uploads (Frank da Cruz spec §5.1, disposition='R').
 /// When true, the receiver tells the sender to skip bytes already on
 /// disk under `transfer_dir/<filename>`.  Default false: opt-in,
 /// because a peer that ignores disposition='R' would re-send from
-/// byte 0 and produce a corrupted file once we land the receiver
-/// pre-load logic in commit 2.
+/// byte 0 against our pre-loaded partial and corrupt the result.
 const DEFAULT_KERMIT_RESUME_PARTIAL: bool = false;
 /// Maximum age (hours) of a partial file we'll resume.  Older
 /// partials are treated as stale rot rather than legitimate
@@ -237,8 +232,6 @@ pub struct Config {
     pub kermit_repeat_compression: bool,
     /// 8th-bit quoting policy: "auto" / "on" / "off".
     pub kermit_8bit_quote: String,
-    /// Telnet IAC escape during Kermit transfers.
-    pub kermit_iac_escape: bool,
     /// Resume partial uploads via the spec's disposition='R' tag in the
     /// receiver's A-packet ACK.  Off by default; flip on once both sides
     /// are known to honor it (we ship sender support in a follow-up).
@@ -335,7 +328,6 @@ impl Default for Config {
             kermit_attribute_packets: DEFAULT_KERMIT_ATTRIBUTE_PACKETS,
             kermit_repeat_compression: DEFAULT_KERMIT_REPEAT_COMPRESSION,
             kermit_8bit_quote: DEFAULT_KERMIT_8BIT_QUOTE.into(),
-            kermit_iac_escape: DEFAULT_KERMIT_IAC_ESCAPE,
             kermit_resume_partial: DEFAULT_KERMIT_RESUME_PARTIAL,
             kermit_resume_max_age_hours: DEFAULT_KERMIT_RESUME_MAX_AGE_HOURS,
             kermit_locking_shifts: DEFAULT_KERMIT_LOCKING_SHIFTS,
@@ -580,10 +572,6 @@ fn read_config_file(path: &str) -> Config {
             .map(|v| v.trim().to_ascii_lowercase())
             .filter(|v| matches!(v.as_str(), "auto" | "on" | "off"))
             .unwrap_or_else(|| DEFAULT_KERMIT_8BIT_QUOTE.into()),
-        kermit_iac_escape: map
-            .get("kermit_iac_escape")
-            .map(|v| v.eq_ignore_ascii_case("true"))
-            .unwrap_or(DEFAULT_KERMIT_IAC_ESCAPE),
         kermit_resume_partial: map
             .get("kermit_resume_partial")
             .map(|v| v.eq_ignore_ascii_case("true"))
@@ -824,7 +812,6 @@ zmodem_negotiation_retry_interval = {}
 # kermit_attribute_packets:    advertise A-packet (file metadata) support.
 # kermit_repeat_compression:   use repeat-count compression (RLE).
 # kermit_8bit_quote:           auto (only when peer asks), on, or off.
-# kermit_iac_escape:           apply telnet IAC escaping during transfers.
 # kermit_resume_partial:       resume partial uploads (spec disposition='R').
 #                              Off by default; turn on only when the peer is
 #                              known to honor disposition='R' in the A-packet
@@ -850,7 +837,6 @@ kermit_streaming = {}
 kermit_attribute_packets = {}
 kermit_repeat_compression = {}
 kermit_8bit_quote = {}
-kermit_iac_escape = {}
 kermit_resume_partial = {}
 kermit_resume_max_age_hours = {}
 kermit_locking_shifts = {}
@@ -950,7 +936,6 @@ ssh_gateway_auth = {}
         cfg.kermit_attribute_packets,
         cfg.kermit_repeat_compression,
         sanitize_value(&cfg.kermit_8bit_quote),
-        cfg.kermit_iac_escape,
         cfg.kermit_resume_partial,
         cfg.kermit_resume_max_age_hours,
         cfg.kermit_locking_shifts,
@@ -1156,9 +1141,6 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
             if matches!(lower.as_str(), "auto" | "on" | "off") {
                 cfg.kermit_8bit_quote = lower;
             }
-        }
-        "kermit_iac_escape" => {
-            cfg.kermit_iac_escape = value.eq_ignore_ascii_case("true");
         }
         "kermit_resume_partial" => {
             cfg.kermit_resume_partial = value.eq_ignore_ascii_case("true");
@@ -1406,7 +1388,6 @@ mod tests {
         assert!(cfg.kermit_attribute_packets);
         assert!(cfg.kermit_repeat_compression);
         assert_eq!(cfg.kermit_8bit_quote, "auto");
-        assert!(!cfg.kermit_iac_escape);
         assert!(!cfg.kermit_resume_partial);
         assert_eq!(cfg.kermit_resume_max_age_hours, 168);
         assert!(!cfg.kermit_locking_shifts);
@@ -1597,7 +1578,6 @@ mod tests {
             kermit_attribute_packets: false,
             kermit_repeat_compression: false,
             kermit_8bit_quote: "on".into(),
-            kermit_iac_escape: true,
             kermit_resume_partial: true,
             kermit_resume_max_age_hours: 72,
             kermit_locking_shifts: true,
@@ -1693,7 +1673,6 @@ mod tests {
             original.kermit_repeat_compression
         );
         assert_eq!(loaded.kermit_8bit_quote, original.kermit_8bit_quote);
-        assert_eq!(loaded.kermit_iac_escape, original.kermit_iac_escape);
         assert_eq!(
             loaded.kermit_resume_partial,
             original.kermit_resume_partial

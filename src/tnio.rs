@@ -43,6 +43,16 @@ pub(crate) const DONT: u8 = 254;
 /// considered line noise.
 pub(crate) const CAN: u8 = 0x18;
 
+/// Hard cap on any single file we'll send or receive across XMODEM /
+/// YMODEM / ZMODEM / Kermit.  8 MiB matches the historical cap from
+/// when each protocol module owned its own copy of the constant; lifted
+/// here so the protocols agree on a single value rather than each
+/// importing their own slightly-typed copy.  Protocol modules can cast
+/// to their preferred integer width — kermit/zmodem use this as `u64`
+/// directly, xmodem treats it as `usize` since its frame counter is
+/// already `usize`-shaped.
+pub(crate) const MAX_FILE_SIZE: u64 = 8 * 1024 * 1024;
+
 // ─── Per-stream read state ───────────────────────────────────
 
 /// State threaded through the byte readers so they can implement
