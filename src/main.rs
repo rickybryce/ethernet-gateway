@@ -23,9 +23,15 @@ mod xmodem;
 mod zmodem;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use logger::glog;
+
+/// Shared slot the GUI fills with its `egui::Context` on startup so the
+/// signal watcher can wake the event loop on Ctrl-C — without this nudge,
+/// winit may sit idle waiting for a platform event that never arrives
+/// and miss the shutdown flag transition.
+type GuiCtxSlot = Arc<Mutex<Option<eframe::egui::Context>>>;
 
 fn main() {
     logger::init();
@@ -38,9 +44,10 @@ fn main() {
     let shutdown = Arc::new(AtomicBool::new(false));
     let restart = Arc::new(AtomicBool::new(false));
     let shutdown_notify = Arc::new(tokio::sync::Notify::new());
+    let gui_ctx: GuiCtxSlot = Arc::new(Mutex::new(None));
 
     // Register POSIX signal handlers (SIGINT, SIGTERM, SIGHUP)
-    register_signal_handlers(shutdown.clone(), shutdown_notify.clone());
+    register_signal_handlers(shutdown.clone(), shutdown_notify.clone(), gui_ctx.clone());
 
     loop {
         // Load or create config (re-read from disk on each restart)
@@ -122,7 +129,7 @@ fn main() {
 
         if gui_cfg.enable_console {
             // GUI blocks the main thread until the window is closed.
-            gui::run(gui_cfg, shutdown.clone(), restart.clone());
+            gui::run(gui_cfg, shutdown.clone(), restart.clone(), gui_ctx.clone());
             if !restart.load(Ordering::SeqCst) {
                 // Window closed manually — fall through to headless wait so the server
                 // keeps running in the background until Ctrl-C / SIGTERM.
@@ -159,7 +166,11 @@ fn main() {
 }
 
 /// Register handlers for SIGINT, SIGTERM, and SIGHUP using signal-hook.
-fn register_signal_handlers(shutdown: Arc<AtomicBool>, notify: Arc<tokio::sync::Notify>) {
+fn register_signal_handlers(
+    shutdown: Arc<AtomicBool>,
+    notify: Arc<tokio::sync::Notify>,
+    gui_ctx: GuiCtxSlot,
+) {
     use signal_hook::consts::{SIGINT, SIGTERM};
 
     // signal-hook's flag::register sets the AtomicBool on signal delivery
@@ -184,6 +195,13 @@ fn register_signal_handlers(shutdown: Arc<AtomicBool>, notify: Arc<tokio::sync::
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
             notify.notify_waiters();
+            // Force the GUI event loop to repaint so it picks up the
+            // shutdown flag immediately.  Otherwise winit can sit idle
+            // waiting for a platform event and the close command queued
+            // by `update()` never gets a chance to fire.
+            if let Some(ctx) = gui_ctx.lock().unwrap().as_ref() {
+                ctx.request_repaint();
+            }
             // Wait for the flag to be reset (restart) before watching again
             while shutdown_watch.load(Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_millis(100));
@@ -214,8 +232,9 @@ mod tests {
         // Verify that signal registration doesn't panic
         let shutdown = Arc::new(AtomicBool::new(false));
         let notify = Arc::new(tokio::sync::Notify::new());
+        let gui_ctx: GuiCtxSlot = Arc::new(Mutex::new(None));
         // This should not panic — signals can be registered multiple times
-        register_signal_handlers(shutdown, notify);
+        register_signal_handlers(shutdown, notify, gui_ctx);
     }
 
     #[test]

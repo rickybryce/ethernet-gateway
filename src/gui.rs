@@ -38,7 +38,15 @@ const POPUP_INPUT_BG: Color32 = Color32::from_rgb(0x1c, 0x46, 0x2a); // brighter
 /// Launch the GUI window.  Blocks the calling thread until the window is closed.
 /// If the GUI fails to start (e.g. missing graphics drivers), logs the error and
 /// returns so the server continues running headless.
-pub fn run(cfg: Config, shutdown: Arc<AtomicBool>, restart: Arc<AtomicBool>) {
+///
+/// `gui_ctx` is a shared slot the app fills with its `egui::Context` on startup
+/// so the signal watcher can wake the event loop on Ctrl-C.
+pub fn run(
+    cfg: Config,
+    shutdown: Arc<AtomicBool>,
+    restart: Arc<AtomicBool>,
+    gui_ctx: Arc<std::sync::Mutex<Option<egui::Context>>>,
+) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let options = eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
@@ -51,7 +59,8 @@ pub fn run(cfg: Config, shutdown: Arc<AtomicBool>, restart: Arc<AtomicBool>) {
         eframe::run_native(
             "Ethernet Gateway",
             options,
-            Box::new(|cc| {
+            Box::new(move |cc| {
+                *gui_ctx.lock().unwrap() = Some(cc.egui_ctx.clone());
                 egui_extras::install_image_loaders(&cc.egui_ctx);
                 Ok(Box::new(App::new(cfg, shutdown, restart)))
             }),
