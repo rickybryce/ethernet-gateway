@@ -1,4 +1,5 @@
-//! Telnet server for XMODEM file transfers and SSH gateway.
+//! Telnet server — session menu, file transfer (XMODEM/YMODEM/ZMODEM/
+//! Kermit), SSH gateway, AI chat, web browser, weather, modem emulator.
 //!
 //! Listens on a configurable port and supports three terminal types: ANSI
 //! (modern terminals), ASCII (no color), and PETSCII (Commodore 64). Terminal
@@ -1412,15 +1413,19 @@ pub(crate) struct TelnetSession {
     // from a raw TCP client (netcat, retro firmware) that just pipes
     // bytes.  Used to auto-enable IAC escaping only for real telnet.
     telnet_negotiated: bool,
-    // NAWS (window size), captured from SB NAWS. None if peer didn't
-    // negotiate. Not yet wired into layout code.
+    // NAWS (window size) from SB NAWS — fed into terminal-size queries
+    // (e.g. browser layout, menu pagination).  None if the peer didn't
+    // negotiate; callers fall back to TerminalType-driven defaults.
     window_width: Option<u16>,
     window_height: Option<u16>,
 }
 
 impl TelnetSession {
     const TRANSFER_PAGE_SIZE: usize = 10;
-    const MAX_FILE_SIZE: usize = 8 * 1024 * 1024;
+    /// File-size cap for upload/download UI; sourced from tnio so all
+    /// four protocols agree on a single value.  Cast to `usize` once
+    /// because telnet UI math is `usize`-shaped.
+    const MAX_FILE_SIZE: usize = crate::tnio::MAX_FILE_SIZE as usize;
     const MAX_FILENAME_LEN: usize = 64;
 
     /// Create a session for a serial modem connection.  Uses ASCII terminal
@@ -2180,9 +2185,8 @@ impl TelnetSession {
         // or `C` (binary/CRC-32).  Reading the full four-byte prefix
         // off the menu input loop is an unambiguous "the user's
         // terminal just tried to auto-start a ZMODEM transfer" signal
-        // — ZMODEM is not yet implemented, so we intercept, send the
-        // spec'd abort sequence, and bounce back to the menu with an
-        // explanation instead of leaving the receiver hanging.
+        // — bridge directly into the ZMODEM receive flow so the upload
+        // succeeds without the user having to navigate the menu first.
         let mut zmodem_state: u8 = 0;
         loop {
             let byte = match self.read_byte_filtered().await? {
@@ -2345,39 +2349,139 @@ impl TelnetSession {
     }
 
     /// Handle a detected ZMODEM autostart prefix (`**\x18[ABC]`) on the
-    /// menu input stream.  Emits the protocol-standard abort (5 × CAN)
-    /// so the client's terminal bails out of ZMODEM receive mode, then
-    /// drains any trailing ZMODEM bytes, then displays a user-friendly
-    /// message explaining that ZMODEM isn't implemented yet.  The
-    /// caller re-renders the menu afterwards.
+    /// menu input stream.  The four leading bytes have already been
+    /// consumed by the menu state machine; the rest of the partial
+    /// ZRQINIT header (and any retransmits) sit on the wire.  We drain
+    /// them, set up the transfer directory, and hand off to the regular
+    /// `zmodem_receive` flow — once we emit our `rz\r` + ZRINIT the
+    /// sender's protocol retry will resync regardless of what we just
+    /// drained.  Files are saved using the sender's filename (after
+    /// path validation), with `apply_ymodem_meta` applied for mtime /
+    /// mode so the upload behaves identically to a menu-initiated
+    /// `Z` upload.
     async fn handle_zmodem_autostart(&mut self) -> Result<(), std::io::Error> {
-        glog!("File transfer: ZMODEM autostart detected; sending abort");
-        // Standard ZMODEM abort sequence: 5 × CAN (0x18).  Clients in
-        // ZMODEM receive mode will see this and return to interactive
-        // terminal mode.
-        self.send_raw(&[0x18; 5]).await?;
-        // Followed by a few backspaces — the convention is CAN*5 then
-        // BS*5 to wipe the "rz\r" prompt some senders emit before the
-        // ZMODEM header.
-        self.send_raw(&[0x08; 5]).await?;
-        self.flush().await?;
-        // Give the client a moment to exit ZMODEM mode, then drain any
-        // remaining frames it was sending.
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        glog!("File transfer: ZMODEM autostart detected; switching to receive");
+        // Drain residual ZRQINIT bytes the sender already pushed before
+        // we got a chance to start the receiver — the sender will
+        // retransmit once it sees our ZRINIT below.
         self.drain_input().await;
+
+        self.ensure_transfer_dir().await?;
+        if Self::is_disk_full() {
+            self.show_error("Disk is full. Cannot accept upload.")
+                .await?;
+            return Ok(());
+        }
 
         self.send_line("").await?;
         self.send_line(&format!(
             "  {}",
-            self.yellow("ZMODEM autostart detected — aborting.")
+            self.green("ZMODEM upload detected — receiving...")
         ))
         .await?;
-        self.send_line("  ZMODEM is not yet supported by this server.").await?;
-        self.send_line(
-            "  Please use XMODEM, XMODEM-1K, or YMODEM from",
-        )
+        self.flush().await?;
+
+        let verbose = config::get_config().verbose;
+        let target_dir = self.transfer_path();
+        let target_dir_for_decide = target_dir.clone();
+        // Auto-accept anything with a valid filename that doesn't
+        // already exist.  Same sanitation as the interactive batch
+        // upload's "subsequent files" path.
+        let decide = move |_idx: usize, sender_name: &str, _size: Option<u64>| -> bool {
+            if Self::validate_filename(sender_name).is_err() {
+                return false;
+            }
+            !target_dir_for_decide.join(sender_name).exists()
+        };
+
+        let start = std::time::Instant::now();
+        let result = {
+            let mut writer_guard = self.writer.lock().await;
+            crate::zmodem::zmodem_receive(
+                &mut self.reader,
+                &mut *writer_guard,
+                self.xmodem_iac,
+                verbose,
+                decide,
+            )
+            .await
+        };
+        let elapsed = start.elapsed();
+
+        let received = match result {
+            Ok(rxs) => rxs,
+            Err(e) => {
+                self.post_transfer_settle().await;
+                self.show_error(&format!("ZMODEM receive failed: {}", e))
+                    .await?;
+                return Ok(());
+            }
+        };
+
+        // Save each accepted file with the sender's name + metadata.
+        // Files the decide closure rejected aren't in `received` at all
+        // — the sender saw a ZSKIP and moved on — so any skips here
+        // are post-receive failures (write error, race on existence).
+        let mut saved: Vec<(String, usize)> = Vec::new();
+        let mut skipped: Vec<(String, &'static str)> = Vec::new();
+        for rx in &received {
+            if Self::validate_filename(&rx.filename).is_err() {
+                skipped.push((rx.filename.clone(), "invalid filename"));
+                continue;
+            }
+            let filepath = target_dir.join(&rx.filename);
+            if filepath.exists() {
+                skipped.push((rx.filename.clone(), "already exists"));
+                continue;
+            }
+            match std::fs::write(&filepath, &rx.data) {
+                Ok(()) => {
+                    let meta = crate::xmodem::YmodemReceiveMeta {
+                        size: None,
+                        modtime: rx.modtime,
+                        mode: rx.mode,
+                    };
+                    Self::apply_ymodem_meta(&filepath, Some(&meta));
+                    saved.push((rx.filename.clone(), rx.data.len()));
+                }
+                Err(_) => {
+                    skipped.push((rx.filename.clone(), "write failed"));
+                }
+            }
+        }
+
+        self.post_transfer_settle().await;
+        self.send_line("").await?;
+        self.send_line(&format!(
+            "  ZMODEM upload completed in {:.1}s.",
+            elapsed.as_secs_f64()
+        ))
         .await?;
-        self.send_line("  the File Transfer menu instead.").await?;
+        self.send_line(&format!(
+            "  Received: {} file(s), saved: {}, skipped: {}.",
+            received.len(),
+            saved.len(),
+            skipped.len()
+        ))
+        .await?;
+        for (name, size) in &saved {
+            self.send_line(&format!(
+                "    {} {} ({} bytes)",
+                self.green("✓"),
+                self.amber(name),
+                size
+            ))
+            .await?;
+        }
+        for (name, reason) in &skipped {
+            self.send_line(&format!(
+                "    {} {} ({})",
+                self.red("✗"),
+                self.amber(name),
+                reason
+            ))
+            .await?;
+        }
         self.send_line("").await?;
         self.send("  Press any key to continue.").await?;
         self.flush().await?;
@@ -3760,7 +3864,6 @@ impl TelnetSession {
             }
             !transfer_path.join(sender_name).exists()
         };
-        let kermit_iac = config::get_config().kermit_iac_escape;
         let is_petscii = self.terminal_type == TerminalType::Petscii;
         // Captured by the Kermit branch's mapping closure when the
         // peer's flavor is detected.  Surfaced in the post-transfer
@@ -3777,7 +3880,19 @@ impl TelnetSession {
             .await
             .map(|rxs| {
                 rxs.into_iter()
-                    .map(|rx| (Some(rx.filename), rx.data, None))
+                    .map(|rx| {
+                        // ZFILE info per Forsberg §11 carries length / mtime
+                        // / mode — feed them into apply_ymodem_meta so the
+                        // saved file gets the sender's mtime + permissions
+                        // (matching YMODEM and Kermit behavior).
+                        let meta = (rx.modtime.is_some() || rx.mode.is_some())
+                            .then_some(crate::xmodem::YmodemReceiveMeta {
+                                size: None,
+                                modtime: rx.modtime,
+                                mode: rx.mode,
+                            });
+                        (Some(rx.filename), rx.data, meta)
+                    })
                     .collect()
             }),
             UploadProtocol::XmodemYmodem => crate::xmodem::xmodem_receive(
@@ -3792,7 +3907,7 @@ impl TelnetSession {
             UploadProtocol::Kermit => crate::kermit::kermit_receive(
                 &mut self.reader,
                 &mut *writer_guard,
-                kermit_iac,
+                self.xmodem_iac,
                 is_petscii,
                 verbose,
             )
@@ -4305,7 +4420,6 @@ impl TelnetSession {
             )
             .await
         } else if matches!(protocol, DownloadProtocol::Kermit) {
-            let kermit_iac = config::get_config().kermit_iac_escape;
             let is_petscii = self.terminal_type == TerminalType::Petscii;
             let files = vec![crate::kermit::KermitSendFile {
                 name: filename,
@@ -4317,7 +4431,7 @@ impl TelnetSession {
                 &mut self.reader,
                 &mut *writer_guard,
                 &files,
-                kermit_iac,
+                self.xmodem_iac,
                 is_petscii,
                 verbose,
             )
@@ -4488,7 +4602,6 @@ impl TelnetSession {
         self.flush().await?;
 
         let verbose = config::get_config().verbose;
-        let kermit_iac = config::get_config().kermit_iac_escape;
         let is_petscii = self.terminal_type == TerminalType::Petscii;
 
         let start = std::time::Instant::now();
@@ -4497,7 +4610,7 @@ impl TelnetSession {
             crate::kermit::kermit_server(
                 &mut self.reader,
                 &mut *writer_guard,
-                kermit_iac,
+                self.xmodem_iac,
                 is_petscii,
                 verbose,
             )
@@ -6615,7 +6728,7 @@ impl TelnetSession {
             if cfg.serial_enabled {
                 self.send_line(&format!(
                     "  {}",
-                    self.amber("ATD XMODEM-GATEWAY")
+                    self.amber("ATD ETHERNET-GATEWAY")
                 ))
                 .await?;
             }
@@ -9221,10 +9334,9 @@ impl TelnetSession {
             ))
             .await?;
             self.send_line(&format!(
-                "  Attrs: {}  Repeat: {}  IAC: {}",
+                "  Attrs: {}  Repeat: {}",
                 self.amber(if cfg.kermit_attribute_packets { "on" } else { "off" }),
                 self.amber(if cfg.kermit_repeat_compression { "on" } else { "off" }),
-                self.amber(if cfg.kermit_iac_escape { "on" } else { "off" }),
             ))
             .await?;
             self.send_line(&format!(
@@ -9265,9 +9377,8 @@ impl TelnetSession {
             ))
             .await?;
             self.send_line(&format!(
-                "  {}  Toggle repeat       {}  Toggle IAC escape",
+                "  {}  Toggle repeat",
                 self.cyan("E"),
-                self.cyan("I")
             ))
             .await?;
             self.send_line(&format!(
@@ -9397,14 +9508,6 @@ impl TelnetSession {
                         "Repeat compression",
                         "kermit_repeat_compression",
                         cfg.kermit_repeat_compression,
-                    )
-                    .await?;
-                }
-                "i" => {
-                    self.kermit_toggle_bool(
-                        "IAC escape",
-                        "kermit_iac_escape",
-                        cfg.kermit_iac_escape,
                     )
                     .await?;
                 }

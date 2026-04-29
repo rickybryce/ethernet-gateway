@@ -1,23 +1,26 @@
 //! ZMODEM Protocol Module
 //!
-//! Implements the core ZMODEM file transfer protocol (Chuck Forsberg,
-//! 1988) as used by lrzsz, SyncTerm, HyperTerminal, etc.  Covers the
-//! single-file send and receive paths needed by the gateway.
+//! Implements the ZMODEM file transfer protocol per Forsberg 1988, as
+//! used by lrzsz, SyncTerm, HyperTerminal, etc.  Both directions
+//! support batch mode (Forsberg §4) — multiple files in a single
+//! session, with ZSKIP per-file rejection on the receiver side.
 //!
 //! Design notes:
-//! - Stop-and-wait flow control (window size 0) using ZCRCW data
-//!   subpackets.  Slower than streaming but vastly simpler and very
-//!   widely interoperable.
-//! - CRC-16 (poly 0x1021, same as XMODEM CRC) is used by default.  The
-//!   receiver advertises CRC-32 capability so we can read either flavour
-//!   of incoming data subpacket; our outgoing data always uses CRC-16.
-//! - Telnet NVT awareness matches `xmodem.rs`: the raw I/O layer handles
-//!   IAC escaping and CR-NUL stuffing.  ZDLE escaping is layered above.
-//! - No resume, no compression, no batch mode — one file per session.
+//! - Stop-and-wait flow control using ZCRCQ mid-frame and ZCRCE
+//!   end-of-frame markers.  Our ZRINIT advertises CANFDX|CANOVIO|
+//!   CANFC32 but we don't require streaming — slower in theory, but
+//!   vastly simpler and broadly interoperable.
+//! - CRC-16 (poly 0x1021, same as XMODEM CRC) by default; the receiver
+//!   accepts CRC-32 as well.  Outgoing data always uses CRC-16.
+//! - ZFILE info per Forsberg §11 carries length, mtime, mode — we
+//!   parse all three and propagate mtime/mode to the saved file via
+//!   apply_ymodem_meta in telnet.rs.
+//! - Telnet NVT awareness matches `xmodem.rs`: tnio.rs handles IAC
+//!   escaping and CR-NUL stuffing; ZDLE escaping layers above.
 //!
 //! Public surface (used by `telnet.rs`):
-//! - [`zmodem_receive`] — read a single file from the peer (upload)
-//! - [`zmodem_send`] — send a single file to the peer (download)
+//! - [`zmodem_receive`] — receive one or more files from the peer
+//! - [`zmodem_send`] — send one or more files to the peer
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -69,7 +72,7 @@ const CANFC32: u8 = 0x20;       // can receive CRC-32 frames
 // and kermit).
 
 // Limits
-const MAX_FILE_SIZE: u64 = 8 * 1024 * 1024;
+use crate::tnio::MAX_FILE_SIZE;
 const SUBPACKET_DATA_SIZE: usize = 1024;
 const MAX_SUBPACKET_DATA: usize = 8192;
 // Protocol timeouts and retry caps are no longer compile-time constants —
@@ -562,6 +565,23 @@ pub(crate) struct ZmodemReceive {
     /// validation rules applied to user input).
     pub filename: String,
     pub data: Vec<u8>,
+    /// Sender-supplied modification time (Unix epoch seconds) from the
+    /// ZFILE info string per Forsberg §11.4.  `None` if the sender
+    /// omitted the field or it failed to parse.
+    pub modtime: Option<u64>,
+    /// Sender-supplied Unix file mode bits from the ZFILE info string.
+    /// `None` if absent or unparseable.
+    pub mode: Option<u32>,
+}
+
+/// Parsed view of a ZFILE block-0 info string.  Extracted as a
+/// separate struct so callers can pick up the metadata fields without
+/// the function signature changing each time we add another.
+pub(crate) struct ZfileInfo {
+    pub filename: String,
+    pub length: Option<u64>,
+    pub modtime: Option<u64>,
+    pub mode: Option<u32>,
 }
 
 /// Receive one or more files via ZMODEM (batch mode, per Forsberg §4).
@@ -811,13 +831,19 @@ where
 
     // Read ZFILE subpacket: filename \0 size [modtime [mode [...]]] \0
     let sub = read_subpacket(reader, is_tcp, state, crc_kind, MAX_SUBPACKET_DATA).await?;
-    let (filename, expected_size) = parse_zfile_info(&sub.data)?;
+    let info = parse_zfile_info(&sub.data)?;
+    let filename = info.filename;
+    let expected_size = info.length;
+    let modtime = info.modtime;
+    let mode = info.mode;
     if verbose {
         glog!(
-            "ZMODEM recv: ZFILE #{} filename='{}' size={}",
+            "ZMODEM recv: ZFILE #{} filename='{}' size={} modtime={:?} mode={:?}",
             file_index,
             filename,
-            expected_size.unwrap_or(0)
+            expected_size.unwrap_or(0),
+            modtime,
+            mode.map(|m| format!("{:o}", m)),
         );
     }
     if let Some(sz) = expected_size {
@@ -1005,15 +1031,19 @@ where
     Ok(Some(ZmodemReceive {
         filename,
         data: file_data,
+        modtime,
+        mode,
     }))
 }
 
-/// Extract filename and optional declared length from the ZFILE block-0
-/// subpacket.  Layout per spec: `<filename>\0<length> <modtime> <mode>
-/// <serial> <files-left> <bytes-left>\0` — we only parse filename and
-/// length; everything else is ignored.  The length field is decimal
-/// ASCII and may be absent on minimal senders.
-fn parse_zfile_info(data: &[u8]) -> Result<(String, Option<u64>), String> {
+/// Extract filename and metadata from the ZFILE block-0 subpacket.
+/// Layout per Forsberg §11: `<filename>\0<length> <modtime> <mode>
+/// <serial> <files-left> <bytes-left>\0`.  Length is decimal; modtime
+/// and mode are octal (Forsberg §11.4: modtime = "octal number giving
+/// the time the contents of the file were last changed measured in
+/// seconds from Jan 1 1970 UTC").  All metadata fields after filename
+/// are optional — minimal senders may omit them.
+fn parse_zfile_info(data: &[u8]) -> Result<ZfileInfo, String> {
     let nul = data
         .iter()
         .position(|&b| b == 0)
@@ -1022,28 +1052,37 @@ fn parse_zfile_info(data: &[u8]) -> Result<(String, Option<u64>), String> {
         .map_err(|_| "ZMODEM: filename is not valid UTF-8".to_string())?
         .to_string();
     let rest = &data[nul + 1..];
-    // Second field is ascii decimal length, optionally followed by
-    // space-separated metadata.
-    let size = rest
+    // Tokenize the remainder on space or NUL.  Order is fixed by spec:
+    // length, modtime, mode, serial, files-left, bytes-left.
+    let mut tokens = rest
         .split(|&b| b == b' ' || b == 0)
-        .find(|s| !s.is_empty())
-        .and_then(|s| std::str::from_utf8(s).ok())
-        .and_then(|s| s.parse::<u64>().ok());
-    Ok((filename, size))
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| std::str::from_utf8(s).ok());
+    let length = tokens.next().and_then(|s| s.parse::<u64>().ok());
+    let modtime = tokens.next().and_then(|s| u64::from_str_radix(s, 8).ok());
+    let mode = tokens.next().and_then(|s| u32::from_str_radix(s, 8).ok());
+    Ok(ZfileInfo {
+        filename,
+        length,
+        modtime,
+        mode,
+    })
 }
 
 // =============================================================================
 // Send (download: data flows gateway → receiver)
 // =============================================================================
 
-/// Send one file via ZMODEM.  Handshake:
+/// Send one or more files via ZMODEM (batch mode per Forsberg §4).
+/// Handshake (single-file shape — repeats the ZFILE → ZEOF cycle per
+/// file in a batch before the closing ZFIN/OO):
 ///   → ZRQINIT
 ///   ← ZRINIT (with capability bits)
 ///   → ZFILE + subpacket(filename \0 size \0, ZCRCW)
 ///   ← ZRPOS(0)
 ///   → ZDATA(0) + subpackets of 1024 bytes each (ZCRCW, ACK-gated) until EOF
 ///   → ZEOF(length)
-///   ← ZRINIT
+///   ← ZRINIT                 ← ready for next file or ZFIN
 ///   → ZFIN
 ///   ← ZFIN
 ///   → "OO"
@@ -1782,9 +1821,9 @@ mod tests {
         // caller's decide callback is expected to reject names that
         // don't pass filename validation.
         let blob = b"\x00123 0 0 0 0 0\x00";
-        let (name, size) = parse_zfile_info(blob).unwrap();
-        assert_eq!(name, "");
-        assert_eq!(size, Some(123));
+        let info = parse_zfile_info(blob).unwrap();
+        assert_eq!(info.filename, "");
+        assert_eq!(info.length, Some(123));
     }
 
     #[test]
@@ -1848,17 +1887,41 @@ mod tests {
     #[test]
     fn test_parse_zfile_minimal() {
         let blob = b"foo.bin\x00123 0 0 0 0 0\x00";
-        let (name, size) = parse_zfile_info(blob).unwrap();
-        assert_eq!(name, "foo.bin");
-        assert_eq!(size, Some(123));
+        let info = parse_zfile_info(blob).unwrap();
+        assert_eq!(info.filename, "foo.bin");
+        assert_eq!(info.length, Some(123));
     }
 
     #[test]
     fn test_parse_zfile_no_metadata() {
         let blob = b"tiny\0";
-        let (name, size) = parse_zfile_info(blob).unwrap();
-        assert_eq!(name, "tiny");
-        assert_eq!(size, None);
+        let info = parse_zfile_info(blob).unwrap();
+        assert_eq!(info.filename, "tiny");
+        assert_eq!(info.length, None);
+    }
+
+    #[test]
+    fn test_parse_zfile_modtime_and_mode_octal() {
+        // Forsberg §11.4: modtime + mode are octal.  100644 octal = 0o100644
+        // (regular file + 0o644 permissions); 13647513120 octal is a
+        // realistic Unix mtime value (~ early 2010s, in seconds).
+        let blob = b"prog.bin\x004096 13647513120 100644 0 0 0\x00";
+        let info = parse_zfile_info(blob).unwrap();
+        assert_eq!(info.filename, "prog.bin");
+        assert_eq!(info.length, Some(4096));
+        assert_eq!(info.modtime, Some(0o13647513120));
+        assert_eq!(info.mode, Some(0o100644));
+    }
+
+    #[test]
+    fn test_parse_zfile_partial_metadata() {
+        // length and modtime present, mode absent.  Trailing fields
+        // should stay None rather than confuse the parser.
+        let blob = b"foo\x00100 12345\x00";
+        let info = parse_zfile_info(blob).unwrap();
+        assert_eq!(info.length, Some(100));
+        assert_eq!(info.modtime, Some(0o12345));
+        assert_eq!(info.mode, None);
     }
 
     #[test]

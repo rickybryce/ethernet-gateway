@@ -777,7 +777,6 @@ impl App {
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.cfg.kermit_attribute_packets, "Attribute pkts");
             ui.checkbox(&mut self.cfg.kermit_repeat_compression, "Repeat compress");
-            ui.checkbox(&mut self.cfg.kermit_iac_escape, "IAC escape");
         });
         ui.horizontal(|ui| {
             ui.label("8-bit quote:");
