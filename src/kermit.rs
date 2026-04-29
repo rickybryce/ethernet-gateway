@@ -7091,13 +7091,15 @@ mod tests {
         let dir = resume_scratch_dir("symlink");
         let real_path = dir.join("real.bin");
         std::fs::write(&real_path, b"real bytes").unwrap();
-        let link_path = dir.join("link.bin");
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&real_path, &link_path).unwrap();
         // On non-Unix we can't make a symlink portably; the test is
-        // unix-only since the threat is filesystem-specific.
+        // unix-only since the threat is filesystem-specific.  Keep the
+        // dir creation/cleanup on every platform so the test still
+        // exercises the scratch-dir setup, but skip the symlink
+        // construction + assertion outside Unix.
         #[cfg(unix)]
         {
+            let link_path = dir.join("link.bin");
+            std::os::unix::fs::symlink(&real_path, &link_path).unwrap();
             let off = compute_resume_offset("link.bin", dir.to_str().unwrap(), 168);
             assert_eq!(off, None, "symlink must be ineligible for resume");
         }
