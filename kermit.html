@@ -544,7 +544,7 @@
     <span class="key">remote cwd &lt;subdir&gt;</span>     — change our working subdir
     <span class="key">finish | bye</span>            — end server session
 
-  Inactivity timeout: <span class="val">45</span> s.
+  Inactivity timeout: <span class="val">5</span> min.
                 </div>
 
                 <p class="dim-text">
@@ -620,6 +620,28 @@
                     <code>..</code>, leading dots, separator characters, or NUL bytes
                     is refused with an E-packet, and the server keeps idling for the
                     next command (per spec §6.7).
+                </div>
+
+                <div class="callout callout-warn">
+                    <strong>Filename arrives uppercased? That's C-Kermit, not us.</strong>
+                    By default C-Kermit ships filenames in <em>common form</em> —
+                    uppercased ASCII, with characters outside the portable set
+                    rewritten to <code>X</code>, and on some legacy clients
+                    truncated to 8.3. Frank da Cruz adopted the convention so a
+                    file named on a VMS/MVS/Unix box would still land safely on
+                    a CP/M target. The gateway saves whatever the F-packet says,
+                    so <code>put hello.txt</code> from a default C-Kermit
+                    becomes <code>HELLO.TXT</code> in <code>transfer_dir</code>.
+                    To keep the original case and full length, run this
+                    <em>once</em> in your C-Kermit before the transfer:
+                    <pre style="margin-top: 8px;"><code><span class="output-text">C-Kermit&gt;</span> set file names literal</code></pre>
+                    That switches both the sent F-packet (your <code>put</code>)
+                    and the received F-packet (incoming <code>get</code>) to
+                    pass the name through unmodified. You can pin it permanently
+                    in <code>~/.kermrc</code>. Kermit-95 has the same setting
+                    under <em>Settings &rarr; File Names &rarr; Literal</em>;
+                    G-Kermit and E-Kermit have no toggle and always send the
+                    name unmodified.
                 </div>
             </div>
 
@@ -987,7 +1009,7 @@
                         <tr><th>Key</th><th>Default</th><th>Effect</th></tr>
                     </thead>
                     <tbody>
-                        <tr><td><code>kermit_negotiation_timeout</code></td><td>45</td><td>Seconds for the Send-Init handshake (and per-command idle in server mode).</td></tr>
+                        <tr><td><code>kermit_negotiation_timeout</code></td><td>300</td><td>Seconds for the Send-Init handshake (and per-command idle in server mode).</td></tr>
                         <tr><td><code>kermit_packet_timeout</code></td><td>10</td><td>Per-packet read deadline after Send-Init.</td></tr>
                         <tr><td><code>kermit_max_retries</code></td><td>5</td><td>Maximum NAK / timeout retries per packet before giving up.</td></tr>
                         <tr><td><code>kermit_max_packet_length</code></td><td>4096</td><td>MAXL we advertise (10..=9024). Higher = more throughput, more retransmit cost on a flaky line.</td></tr>
@@ -1028,10 +1050,20 @@
 
                 <div class="cat">Upload a file to the gateway</div>
                 <pre><code><span class="prompt-char">$</span> kermit -B -j 192.168.1.160:2323 -i -q -s ./localfile.bin</code></pre>
+                <p class="dim-text">
+                    By default the file lands as <code>LOCALFILE.BIN</code> on
+                    the gateway — C-Kermit uppercases filenames in the F-packet
+                    for cross-platform safety. To preserve the exact case and
+                    avoid truncation on legacy clients, send a <code>-C</code>
+                    one-shot command first to flip the file-names mode to
+                    literal:
+                </p>
+                <pre><code><span class="prompt-char">$</span> kermit -B -j 192.168.1.160:2323 -i -q -C "set file names literal, send ./localfile.bin"</code></pre>
 
                 <div class="cat">Interactive session with multiple commands</div>
                 <pre><code><span class="prompt-char">$</span> kermit
 <span class="output-text">C-Kermit&gt;</span> set host 192.168.1.160:2323 /telnet
+<span class="output-text">C-Kermit&gt;</span> set file names literal
 <span class="output-text">C-Kermit&gt;</span> remote kermit
 <span class="output-text">Ethernet Gateway Kermit 0.5.2</span>
 <span class="output-text">C-Kermit&gt;</span> remote dir
@@ -1039,9 +1071,21 @@
 beta.bin     2048
 docs         &lt;dir&gt;</span>
 <span class="output-text">C-Kermit&gt;</span> remote cd docs
+<span class="output-text">C-Kermit&gt;</span> put hello.txt
 <span class="output-text">C-Kermit&gt;</span> get readme.txt
 <span class="output-text">C-Kermit&gt;</span> finish
 <span class="output-text">C-Kermit&gt;</span> exit</code></pre>
+                <p class="dim-text">
+                    The <code>set file names literal</code> line keeps
+                    <code>hello.txt</code> from being uppercased to
+                    <code>HELLO.TXT</code> in <code>transfer_dir</code>.
+                    Drop it if you want the default common-form rewriting.
+                    Each <code>put</code> commits to disk as soon as the
+                    gateway ACKs your B-packet, so files appear in
+                    <code>transfer_dir</code> immediately —
+                    <code>finish</code> is just for closing the session
+                    politely.
+                </p>
 
                 <p class="dim-text">
                     Interactive C-Kermit needs a controlling tty for some commands —
