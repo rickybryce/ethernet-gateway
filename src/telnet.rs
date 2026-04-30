@@ -10898,6 +10898,34 @@ impl TelnetSession {
 
 // ─── Server startup ─────────────────────────────────────────
 
+/// Send a connection-rejection message and close the stream cleanly.
+///
+/// We use a bounded write_all + flush + shutdown rather than the
+/// non-blocking `try_write` so the message actually reaches a vintage
+/// terminal that's slow to drain its receive buffer (Commodore 64 over
+/// EtherLink, AltairDuino on a 9600 bps line, etc.).  `try_write`
+/// silently drops the bytes when the kernel send buffer can't take
+/// them immediately, leaving the user staring at "connection closed"
+/// with no explanation — particularly painful on retro hardware that
+/// can't easily reconnect.  The 2-second cap keeps a misbehaving peer
+/// from stalling the accept loop.
+async fn send_rejection_message(
+    mut stream: tokio::net::TcpStream,
+    msg: &[u8],
+) {
+    use tokio::io::AsyncWriteExt;
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        async {
+            let _ = stream.write_all(msg).await;
+            let _ = stream.flush().await;
+            let _ = stream.shutdown().await;
+        },
+    )
+    .await;
+    // stream drops here regardless of timeout outcome.
+}
+
 /// Start the telnet server accept loop.
 pub fn start_server(
     shutdown: Arc<AtomicBool>,
@@ -10956,8 +10984,10 @@ pub fn start_server(
                             if prev >= max_sessions {
                                 session_count.fetch_sub(1, Ordering::SeqCst);
                                 glog!("Telnet: rejected {} (max {} sessions)", addr, max_sessions);
-                                let _ = stream.try_write(b"Too many connections. Try again later.\r\n");
-                                drop(stream);
+                                send_rejection_message(
+                                    stream,
+                                    b"Too many connections. Try again later.\r\n",
+                                ).await;
                                 continue;
                             }
                             if !security_enabled
@@ -10966,8 +10996,7 @@ pub fn start_server(
                                 session_count.fetch_sub(1, Ordering::SeqCst);
                                 glog!("Telnet: rejected {} ({})", addr, reason);
                                 let msg = format!("{}\r\n", reason);
-                                let _ = stream.try_write(msg.as_bytes());
-                                drop(stream);
+                                send_rejection_message(stream, msg.as_bytes()).await;
                                 continue;
                             }
                             glog!("Telnet: connection from {} ({}/{})", addr, prev + 1, max_sessions);

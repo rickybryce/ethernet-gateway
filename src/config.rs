@@ -705,21 +705,50 @@ pub fn save_config(cfg: &Config) {
     *guard = Some(cfg.clone());
 }
 
+/// Write `key = value` to `out`, applying `Display` formatting to the
+/// value.  Used for booleans (`Display` yields `"true"` / `"false"`)
+/// and integer fields.
+fn write_kv(out: &mut String, key: &str, value: impl std::fmt::Display) {
+    use std::fmt::Write;
+    let _ = writeln!(out, "{} = {}", key, value);
+}
+
+/// Write `key = value` to `out` for string fields, sanitizing the
+/// value to strip embedded newlines/CRs that would otherwise corrupt
+/// the file framing.
+fn write_kv_str(out: &mut String, key: &str, value: &str) {
+    use std::fmt::Write;
+    let _ = writeln!(out, "{} = {}", key, sanitize_value(value));
+}
+
 /// Write the config file with comments.
+///
+/// Section-by-section build pattern: each comment block + `write_kv`
+/// call pairs the human-visible key name with its `cfg.field` value at
+/// the call site.  Adding a new field is one section addition.
+/// Replacing the original 60-positional-arg `format!()` template
+/// closes the misalignment footgun where missing one slot mid-template
+/// would silently shift every subsequent field onto the wrong line.
 fn write_config_file(path: &str, cfg: &Config) {
-    let content = format!(
-        "\
+    let mut content = String::with_capacity(8192);
+
+    content.push_str("\
 # Ethernet Gateway Configuration
 #
 # This file is auto-generated if it does not exist.
 # Edit values below to customise the server.
 
-# Telnet server: set to false to disable (SSH-only mode)
-telnet_enabled = {}
+");
 
-# Telnet server port
-telnet_port = {}
+    content.push_str("# Telnet server: set to false to disable (SSH-only mode)\n");
+    write_kv(&mut content, "telnet_enabled", cfg.telnet_enabled);
+    content.push('\n');
 
+    content.push_str("# Telnet server port\n");
+    write_kv(&mut content, "telnet_port", cfg.telnet_port);
+    content.push('\n');
+
+    content.push_str("\
 # Outgoing Telnet Gateway cooperative negotiation.
 # When true, the gateway offers WILL TTYPE / WILL NAWS at connect and
 # accepts DO TTYPE / DO NAWS requests from the remote server.  Leave this
@@ -727,50 +756,72 @@ telnet_port = {}
 # don't implement the telnet protocol) — those would see the IAC offers
 # as garbage bytes.  ECHO cooperation is always on regardless of this
 # setting (raw-TCP services never send WILL ECHO).
-telnet_gateway_negotiate = {}
+");
+    write_kv(&mut content, "telnet_gateway_negotiate", cfg.telnet_gateway_negotiate);
+    content.push('\n');
 
+    content.push_str("\
 # Outgoing Telnet Gateway raw-TCP escape hatch.
 # When true, the gateway bypasses its entire telnet-IAC layer and treats
 # the remote as a raw TCP byte stream.  Last-resort override for
 # destinations that clearly aren't telnet at all.  Supersedes
 # telnet_gateway_negotiate (there's nothing to negotiate in raw mode).
 # Toggleable from the Telnet Gateway menu.
-telnet_gateway_raw = {}
+");
+    write_kv(&mut content, "telnet_gateway_raw", cfg.telnet_gateway_raw);
+    content.push('\n');
 
+    content.push_str("\
 # Show the GUI configuration/console window on startup.
 # Set to false when running as a headless service.
-enable_console = {}
+");
+    write_kv(&mut content, "enable_console", cfg.enable_console);
+    content.push('\n');
 
-# Security: set to true to require username/password login
-security_enabled = {}
+    content.push_str("# Security: set to true to require username/password login\n");
+    write_kv(&mut content, "security_enabled", cfg.security_enabled);
+    content.push('\n');
 
-# Credentials (only used when security_enabled = true)
-username = {}
-password = {}
+    content.push_str("# Credentials (only used when security_enabled = true)\n");
+    write_kv_str(&mut content, "username", &cfg.username);
+    write_kv_str(&mut content, "password", &cfg.password);
+    content.push('\n');
 
-# Directory for file transfers (relative to working directory)
-transfer_dir = {}
+    content.push_str("# Directory for file transfers (relative to working directory)\n");
+    write_kv_str(&mut content, "transfer_dir", &cfg.transfer_dir);
+    content.push('\n');
 
-# Maximum concurrent telnet sessions
-max_sessions = {}
+    content.push_str("# Maximum concurrent telnet sessions\n");
+    write_kv(&mut content, "max_sessions", cfg.max_sessions);
+    content.push('\n');
 
-# Idle session timeout in seconds (0 = no timeout)
-idle_timeout_secs = {}
+    content.push_str("# Idle session timeout in seconds (0 = no timeout)\n");
+    write_kv(&mut content, "idle_timeout_secs", cfg.idle_timeout_secs);
+    content.push('\n');
 
+    content.push_str("\
 # Groq API key for AI Chat (get one at https://console.groq.com/keys)
 # Leave empty to disable AI Chat.
-groq_api_key = {}
+");
+    write_kv_str(&mut content, "groq_api_key", &cfg.groq_api_key);
+    content.push('\n');
 
+    content.push_str("\
 # Browser homepage URL (loaded automatically when entering the browser)
 # Leave empty to start with a blank prompt.
-browser_homepage = {}
+");
+    write_kv_str(&mut content, "browser_homepage", &cfg.browser_homepage);
+    content.push('\n');
 
-# Last-used weather zip code (updated automatically when you check weather)
-weather_zip = {}
+    content.push_str("# Last-used weather zip code (updated automatically when you check weather)\n");
+    write_kv_str(&mut content, "weather_zip", &cfg.weather_zip);
+    content.push('\n');
 
-# Verbose logging: set to true for detailed XMODEM protocol diagnostics
-verbose = {}
+    content.push_str("# Verbose logging: set to true for detailed XMODEM protocol diagnostics\n");
+    write_kv(&mut content, "verbose", cfg.verbose);
+    content.push('\n');
 
+    content.push_str("\
 # XMODEM-family protocol timeouts (apply to XMODEM, XMODEM-1K, and YMODEM).
 # xmodem_negotiation_timeout:      seconds to wait for the peer to start sending.
 # xmodem_block_timeout:            seconds to wait for each data block.
@@ -778,22 +829,28 @@ verbose = {}
 # xmodem_negotiation_retry_interval: seconds between C/NAK pokes during
 #                                    the initial handshake (spec suggests 10 s,
 #                                    default 7 s).
-xmodem_negotiation_timeout = {}
-xmodem_block_timeout = {}
-xmodem_max_retries = {}
-xmodem_negotiation_retry_interval = {}
+");
+    write_kv(&mut content, "xmodem_negotiation_timeout", cfg.xmodem_negotiation_timeout);
+    write_kv(&mut content, "xmodem_block_timeout", cfg.xmodem_block_timeout);
+    write_kv(&mut content, "xmodem_max_retries", cfg.xmodem_max_retries);
+    write_kv(&mut content, "xmodem_negotiation_retry_interval", cfg.xmodem_negotiation_retry_interval);
+    content.push('\n');
 
+    content.push_str("\
 # ZMODEM protocol tunables.
 # zmodem_negotiation_timeout:       seconds to wait for ZRQINIT / ZRINIT handshake.
 # zmodem_frame_timeout:             seconds to wait for each header / subpacket.
 # zmodem_max_retries:               retry limit for ZRQINIT / ZRPOS / ZDATA frames.
 # zmodem_negotiation_retry_interval: seconds between ZRINIT / ZRQINIT re-sends
 #                                    during the handshake (default 5 s).
-zmodem_negotiation_timeout = {}
-zmodem_frame_timeout = {}
-zmodem_max_retries = {}
-zmodem_negotiation_retry_interval = {}
+");
+    write_kv(&mut content, "zmodem_negotiation_timeout", cfg.zmodem_negotiation_timeout);
+    write_kv(&mut content, "zmodem_frame_timeout", cfg.zmodem_frame_timeout);
+    write_kv(&mut content, "zmodem_max_retries", cfg.zmodem_max_retries);
+    write_kv(&mut content, "zmodem_negotiation_retry_interval", cfg.zmodem_negotiation_retry_interval);
+    content.push('\n');
 
+    content.push_str("\
 # Kermit protocol tunables.
 # kermit_negotiation_timeout:  seconds to wait for the Send-Init handshake.
 # kermit_packet_timeout:       seconds to wait for each packet response.
@@ -825,43 +882,54 @@ zmodem_negotiation_retry_interval = {}
 #                              peer (C-Kermit, G-Kermit, Kermit-95, E-Kermit)
 #                              negotiates it; flip on only if you're talking
 #                              to a strict-spec implementation that does.
-kermit_negotiation_timeout = {}
-kermit_packet_timeout = {}
-kermit_max_retries = {}
-kermit_max_packet_length = {}
-kermit_window_size = {}
-kermit_block_check_type = {}
-kermit_long_packets = {}
-kermit_sliding_windows = {}
-kermit_streaming = {}
-kermit_attribute_packets = {}
-kermit_repeat_compression = {}
-kermit_8bit_quote = {}
-kermit_resume_partial = {}
-kermit_resume_max_age_hours = {}
-kermit_locking_shifts = {}
+");
+    write_kv(&mut content, "kermit_negotiation_timeout", cfg.kermit_negotiation_timeout);
+    write_kv(&mut content, "kermit_packet_timeout", cfg.kermit_packet_timeout);
+    write_kv(&mut content, "kermit_max_retries", cfg.kermit_max_retries);
+    write_kv(&mut content, "kermit_max_packet_length", cfg.kermit_max_packet_length);
+    write_kv(&mut content, "kermit_window_size", cfg.kermit_window_size);
+    write_kv(&mut content, "kermit_block_check_type", cfg.kermit_block_check_type);
+    write_kv(&mut content, "kermit_long_packets", cfg.kermit_long_packets);
+    write_kv(&mut content, "kermit_sliding_windows", cfg.kermit_sliding_windows);
+    write_kv(&mut content, "kermit_streaming", cfg.kermit_streaming);
+    write_kv(&mut content, "kermit_attribute_packets", cfg.kermit_attribute_packets);
+    write_kv(&mut content, "kermit_repeat_compression", cfg.kermit_repeat_compression);
+    write_kv_str(&mut content, "kermit_8bit_quote", &cfg.kermit_8bit_quote);
+    write_kv(&mut content, "kermit_resume_partial", cfg.kermit_resume_partial);
+    write_kv(&mut content, "kermit_resume_max_age_hours", cfg.kermit_resume_max_age_hours);
+    write_kv(&mut content, "kermit_locking_shifts", cfg.kermit_locking_shifts);
+    content.push('\n');
 
+    content.push_str("\
 # Serial modem emulation (Hayes AT commands)
 # Set serial_enabled = true and configure the port to activate.
-serial_enabled = {}
+");
+    write_kv(&mut content, "serial_enabled", cfg.serial_enabled);
+    content.push('\n');
 
+    content.push_str("\
 # Serial port device (e.g. /dev/ttyUSB0 on Linux, COM3 on Windows)
 # Leave empty if not configured. Use the Modem Emulator menu to detect ports.
-serial_port = {}
+");
+    write_kv_str(&mut content, "serial_port", &cfg.serial_port);
+    content.push('\n');
 
-# Serial port parameters
-serial_baud = {}
-serial_databits = {}
-serial_parity = {}
-serial_stopbits = {}
-serial_flowcontrol = {}
+    content.push_str("# Serial port parameters\n");
+    write_kv(&mut content, "serial_baud", cfg.serial_baud);
+    write_kv(&mut content, "serial_databits", cfg.serial_databits);
+    write_kv_str(&mut content, "serial_parity", &cfg.serial_parity);
+    write_kv(&mut content, "serial_stopbits", cfg.serial_stopbits);
+    write_kv_str(&mut content, "serial_flowcontrol", &cfg.serial_flowcontrol);
+    content.push('\n');
 
-# Saved modem settings (written by AT&W, restored by ATZ)
-serial_echo = {}
-serial_verbose = {}
-serial_quiet = {}
-serial_s_regs = {}
+    content.push_str("# Saved modem settings (written by AT&W, restored by ATZ)\n");
+    write_kv(&mut content, "serial_echo", cfg.serial_echo);
+    write_kv(&mut content, "serial_verbose", cfg.serial_verbose);
+    write_kv(&mut content, "serial_quiet", cfg.serial_quiet);
+    write_kv_str(&mut content, "serial_s_regs", &cfg.serial_s_regs);
+    content.push('\n');
 
+    content.push_str("\
 # Hayes extended command state (written by AT&W, restored by ATZ)
 # serial_x_code:    ATX level 0-4 (4 = all extended result codes, Hayes default)
 # serial_dtr_mode:  AT&D 0-3 (0 = ignore DTR, gateway-friendly default)
@@ -869,28 +937,37 @@ serial_s_regs = {}
 #                   gateway-friendly default; physical port flow control
 #                   is still controlled by serial_flowcontrol above)
 # serial_dcd_mode:  AT&C 0-1 (1 = DCD reflects carrier, Hayes default)
-serial_x_code = {}
-serial_dtr_mode = {}
-serial_flow_mode = {}
-serial_dcd_mode = {}
+");
+    write_kv(&mut content, "serial_x_code", cfg.serial_x_code);
+    write_kv(&mut content, "serial_dtr_mode", cfg.serial_dtr_mode);
+    write_kv(&mut content, "serial_flow_mode", cfg.serial_flow_mode);
+    write_kv(&mut content, "serial_dcd_mode", cfg.serial_dcd_mode);
+    content.push('\n');
 
-# Hayes stored phone-number slots (AT&Zn=s sets, ATDSn dials).  Empty = unset.
-serial_stored_0 = {}
-serial_stored_1 = {}
-serial_stored_2 = {}
-serial_stored_3 = {}
+    content.push_str("# Hayes stored phone-number slots (AT&Zn=s sets, ATDSn dials).  Empty = unset.\n");
+    write_kv_str(&mut content, "serial_stored_0", &cfg.serial_stored_numbers[0]);
+    write_kv_str(&mut content, "serial_stored_1", &cfg.serial_stored_numbers[1]);
+    write_kv_str(&mut content, "serial_stored_2", &cfg.serial_stored_numbers[2]);
+    write_kv_str(&mut content, "serial_stored_3", &cfg.serial_stored_numbers[3]);
+    content.push('\n');
 
+    content.push_str("\
 # SSH server interface (encrypted access to the gateway)
 # Set ssh_enabled = true to activate. Uses its own credentials.
-ssh_enabled = {}
+");
+    write_kv(&mut content, "ssh_enabled", cfg.ssh_enabled);
+    content.push('\n');
 
-# SSH server port
-ssh_port = {}
+    content.push_str("# SSH server port\n");
+    write_kv(&mut content, "ssh_port", cfg.ssh_port);
+    content.push('\n');
 
-# SSH credentials (independent of telnet credentials)
-ssh_username = {}
-ssh_password = {}
+    content.push_str("# SSH credentials (independent of telnet credentials)\n");
+    write_kv_str(&mut content, "ssh_username", &cfg.ssh_username);
+    write_kv_str(&mut content, "ssh_password", &cfg.ssh_password);
+    content.push('\n');
 
+    content.push_str("\
 # Authentication mode for the OUTBOUND SSH Gateway (the menu item that
 # proxies to a remote SSH server).  Values:
 #   key      — use the gateway's built-in Ed25519 client key.  Copy the
@@ -899,71 +976,8 @@ ssh_password = {}
 #              into the remote's ~/.ssh/authorized_keys first.
 #   password — prompt the operator for the remote account's password on
 #              each connect.  No key is offered.
-ssh_gateway_auth = {}
-",
-        cfg.telnet_enabled,
-        cfg.telnet_port,
-        cfg.telnet_gateway_negotiate,
-        cfg.telnet_gateway_raw,
-        cfg.enable_console,
-        cfg.security_enabled,
-        sanitize_value(&cfg.username),
-        sanitize_value(&cfg.password),
-        sanitize_value(&cfg.transfer_dir),
-        cfg.max_sessions,
-        cfg.idle_timeout_secs,
-        sanitize_value(&cfg.groq_api_key),
-        sanitize_value(&cfg.browser_homepage),
-        sanitize_value(&cfg.weather_zip),
-        cfg.verbose,
-        cfg.xmodem_negotiation_timeout,
-        cfg.xmodem_block_timeout,
-        cfg.xmodem_max_retries,
-        cfg.xmodem_negotiation_retry_interval,
-        cfg.zmodem_negotiation_timeout,
-        cfg.zmodem_frame_timeout,
-        cfg.zmodem_max_retries,
-        cfg.zmodem_negotiation_retry_interval,
-        cfg.kermit_negotiation_timeout,
-        cfg.kermit_packet_timeout,
-        cfg.kermit_max_retries,
-        cfg.kermit_max_packet_length,
-        cfg.kermit_window_size,
-        cfg.kermit_block_check_type,
-        cfg.kermit_long_packets,
-        cfg.kermit_sliding_windows,
-        cfg.kermit_streaming,
-        cfg.kermit_attribute_packets,
-        cfg.kermit_repeat_compression,
-        sanitize_value(&cfg.kermit_8bit_quote),
-        cfg.kermit_resume_partial,
-        cfg.kermit_resume_max_age_hours,
-        cfg.kermit_locking_shifts,
-        cfg.serial_enabled,
-        sanitize_value(&cfg.serial_port),
-        cfg.serial_baud,
-        cfg.serial_databits,
-        sanitize_value(&cfg.serial_parity),
-        cfg.serial_stopbits,
-        sanitize_value(&cfg.serial_flowcontrol),
-        cfg.serial_echo,
-        cfg.serial_verbose,
-        cfg.serial_quiet,
-        sanitize_value(&cfg.serial_s_regs),
-        cfg.serial_x_code,
-        cfg.serial_dtr_mode,
-        cfg.serial_flow_mode,
-        cfg.serial_dcd_mode,
-        sanitize_value(&cfg.serial_stored_numbers[0]),
-        sanitize_value(&cfg.serial_stored_numbers[1]),
-        sanitize_value(&cfg.serial_stored_numbers[2]),
-        sanitize_value(&cfg.serial_stored_numbers[3]),
-        cfg.ssh_enabled,
-        cfg.ssh_port,
-        sanitize_value(&cfg.ssh_username),
-        sanitize_value(&cfg.ssh_password),
-        sanitize_value(&cfg.ssh_gateway_auth),
-    );
+");
+    write_kv_str(&mut content, "ssh_gateway_auth", &cfg.ssh_gateway_auth);
 
     // Write to a per-PID temporary file, chmod it to owner-only, then
     // rename into place.  The PID suffix avoids clobbering another
@@ -1736,6 +1750,103 @@ mod tests {
         let cfg = read_config_file("/tmp/xmodem_nonexistent_12345.conf");
         assert_eq!(cfg.telnet_port, DEFAULT_TELNET_PORT);
         assert!(!cfg.security_enabled);
+    }
+
+    /// Assert that every field the reader recognizes is present in
+    /// the writer's output.  Direct regression test for the pre-
+    /// refactor positional `format!()` footgun where missing one
+    /// `{}` slot would silently shift every subsequent value onto
+    /// the wrong line — under the refactor each field is named at
+    /// the call site, but this test guards against drift between
+    /// the reader's key list and the writer's emit list.
+    #[test]
+    fn test_write_emits_every_reader_recognized_key() {
+        let dir = std::env::temp_dir().join("xmodem_test_field_presence");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("presence.conf");
+
+        write_config_file(path.to_str().unwrap(), &Config::default());
+        let written = std::fs::read_to_string(&path).unwrap();
+
+        // Every key the reader's `apply_config_key` matches must
+        // appear as a `key = ...` line in the written file.  Lock
+        // this list down — adding a new field means updating both
+        // the reader and this test.
+        let expected_keys: &[&str] = &[
+            "telnet_enabled",
+            "telnet_port",
+            "telnet_gateway_negotiate",
+            "telnet_gateway_raw",
+            "enable_console",
+            "security_enabled",
+            "username",
+            "password",
+            "transfer_dir",
+            "max_sessions",
+            "idle_timeout_secs",
+            "groq_api_key",
+            "browser_homepage",
+            "weather_zip",
+            "verbose",
+            "xmodem_negotiation_timeout",
+            "xmodem_block_timeout",
+            "xmodem_max_retries",
+            "xmodem_negotiation_retry_interval",
+            "zmodem_negotiation_timeout",
+            "zmodem_frame_timeout",
+            "zmodem_max_retries",
+            "zmodem_negotiation_retry_interval",
+            "kermit_negotiation_timeout",
+            "kermit_packet_timeout",
+            "kermit_max_retries",
+            "kermit_max_packet_length",
+            "kermit_window_size",
+            "kermit_block_check_type",
+            "kermit_long_packets",
+            "kermit_sliding_windows",
+            "kermit_streaming",
+            "kermit_attribute_packets",
+            "kermit_repeat_compression",
+            "kermit_8bit_quote",
+            "kermit_resume_partial",
+            "kermit_resume_max_age_hours",
+            "kermit_locking_shifts",
+            "serial_enabled",
+            "serial_port",
+            "serial_baud",
+            "serial_databits",
+            "serial_parity",
+            "serial_stopbits",
+            "serial_flowcontrol",
+            "serial_echo",
+            "serial_verbose",
+            "serial_quiet",
+            "serial_s_regs",
+            "serial_x_code",
+            "serial_dtr_mode",
+            "serial_flow_mode",
+            "serial_dcd_mode",
+            "serial_stored_0",
+            "serial_stored_1",
+            "serial_stored_2",
+            "serial_stored_3",
+            "ssh_enabled",
+            "ssh_port",
+            "ssh_username",
+            "ssh_password",
+            "ssh_gateway_auth",
+        ];
+
+        for key in expected_keys {
+            let needle = format!("{} = ", key);
+            assert!(
+                written.contains(&needle),
+                "key `{}` missing from written config — writer drifted from reader's apply_config_key match list",
+                key
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
