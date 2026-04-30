@@ -3506,18 +3506,62 @@ impl TelnetSession {
 
     /// Sync sibling of `save_received_file` for callers that can't
     /// `.await` (e.g. the Kermit server's on-file callback, which runs
-    /// inside a non-async closure).  Same atomic create-new semantics
-    /// and the same `SaveError` discrimination — only the I/O backend
-    /// differs.  At the file sizes we deal with (≤8 MB) the blocking
-    /// write is sub-millisecond on SSD and a few ms on spinning disk;
-    /// briefly stalling the runtime is preferable to plumbing async
-    /// closures through `kermit_server`'s generic boundary.
+    /// inside a non-async closure).  Same `SaveError` discrimination
+    /// as the async sibling — only the I/O backend differs.  At the
+    /// file sizes we deal with (≤8 MB) the blocking write is sub-
+    /// millisecond on SSD and a few ms on spinning disk; briefly
+    /// stalling the runtime is preferable to plumbing async closures
+    /// through `kermit_server`'s generic boundary.
+    ///
+    /// `replace_existing=true` is the resume case: the caller has
+    /// already merged the on-disk partial bytes into `data`, so we
+    /// must atomically replace whatever's at `path` with the merged
+    /// full file.  Done via tmp-file + rename so a process death
+    /// mid-write leaves the original partial intact rather than
+    /// corrupting both versions.  `false` keeps the create-new
+    /// "refuse to clobber" semantics that every other save site
+    /// uses.
     fn save_received_file_sync(
         path: &std::path::Path,
         data: &[u8],
         meta: Option<&crate::xmodem::YmodemReceiveMeta>,
+        replace_existing: bool,
     ) -> Result<(), SaveError> {
         use std::io::Write;
+        if replace_existing {
+            // Resume: write to <name>.kermit-resume.tmp, fsync,
+            // rename over the partial.  POSIX rename is atomic
+            // within a filesystem; on failure we leave .tmp behind
+            // but the original partial is untouched.
+            let mut tmp_path = path.to_path_buf();
+            let mut tmp_name = tmp_path
+                .file_name()
+                .map(|n| n.to_os_string())
+                .unwrap_or_default();
+            tmp_name.push(".kermit-resume.tmp");
+            tmp_path.set_file_name(tmp_name);
+            let mut file = match std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&tmp_path)
+            {
+                Ok(f) => f,
+                Err(_) => return Err(SaveError::WriteFailed),
+            };
+            if file.write_all(data).is_err() || file.flush().is_err() {
+                drop(file);
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(SaveError::WriteFailed);
+            }
+            drop(file);
+            if std::fs::rename(&tmp_path, path).is_err() {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(SaveError::WriteFailed);
+            }
+            Self::apply_ymodem_meta(path, meta);
+            return Ok(());
+        }
         match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -3568,7 +3612,7 @@ impl TelnetSession {
         }
     }
 
-    fn validate_filename(name: &str) -> Result<(), &'static str> {
+    pub(crate) fn validate_filename(name: &str) -> Result<(), &'static str> {
         if name.is_empty() {
             return Err("Filename cannot be empty");
         }
@@ -4720,6 +4764,12 @@ impl TelnetSession {
                 is_petscii,
                 verbose,
                 |rx| {
+                    // Filename strictness now enforced at F-packet
+                    // receipt (see kermit.rs F-packet handler), so any
+                    // KermitReceive that reaches this callback already
+                    // has a saver-acceptable name.  The defensive check
+                    // stays because validate_filename is cheap and
+                    // closes the door on any future kermit-side bypass.
                     if Self::validate_filename(&rx.filename).is_err() {
                         skipped.push((rx.filename.clone(), "invalid filename"));
                         return;
@@ -4730,7 +4780,12 @@ impl TelnetSession {
                         modtime: rx.modtime,
                         mode: rx.mode,
                     };
-                    match Self::save_received_file_sync(&filepath, &rx.data, Some(&meta)) {
+                    match Self::save_received_file_sync(
+                        &filepath,
+                        &rx.data,
+                        Some(&meta),
+                        rx.resumed,
+                    ) {
                         Ok(()) => saved.push((rx.filename.clone(), rx.data.len())),
                         Err(SaveError::AlreadyExists) => {
                             skipped.push((rx.filename.clone(), "already exists"));
@@ -15283,6 +15338,75 @@ mod tests {
         assert_eq!(
             read_back, b"original",
             "existing file's bytes must not be touched",
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// Resume save: with `replace_existing=true`, the saver
+    /// atomically replaces the on-disk partial with the merged
+    /// full-file bytes (tmp + rename).  Without this, Kermit's
+    /// resume-partial code path is broken end-to-end — the
+    /// receiver loads the partial into memory, merges D-packets,
+    /// then the create-new save fails with AlreadyExists and
+    /// the merged data is silently dropped.  This test locks in
+    /// the resume-write path and would catch any regression to
+    /// the old create-new-only behavior.
+    #[test]
+    fn test_save_received_file_sync_replace_existing_overwrites_partial() {
+        let tmp = std::env::temp_dir()
+            .join(format!("save_resume_{}", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        // Simulate a 1 KB partial on disk from a prior interrupted
+        // session, plus the 4 KB merged buffer the receiver built
+        // from (partial + resumed D-packets).
+        std::fs::write(&tmp, vec![0xAAu8; 1024]).unwrap();
+        let merged: Vec<u8> = (0..4096u32).map(|i| i as u8).collect();
+        let result = TelnetSession::save_received_file_sync(
+            &tmp, &merged, None, /* replace_existing */ true,
+        );
+        assert!(
+            result.is_ok(),
+            "replace_existing=true must succeed even when path exists",
+        );
+        let read_back = std::fs::read(&tmp).unwrap();
+        assert_eq!(
+            read_back, merged,
+            "on-disk content must equal the merged full-file bytes",
+        );
+        // The .kermit-resume.tmp side-file must have been renamed
+        // away — leftover tmp files would accumulate across resumes.
+        let mut tmp_path = tmp.clone();
+        let mut tmp_name = tmp_path.file_name().unwrap().to_os_string();
+        tmp_name.push(".kermit-resume.tmp");
+        tmp_path.set_file_name(tmp_name);
+        assert!(
+            !tmp_path.exists(),
+            "tmp file must be renamed (or cleaned up) on success",
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// `replace_existing=false` keeps the existing create-new
+    /// "refuse to clobber" semantics — sanity check that the
+    /// resume branch didn't accidentally make the default path
+    /// permissive.
+    #[test]
+    fn test_save_received_file_sync_no_replace_refuses_existing() {
+        let tmp = std::env::temp_dir()
+            .join(format!("save_no_replace_{}", std::process::id()));
+        std::fs::write(&tmp, b"original").unwrap();
+        let err = TelnetSession::save_received_file_sync(
+            &tmp,
+            b"NEW DATA",
+            None,
+            /* replace_existing */ false,
+        )
+        .unwrap_err();
+        assert_eq!(err, SaveError::AlreadyExists);
+        let read_back = std::fs::read(&tmp).unwrap();
+        assert_eq!(
+            read_back, b"original",
+            "existing bytes must not be touched when replace_existing=false",
         );
         let _ = std::fs::remove_file(&tmp);
     }
