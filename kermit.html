@@ -589,10 +589,12 @@
                 <div class="section-title">Peer Commands</div>
 
                 <p>
-                    These are the commands you can issue from C-Kermit (or any
+                    These are the commands you type at the C-Kermit prompt (or any
                     spec-compatible Kermit client) once connected to the gateway in
-                    server mode. The corresponding wire-protocol packet type is shown
-                    in parentheses.
+                    server mode. The wire-protocol packet type the client emits is
+                    shown in the second column — useful when reading verbose logs
+                    or comparing with the <a href="#packet-types">packet-type
+                    reference</a>.
                 </p>
 
                 <table class="data-table">
@@ -600,18 +602,68 @@
                         <tr><th>Command</th><th>Wire</th><th>What it does</th></tr>
                     </thead>
                     <tbody>
-                        <tr><td><code>send &lt;file&gt;</code></td><td>S</td><td>Upload a file from your local system to <code>transfer_dir</code> on the gateway. Multi-file batches OK.</td></tr>
-                        <tr><td><code>get &lt;file&gt;</code></td><td>R</td><td>Download a file from <code>transfer_dir</code> to your local system. Filename is validated for path-traversal.</td></tr>
-                        <tr><td><code>remote dir</code></td><td>G D</td><td>List files in the current effective directory. Hidden files (leading dot) are filtered out.</td></tr>
-                        <tr><td><code>remote cd &lt;subdir&gt;</code></td><td>G C</td><td>Change the gateway's working sub-directory for subsequent commands. Path-traversal is refused.</td></tr>
-                        <tr><td><code>remote space</code></td><td>G $</td><td>Report free disk space at the current effective directory in bytes.</td></tr>
-                        <tr><td><code>remote kermit</code></td><td>G K</td><td>Identify the server: <code>Ethernet Gateway Kermit 0.5.2</code>.</td></tr>
-                        <tr><td><code>remote help</code></td><td>G H / G ?</td><td>Display the list of supported subcommands.</td></tr>
-                        <tr><td><code>finish</code></td><td>G F</td><td>End the protocol session politely.</td></tr>
-                        <tr><td><code>logout</code></td><td>G L</td><td>End the session (semantically: log out the connection).</td></tr>
-                        <tr><td><code>bye</code></td><td>G B</td><td>End the session and disconnect.</td></tr>
+                        <tr>
+                            <td><code>send &lt;file&gt;</code><br><span class="dim-text">aka <code>put</code></span></td>
+                            <td>S</td>
+                            <td>Upload a file from your local system into the gateway's current effective directory (<code>transfer_dir</code> + any <code>cwd</code> you set this session). Wildcards and multi-file batches work — <code>send *.bas</code> sends every match in one S/B exchange.</td>
+                        </tr>
+                        <tr>
+                            <td><code>get &lt;file&gt;</code></td>
+                            <td>R</td>
+                            <td>Download a file from the gateway's current effective directory to your local system. The filename is path-traversal-validated server-side; an unsafe name returns an E-packet and the server stays idle for the next command.</td>
+                        </tr>
+                        <tr>
+                            <td><code>remote dir</code></td>
+                            <td>G D</td>
+                            <td>List the gateway's current effective directory, one entry per line as <code>name &lt;TAB&gt; size|&lt;dir&gt;</code>. Hidden files (leading dot) are filtered out. Long listings are paginated automatically across multiple X-packets.</td>
+                        </tr>
+                        <tr>
+                            <td><code>remote cwd &lt;subdir&gt;</code><br><span class="dim-text">aka <code>remote cd</code></span></td>
+                            <td>G C</td>
+                            <td>Change the gateway's working sub-directory for the rest of this session. Resolved relative to <code>transfer_dir</code>; path-traversal (<code>..</code>, leading dot, separators, NUL) is refused with an E-packet. Empty argument resets back to the <code>transfer_dir</code> root.</td>
+                        </tr>
+                        <tr>
+                            <td><code>remote space</code></td>
+                            <td>G $</td>
+                            <td>Report free disk space, in bytes, at the current effective directory. Returns <code>unknown</code> on platforms without <code>statvfs</code>.</td>
+                        </tr>
+                        <tr>
+                            <td><code>remote kermit</code></td>
+                            <td>G K</td>
+                            <td>Ask the server to identify itself. Replies with <code>Ethernet Gateway Kermit 0.5.2</code>.</td>
+                        </tr>
+                        <tr>
+                            <td><code>remote help</code></td>
+                            <td>G H / G ?</td>
+                            <td>Display the gateway's supported-subcommand list. Both <code>H</code> and <code>?</code> are accepted on the wire so older clients work too.</td>
+                        </tr>
+                        <tr>
+                            <td><code>finish</code></td>
+                            <td>G F</td>
+                            <td>End the protocol session and return the gateway to the File Transfer menu. Your client stays connected at the telnet/SSH layer — most polite end-of-session.</td>
+                        </tr>
+                        <tr>
+                            <td><code>logout</code></td>
+                            <td>G L</td>
+                            <td>End the protocol session. Semantically equivalent to <code>finish</code> at the wire level — some hosts treat it as "log out the user" but the gateway treats both the same.</td>
+                        </tr>
+                        <tr>
+                            <td><code>bye</code></td>
+                            <td>G B</td>
+                            <td>End the protocol session. Some clients additionally drop the underlying connection after sending <code>bye</code>; the gateway-side effect is identical to <code>finish</code>.</td>
+                        </tr>
                     </tbody>
                 </table>
+
+                <div class="callout callout-info">
+                    <strong>What about <code>type</code>, <code>delete</code>, <code>rename</code>, <code>copy</code>, <code>mkdir</code>?</strong>
+                    These are spec-defined G subcommands but the gateway doesn't
+                    implement them — the server's reply on any unrecognised
+                    subcommand is a bare ACK, so your client will report a generic
+                    "command unsupported" rather than a useful error. Stick to the
+                    commands above. Use <code>get</code> + a local pager to read
+                    files, and manage the on-disk state out-of-band.
+                </div>
 
                 <div class="callout callout-tip">
                     <strong>Path safety:</strong>

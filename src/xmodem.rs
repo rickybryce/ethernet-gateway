@@ -109,13 +109,15 @@ pub(crate) async fn xmodem_receive(
 
     if verbose { glog!("XMODEM recv: starting negotiation (is_tcp={}, is_petscii={})", is_tcp, is_petscii); }
 
-    // Negotiate mode: try CRC first ('C') for 20 attempts (60 seconds),
-    // then fall back to checksum (NAK) for the remaining time.  This gives
-    // the user plenty of time to start their XMODEM sender in CRC mode.
+    // Negotiate mode: try CRC first ('C') for 2/3 of the negotiation
+    // window, then fall back to checksum (NAK) for the remaining time.
+    // With default config (60s window / 3s retry interval) that's ~13
+    // CRC requests before the fallback — plenty of time for the user to
+    // start a CRC-capable sender.  Older comments here said "20 attempts
+    // (60 seconds)"; that math never worked out.
     let mut mode = TransferMode::Crc16;
     let mut attempt: u32 = 0;
 
-    // Send CRC requests for 2/3 of the negotiation time, then fall back to checksum.
     let crc_attempts =
         (negotiation_timeout * 2 / 3 / negotiation_retry_interval).max(3) as u32;
     let max_negotiation_attempts = crc_attempts + max_retries as u32;
@@ -200,19 +202,29 @@ pub(crate) async fn xmodem_receive(
                                 break;
                             }
                             Ok(Ok((false, _))) => {
-                                if verbose { glog!("XMODEM recv: YMODEM block 0 CRC error"); }
+                                if verbose { glog!("XMODEM recv: YMODEM block 0 CRC error, NAKing for retransmit"); }
                                 raw_write_byte(writer, NAK, is_tcp).await?;
-                                break;
+                                // Stay in negotiation: the sender will
+                                // retransmit block 0; the next loop
+                                // iteration's read picks it up.  Without
+                                // this, the retransmit would fall through
+                                // to the main loop where expected_block=1
+                                // mismatches block_num=0 and the session
+                                // NAK-loops to exhaustion.
+                                attempt = attempt.saturating_add(1);
+                                continue;
                             }
                             Ok(Err(e)) => {
-                                if verbose { glog!("XMODEM recv: YMODEM block 0 read error: {}", e); }
+                                if verbose { glog!("XMODEM recv: YMODEM block 0 read error: {}, NAKing for retransmit", e); }
                                 raw_write_byte(writer, NAK, is_tcp).await?;
-                                break;
+                                attempt = attempt.saturating_add(1);
+                                continue;
                             }
                             Err(_) => {
-                                if verbose { glog!("XMODEM recv: YMODEM block 0 timeout"); }
+                                if verbose { glog!("XMODEM recv: YMODEM block 0 timeout, NAKing for retransmit"); }
                                 raw_write_byte(writer, NAK, is_tcp).await?;
-                                break;
+                                attempt = attempt.saturating_add(1);
+                                continue;
                             }
                         }
                     }
@@ -622,7 +634,14 @@ async fn receive_block_body(
     if !valid {
         return Err("Checksum/CRC error".into());
     }
-    if block_num == expected_block.wrapping_sub(1) {
+    // Duplicate detection: ACK retransmits of either of the two most
+    // recent blocks per Forsberg's recommendation that any already-seen
+    // block be acknowledged.  Going beyond two risks racing the 8-bit
+    // sequence wraparound on long transfers (>32 KB at SOH, >256 MB at
+    // STX); two covers the realistic sender-recovery scenarios.
+    if block_num == expected_block.wrapping_sub(1)
+        || block_num == expected_block.wrapping_sub(2)
+    {
         return Err("Duplicate block".into());
     }
     if block_num != *expected_block {
@@ -761,8 +780,15 @@ pub(crate) async fn xmodem_send(
     // Pad data to a 128-byte boundary (the minimum granularity).  When
     // 1K mode is active we consume 1024 bytes per block for full
     // chunks and fall back to 128 for the final partial chunk.
+    //
+    // For empty input: in plain XMODEM the receiver has no length
+    // info, so we must still send at least one block (filled with SUB)
+    // so the receiver isn't left waiting for data after the start
+    // request.  In YMODEM the block-0 length=0 already tells the
+    // receiver to expect zero data bytes, so we skip the data phase
+    // entirely and go straight to EOT.
     let mut padded = data.to_vec();
-    if padded.is_empty() {
+    if padded.is_empty() && ymodem.is_none() {
         padded.push(SUB);
     }
     while !padded.len().is_multiple_of(XMODEM_BLOCK_SIZE) {
@@ -961,8 +987,11 @@ pub(crate) async fn xmodem_send(
             Err(_) => continue,
         }
     }
-    if verbose { glog!("XMODEM send: EOT not ACKed after {} retries, assuming success", max_retries); }
-    Ok(())
+    // EOT exhausted without an ACK — the receiver may not have committed
+    // the file.  Surface this so the caller can flag the transfer as
+    // failed rather than silently claiming success.
+    if verbose { glog!("XMODEM send: EOT not ACKed after {} retries, returning error", max_retries); }
+    Err(format!("EOT not ACKed after {} retries", max_retries))
 }
 
 /// Build and transmit YMODEM block 0 (filename + size header).
@@ -1857,6 +1886,144 @@ mod tests {
         let _ = s_to_r.await;
         let _ = r_to_s.await;
         assert_eq!(received, original, "receiver must recover correct data after NAK+retry");
+    }
+
+    /// Receiver must recover from a CRC-bad YMODEM block 0 by NAKing
+    /// and successfully reading the sender's retransmit, rather than
+    /// falling out of negotiation and NAK-looping the retransmit as a
+    /// block-number mismatch.  Regression test for the pre-fix bug
+    /// where a single corrupted byte in block 0 hung the session.
+    #[tokio::test]
+    async fn test_ymodem_receive_block_zero_crc_error_recovery() {
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+
+        let payload_data: Vec<u8> = b"ymodem-block0-retry".to_vec();
+        let payload_clone = payload_data.clone();
+
+        let send_task = tokio::spawn(async move {
+            // Wait for the receiver's initial 'C'.
+            let req = raw_read_byte(&mut send_read, false).await.unwrap();
+            assert_eq!(req, CRC_REQUEST);
+
+            // Build block 0 carrying filename + size metadata.
+            let mut block0 = [0u8; XMODEM_BLOCK_SIZE];
+            let fname = b"retry.bin";
+            block0[..fname.len()].copy_from_slice(fname);
+            // block0[fname.len()] = 0  (already zero)
+            let meta = format!("{} 0 0 0", payload_clone.len());
+            let meta_start = fname.len() + 1;
+            block0[meta_start..meta_start + meta.len()]
+                .copy_from_slice(meta.as_bytes());
+
+            // First transmit: deliberately corrupt one byte of the
+            // payload BEFORE computing CRC, so the on-the-wire CRC
+            // matches the corrupted data — but we then send the
+            // *original* (uncorrupted) bytes with that CRC.  Result:
+            // CRC mismatch on receive.
+            let bad_crc = crc16_xmodem(&{
+                let mut c = block0;
+                c[10] ^= 0xFF;
+                c
+            });
+            let mut packet = Vec::with_capacity(3 + XMODEM_BLOCK_SIZE + 2);
+            packet.push(SOH);
+            packet.push(0);
+            packet.push(0xFF);
+            packet.extend_from_slice(&block0);
+            packet.push((bad_crc >> 8) as u8);
+            packet.push((bad_crc & 0xFF) as u8);
+            send_write.write_all(&packet).await.unwrap();
+
+            // Receiver should NAK the bad block 0.  After NAK the
+            // negotiation loop bumps its attempt counter and re-sends
+            // a CRC request at the top of the next iteration; both
+            // bytes are acceptable in any order from a sender's POV
+            // (real senders just keep retransmitting block 0 until
+            // ACKed).  Drain whichever bytes the receiver emits up to
+            // the next read of our retransmit.
+            let mut saw_nak = false;
+            loop {
+                let b = raw_read_byte(&mut send_read, false).await.unwrap();
+                if b == NAK {
+                    saw_nak = true;
+                } else if b == CRC_REQUEST {
+                    // Redundant 'C' after NAK is benign — keep waiting
+                    // for the receiver to settle.
+                    break;
+                } else {
+                    panic!("unexpected receiver byte after bad block 0: 0x{:02X}", b);
+                }
+            }
+            assert!(saw_nak, "receiver must NAK CRC-bad block 0");
+
+            // Retransmit block 0 with the correct CRC.
+            let good_crc = crc16_xmodem(&block0);
+            let mut packet = Vec::with_capacity(3 + XMODEM_BLOCK_SIZE + 2);
+            packet.push(SOH);
+            packet.push(0);
+            packet.push(0xFF);
+            packet.extend_from_slice(&block0);
+            packet.push((good_crc >> 8) as u8);
+            packet.push((good_crc & 0xFF) as u8);
+            send_write.write_all(&packet).await.unwrap();
+
+            // Receiver: ACK + 'C' to start data phase.
+            let ack = raw_read_byte(&mut send_read, false).await.unwrap();
+            assert_eq!(ack, ACK, "receiver must ACK retransmitted block 0");
+            let c = raw_read_byte(&mut send_read, false).await.unwrap();
+            assert_eq!(c, CRC_REQUEST, "receiver must request data phase");
+
+            // Send block 1 carrying the payload (NUL-padded to 128).
+            let mut data_block = [0u8; XMODEM_BLOCK_SIZE];
+            data_block[..payload_clone.len()].copy_from_slice(&payload_clone);
+            let crc = crc16_xmodem(&data_block);
+            let mut packet = Vec::with_capacity(3 + XMODEM_BLOCK_SIZE + 2);
+            packet.push(SOH);
+            packet.push(1);
+            packet.push(!1u8);
+            packet.extend_from_slice(&data_block);
+            packet.push((crc >> 8) as u8);
+            packet.push((crc & 0xFF) as u8);
+            send_write.write_all(&packet).await.unwrap();
+            let ack = raw_read_byte(&mut send_read, false).await.unwrap();
+            assert_eq!(ack, ACK);
+
+            // EOT, end-of-batch handshake (final 'C' + null block 0).
+            raw_write_byte(&mut send_write, EOT, false).await.unwrap();
+            let _ack = raw_read_byte(&mut send_read, false).await.unwrap();
+            let _c = raw_read_byte(&mut send_read, false).await.unwrap();
+            let null0 = [0u8; XMODEM_BLOCK_SIZE];
+            let crc = crc16_xmodem(&null0);
+            let mut packet = Vec::with_capacity(3 + XMODEM_BLOCK_SIZE + 2);
+            packet.push(SOH);
+            packet.push(0);
+            packet.push(0xFF);
+            packet.extend_from_slice(&null0);
+            packet.push((crc >> 8) as u8);
+            packet.push((crc & 0xFF) as u8);
+            send_write.write_all(&packet).await.unwrap();
+            let _ack = raw_read_byte(&mut send_read, false).await.unwrap();
+        });
+
+        let (received, meta) = xmodem_receive(
+            &mut recv_read,
+            &mut recv_write,
+            false,
+            false,
+            false,
+        )
+        .await
+        .expect("receive must complete after CRC-error recovery");
+
+        send_task.await.unwrap();
+        let meta = meta.expect("YMODEM metadata must be parsed after retry");
+        assert_eq!(meta.size, Some(payload_data.len() as u64));
+        // YMODEM truncates received payload to the size declared in
+        // block 0, stripping the NUL padding we sent to fill the
+        // 128-byte block.
+        assert_eq!(&received[..], &payload_data[..]);
     }
 
     /// Test 3: duplicate block from an unusual sender (phantom NAK

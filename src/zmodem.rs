@@ -128,12 +128,15 @@ pub(crate) fn crc32(data: &[u8]) -> u32 {
 // ZDLE escape layer
 // =============================================================================
 
-/// Bytes that must be ZDLE-escaped on the wire.  Covers ZDLE itself plus
-/// the flow-control bytes that terminals/modems may swallow.
+/// Bytes that must be ZDLE-escaped on the wire.  Covers ZDLE itself, the
+/// flow-control bytes that terminals/modems may swallow, and the high-bit
+/// (8-bit) duals of each per Forsberg §10 Table 4 — including 0x98 which
+/// is the 8-bit dual of ZDLE (0x18).  Without 0x98, a peer link that
+/// strips the high bit on the dual would corrupt the stream.
 fn needs_zdle_escape(b: u8) -> bool {
     matches!(
         b,
-        ZDLE | 0x10 | 0x11 | 0x13 | 0x0D | 0x8D | 0x90 | 0x91 | 0x93
+        ZDLE | 0x10 | 0x11 | 0x13 | 0x0D | 0x8D | 0x90 | 0x91 | 0x93 | 0x98
     )
 }
 
@@ -649,6 +652,11 @@ where
     // distinguish "no files arrived" (real error) from "all files
     // skipped" (legitimate session outcome).
     let mut zfile_seen: usize = 0;
+    // Consecutive inter-file header parse errors.  Resets on every
+    // successfully-parsed header.  When this exceeds
+    // `cfg.zmodem_max_retries` we surface an error rather than silently
+    // truncating the batch.
+    let mut inter_file_header_errors: u32 = 0;
 
     loop {
         // Only the first file sees the 45 s negotiation deadline —
@@ -668,7 +676,10 @@ where
         .await;
 
         let hdr = match read_res {
-            Ok(Ok(h)) => h,
+            Ok(Ok(h)) => {
+                inter_file_header_errors = 0;
+                h
+            }
             Ok(Err(e)) => {
                 if verbose {
                     glog!("ZMODEM recv: header read error: {}", e);
@@ -683,8 +694,23 @@ where
                     send_zrinit(writer, is_tcp, verbose).await?;
                     continue;
                 }
-                // Between-files read error: assume peer went away.
-                break;
+                // Between-files header parse error (CRC mismatch, bad
+                // framing, etc.).  Per Forsberg §7 we ZNAK to ask the
+                // sender for a retransmit of the last header.  Without
+                // this, a single bit-flip on an inter-file
+                // ZFILE/ZFIN/ZRINIT silently truncates the rest of a
+                // long batch.  Bound by max_retries so a permanently-
+                // broken link doesn't loop forever.
+                inter_file_header_errors = inter_file_header_errors.saturating_add(1);
+                if inter_file_header_errors > cfg.zmodem_max_retries {
+                    send_cancel(writer, is_tcp).await.ok();
+                    return Err(format!(
+                        "ZMODEM: {} consecutive inter-file header errors, aborting",
+                        inter_file_header_errors
+                    ));
+                }
+                send_znak(writer, is_tcp, verbose).await?;
+                continue;
             }
             Err(_) => {
                 if deadline_active {
@@ -1136,15 +1162,19 @@ pub(crate) async fn zmodem_send(
     let negotiation_retry_interval = cfg.zmodem_negotiation_retry_interval;
 
     // ─── Phase 1: ZRQINIT → ZRINIT (once, per session) ──────
+    //
+    // Initial ZRQINIT goes out before the loop.  Inside the loop we
+    // only re-send + bump the retry counter on actual timeouts/read
+    // errors — a stale ZRQINIT or unexpected frame from the receiver
+    // doesn't burn a retry, since the bytes proved the link is alive.
     let deadline = tokio::time::Instant::now()
         + tokio::time::Duration::from_secs(negotiation_timeout);
     let mut attempts: u32 = 0;
+    send_zrqinit(writer, is_tcp, verbose).await?;
     loop {
         if tokio::time::Instant::now() >= deadline || attempts >= max_retries {
             return Err("ZMODEM: no ZRINIT from receiver".into());
         }
-        send_zrqinit(writer, is_tcp, verbose).await?;
-        attempts += 1;
 
         match tokio::time::timeout(
             tokio::time::Duration::from_secs(negotiation_retry_interval),
@@ -1154,7 +1184,10 @@ pub(crate) async fn zmodem_send(
         {
             Ok(Ok(h)) if h.frame == ZRINIT => break,
             Ok(Ok(h)) if h.frame == ZRQINIT => {
-                // Receiver also sent a ZRQINIT (non-standard); continue.
+                // Receiver also sent a ZRQINIT (non-standard, but
+                // some implementations do this on startup).  Don't
+                // count it against retries — we have proof the link
+                // is alive.
                 continue;
             }
             Ok(Ok(h)) => {
@@ -1170,6 +1203,8 @@ pub(crate) async fn zmodem_send(
                 if verbose {
                     glog!("ZMODEM send: ZRINIT wait timed out, re-sending ZRQINIT");
                 }
+                attempts += 1;
+                send_zrqinit(writer, is_tcp, verbose).await?;
                 continue;
             }
         }
@@ -1360,9 +1395,17 @@ pub(crate) async fn zmodem_send(
         }
 
         // ─── Phase 4: ZEOF → ZRINIT ──────────────────────────
+        //
+        // The post-ZEOF ZRINIT wait is intentionally longer than the
+        // per-frame timeout: the receiver may need to flush its file
+        // to disk before sending ZRINIT, and on slow or
+        // synchronously-fsync'd filesystems that flush can take
+        // several seconds.  Distinct from `frame_timeout` so a slow
+        // commit doesn't cascade into a per-frame timeout config bump.
+        const POST_ZEOF_ZRINIT_TIMEOUT_SECS: u64 = 15;
         let mut zeof_attempts: u32 = 0;
         loop {
-            if zeof_attempts >= 5 {
+            if zeof_attempts >= max_retries {
                 send_cancel(writer, is_tcp).await.ok();
                 return Err("ZMODEM: receiver did not acknowledge ZEOF".into());
             }
@@ -1370,7 +1413,7 @@ pub(crate) async fn zmodem_send(
             send_zeof(writer, is_tcp, data.len() as u32, verbose).await?;
 
             match tokio::time::timeout(
-                tokio::time::Duration::from_secs(15),
+                tokio::time::Duration::from_secs(POST_ZEOF_ZRINIT_TIMEOUT_SECS),
                 read_header(reader, is_tcp, &mut state, verbose),
             )
             .await
@@ -1544,6 +1587,24 @@ async fn send_zfin(
     Ok(())
 }
 
+/// Send a ZNAK hex header.  Per Forsberg §7 the receiver sends ZNAK to
+/// tell the sender "I got bytes but couldn't parse them; please
+/// retransmit the last header."  Used for between-files header CRC
+/// errors so a single bit-flip on a ZFILE/ZFIN doesn't truncate the
+/// rest of a long batch.
+async fn send_znak(
+    writer: &mut (impl AsyncWrite + Unpin),
+    is_tcp: bool,
+    verbose: bool,
+) -> Result<(), String> {
+    let frame = build_hex_header(ZNAK, [0, 0, 0, 0]);
+    raw_write_bytes(writer, &frame, is_tcp).await?;
+    if verbose {
+        glog!("ZMODEM: sent ZNAK");
+    }
+    Ok(())
+}
+
 /// Send a ZSKIP hex header.  Per Forsberg §7 the receiver sends ZSKIP
 /// instead of ZRPOS to tell the sender "I don't want this file, go on
 /// to the next one."
@@ -1610,7 +1671,7 @@ mod tests {
 
     #[test]
     fn test_zdle_escape_required_bytes() {
-        for &b in &[ZDLE, 0x10, 0x11, 0x13, 0x0D, 0x8D, 0x90, 0x91, 0x93] {
+        for &b in &[ZDLE, 0x10, 0x11, 0x13, 0x0D, 0x8D, 0x90, 0x91, 0x93, 0x98] {
             let mut v = Vec::new();
             push_escaped(&mut v, b);
             assert_eq!(v, vec![ZDLE, b ^ 0x40], "byte 0x{:02X}", b);
@@ -2066,7 +2127,7 @@ mod tests {
         // ZDLE (0x18), XON, XOFF, DLE, high-bit versions.
         let mut original = Vec::new();
         for _ in 0..SUBPACKET_DATA_SIZE {
-            for &b in &[0x18u8, 0x11, 0x13, 0x10, 0x91, 0x93, 0x90, 0x8D, 0x0D] {
+            for &b in &[0x18u8, 0x11, 0x13, 0x10, 0x91, 0x93, 0x90, 0x98, 0x8D, 0x0D] {
                 original.push(b);
             }
         }
