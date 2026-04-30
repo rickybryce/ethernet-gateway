@@ -982,15 +982,21 @@ pub(crate) async fn read_packet(
 
     // 6. Consume the trailing EOL (best-effort — peer may omit it).
     //
-    // Use a tight 50 ms side-deadline rather than the full per-packet
+    // Use a 200 ms side-deadline rather than the full per-packet
     // deadline.  A peer that omits EOL (spec says they shouldn't but
     // some terse implementations do) would otherwise stall this read
     // until the session deadline, which materially delays per-packet
     // delivery in streaming mode.  If the next byte isn't EOL we
     // pushback for the next packet's MARK hunt.
+    //
+    // 200 ms is large enough for one full byte-time at 110 bps
+    // (~91 ms/byte) so a vintage hardline-modem peer that DOES emit
+    // EOL still gets it captured on the trailing-byte path rather
+    // than punted into the next packet's MARK hunt; cuts per-packet
+    // dead time on slow links.
     if eol != 0 {
         let now = tokio::time::Instant::now();
-        let eol_window = tokio::time::Duration::from_millis(50);
+        let eol_window = tokio::time::Duration::from_millis(200);
         let eol_deadline = Some(match deadline {
             Some(d) => d.min(now + eol_window),
             None => now + eol_window,
@@ -1000,7 +1006,7 @@ pub(crate) async fn read_packet(
             Ok(b) => {
                 state.pushback = Some(b);
             }
-            Err(_) => {} // EOF or 50 ms timeout after a valid packet is fine
+            Err(_) => {} // EOF or 200 ms timeout after a valid packet is fine
         }
     }
 
@@ -2233,6 +2239,13 @@ pub(crate) async fn kermit_send_with_starting_seq(
                 ..Attributes::default()
             };
             let a_payload = encode_data(&encode_attributes(&attrs), send_q);
+            // A-packets are bounded ~50–100 B in practice but a peer
+            // with a tiny MAXL combined with long ISO-date / system_id
+            // strings could in theory tip over the classic-MAXL
+            // ceiling.  Same fail-safe as the D-packet emit sites so
+            // we never silently shift to extended-length form against
+            // a peer that didn't advertise long_packets.
+            check_encoded_fits(&a_payload, &session)?;
             let ack_payload = send_and_await_ack(
                 reader,
                 writer,
@@ -2287,11 +2300,12 @@ pub(crate) async fn kermit_send_with_starting_seq(
         // D-packets.  Pick chunk size so that after typical quoting
         // expansion the encoded payload still fits in MAXL.  Worst-
         // case quoting (high-bit control bytes hitting qbin + qctl +
-        // ctl(body)) is ~3x; typical binary/text quotes at ~1.1x.
-        // 3/4 × MAXL leaves 25 % headroom — enough for typical data.
-        // Adversarial all-control-byte input *can* exceed the
-        // headroom, so each call site below also runs
-        // `check_encoded_fits` as a fail-fast backstop.
+        // ctl(body)) is ~3x; typical binary/text quotes at ~1.1x;
+        // medium-density binary (all-byte-values) lands around 1.5x.
+        // 1/2 × MAXL leaves 100 % headroom — covers up to 2x quoting
+        // comfortably.  Adversarial all-control-byte input *can* still
+        // exceed even this headroom, so each call site below also
+        // runs `check_encoded_fits` as a fail-fast backstop.
         let cklen = check_size(session.chkt);
         let header_overhead = if session.long_packets && session.maxl > CLASSIC_MAX_PACKET_LEN as u16
         {

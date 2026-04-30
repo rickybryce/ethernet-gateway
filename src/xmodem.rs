@@ -629,6 +629,18 @@ async fn receive_block_body(
         *byte = nvt_read_byte(reader, is_tcp, state).await?;
     }
 
+    // Auto-detect mutations are deferred until after all post-validation
+    // checks pass.  Without this, a complement-mismatch / wrong-block /
+    // duplicate Err'd block whose trailer happened to validate under the
+    // alternate mode would leave `*mode` flipped and a stray byte in
+    // `state.pushback` — wedging the session for the next read.
+    enum AutoDetect {
+        None,
+        LockToCrc,
+        LockToChecksum { pushback: u8 },
+    }
+    let mut detected = AutoDetect::None;
+
     let valid = match *mode {
         TransferMode::Checksum => {
             let recv_checksum = nvt_read_byte(reader, is_tcp, state).await?;
@@ -645,8 +657,8 @@ async fn receive_block_body(
                 let recv_crc = ((recv_checksum as u16) << 8) | crc_lo as u16;
                 let calc_crc = crc16_xmodem(&data);
                 if recv_crc == calc_crc {
-                    if verbose { glog!("XMODEM recv block: auto-detect locked to CRC16 (CRC=0x{:04X})", calc_crc); }
-                    *mode = TransferMode::Crc16;
+                    if verbose { glog!("XMODEM recv block: auto-detect would lock to CRC16 (CRC=0x{:04X})", calc_crc); }
+                    detected = AutoDetect::LockToCrc;
                     true
                 } else {
                     false
@@ -671,12 +683,13 @@ async fn receive_block_body(
                 // crc_hi as a 1-byte checksum on the payload.  If
                 // it matches, crc_lo was actually the next byte on
                 // the wire (next block's SOH or EOT) — push it back
-                // for the next read.  Lock the session to checksum.
+                // for the next read.  Defer the lock + pushback
+                // commit until we're sure the rest of the block is
+                // acceptable.
                 let calc_checksum = data.iter().fold(0u8, |acc, &b| acc.wrapping_add(b));
                 if crc_hi == calc_checksum {
-                    if verbose { glog!("XMODEM recv block: auto-detect locked to Checksum (sum=0x{:02X}, pushing back trailer byte 0x{:02X})", calc_checksum, crc_lo); }
-                    *mode = TransferMode::Checksum;
-                    state.pushback = Some(crc_lo);
+                    if verbose { glog!("XMODEM recv block: auto-detect would lock to Checksum (sum=0x{:02X}, would push back trailer byte 0x{:02X})", calc_checksum, crc_lo); }
+                    detected = AutoDetect::LockToChecksum { pushback: crc_lo };
                     true
                 } else {
                     false
@@ -708,6 +721,21 @@ async fn receive_block_body(
     if block_num != *expected_block {
         if verbose { glog!("XMODEM recv block: FAIL block number 0x{:02X} != expected 0x{:02X}", block_num, *expected_block); }
         return Err("Block number mismatch".into());
+    }
+
+    // Block fully accepted — now safe to commit the auto-detect mode
+    // flip (and pushback for the checksum-under-CRC case).
+    match detected {
+        AutoDetect::None => {}
+        AutoDetect::LockToCrc => {
+            if verbose { glog!("XMODEM recv block: locking session to CRC16"); }
+            *mode = TransferMode::Crc16;
+        }
+        AutoDetect::LockToChecksum { pushback } => {
+            if verbose { glog!("XMODEM recv block: locking session to Checksum, pushing back 0x{:02X}", pushback); }
+            *mode = TransferMode::Checksum;
+            state.pushback = Some(pushback);
+        }
     }
 
     *expected_block = expected_block.wrapping_add(1);
@@ -2175,6 +2203,48 @@ mod tests {
         assert_eq!(state.pushback, Some(next_block_soh),
             "the byte read past the 1-byte checksum trailer must be pushed back");
         assert_eq!(expected, 2);
+    }
+
+    /// Auto-detect must NOT commit its mode flip / pushback if the
+    /// block ultimately fails the complement / duplicate / wrong-block
+    /// checks.  Models the case where a corrupt block happens to have
+    /// a trailer byte that coincidentally validates under the alternate
+    /// mode — the receiver must NAK and stay in its original mode
+    /// rather than wedging the session with a stale pushback.
+    #[tokio::test]
+    async fn test_receive_block_body_auto_detect_rolls_back_on_complement_mismatch() {
+        let payload: Vec<u8> = (0..XMODEM_BLOCK_SIZE).map(|i| (i * 7) as u8).collect();
+        let crc = crc16_xmodem(&payload);
+        // CRC-format trailer is correct, but we'll feed a BAD complement.
+        let mut wire = payload.clone();
+        wire.push((crc >> 8) as u8);
+        wire.push((crc & 0xFF) as u8);
+
+        let mut reader = std::io::Cursor::new(wire);
+        let mut state = ReadState::default();
+        let mut expected = 1u8;
+        let mut mode = TransferMode::Checksum;
+
+        let err = receive_block_body(
+            &mut reader,
+            1,
+            0xAB, // INTENTIONALLY wrong complement (correct = !1 = 0xFE)
+            &mut expected,
+            &mut mode,
+            false,
+            false,
+            XMODEM_BLOCK_SIZE,
+            &mut state,
+            true, // auto_detect
+        )
+        .await
+        .expect_err("complement-mismatch must reject the block");
+
+        assert!(err.contains("complement"));
+        assert!(matches!(mode, TransferMode::Checksum),
+            "mode must NOT flip when the block ultimately fails validation");
+        assert_eq!(state.pushback, None,
+            "pushback must NOT be committed when the block ultimately fails validation");
     }
 
     /// Auto-detect off (subsequent blocks): a CRC-mode validation
