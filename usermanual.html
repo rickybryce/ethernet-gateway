@@ -1097,6 +1097,8 @@ protocol to use:
   X  XMODEM       (128-byte blocks)
   1  XMODEM-1K    (1024-byte blocks)
   Y  YMODEM       (filename + size header, 1K)
+  Z  ZMODEM       (autostart, 1K subpackets)
+  K  KERMIT       (any flavor, auto-detected)
 
   Pick one, or ESC to cancel:</code></pre>
 
@@ -1119,19 +1121,31 @@ The selection affects what the sender does:
 <h2 id="ch8-zmodem">8.5 ZMODEM Autostart Detection</h2>
 
 <p>
-ZMODEM (Chuck Forsberg's 1986 protocol, with its famous automatic "rz"
-trigger) is <strong>not</strong> supported. However, many terminal programs
-start a ZMODEM send by emitting the autostart sequence <code>**\x18B</code>,
-<code>**\x18A</code>, or <code>**\x18C</code>. If the gateway's idle input
-loop sees that pattern, it:
+ZMODEM (Chuck Forsberg's 1988 protocol) is fully supported, including
+batch send, batch receive, and ZSKIP. Many terminal programs (Qodem,
+ZOC, SyncTerm, ExtraPuTTY) start a ZMODEM send by emitting the
+autostart sequence <code>**\x18B</code>, <code>**\x18A</code>, or
+<code>**\x18C</code> directly into whatever menu the user happens to
+be sitting at &mdash; users expect to drag a file onto the terminal
+and have it transfer without first navigating to a menu. The gateway's
+idle input loop watches for that prefix and:
 </p>
 
 <ol>
-    <li>Logs "ZMODEM autostart detected; sending abort".</li>
-    <li>Transmits the standard abort: five <code>CAN</code> bytes (0x18 &times; 5) followed by five <code>BS</code> bytes (0x08 &times; 5) to wipe any "rz\r" prompt.</li>
-    <li>Pauses 500 ms and drains any in-flight ZMODEM frames.</li>
-    <li>Displays a friendly notice: "ZMODEM autostart detected &mdash; aborting. ZMODEM is not yet supported by this server. Please use XMODEM, XMODEM-1K, or YMODEM from the File Transfer menu instead."</li>
+    <li>Logs "File transfer: ZMODEM autostart detected; switching to receive".</li>
+    <li>Drains any residual ZRQINIT bytes the sender already pushed (it'll retransmit once we ZRINIT).</li>
+    <li>Hands off to the regular ZMODEM receive flow &mdash; the sender's filename is used (after path-traversal validation), with mtime and mode applied if carried in the ZFILE subpacket.</li>
+    <li>Returns to whichever menu the user was on when the autostart fired.</li>
 </ol>
+
+<p>
+You can also drive a ZMODEM transfer manually: from the File Transfer
+menu pick <span class="kbd">U</span> (upload) or <span class="kbd">D</span>
+(download), select <code>Z</code> at the protocol prompt, and start the
+send/receive on your terminal. Manual mode is the only option for
+clients that don't emit the autostart prefix (some MS-DOS-era
+implementations, scripted <code>sz</code> on Unix).
+</p>
 
 <h2>8.6 Telnet NVT Transforms</h2>
 

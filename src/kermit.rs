@@ -4028,6 +4028,20 @@ fn kermit_g_help_text() -> &'static str {
 /// (generic command — F/L/B/C/D/$/K/H/?), `I` (re-init), `B` (clean
 /// EOT), `E` (peer abort), and `C` (host command — always refused).
 ///
+/// `on_file` runs once per uploaded file, immediately after the S
+/// dispatch returns (i.e. after the peer's B-packet has been ACKed).
+/// This is the hook the caller uses to commit each file to disk
+/// before the next dispatch — closes the gap where a disconnect or
+/// idle timeout *between* S-batches would have stranded the data
+/// in memory, and lets the user see files right away instead of
+/// waiting for `finish` / idle timeout.  Note: a disconnect *within*
+/// a single S-batch (e.g. mid-way through a multi-file `put a b c`
+/// that the peer sent as one S → F → A → D…Z → F → A → D…Z → B
+/// sequence) still loses the in-flight files — `kermit_receive_with_init`
+/// doesn't fire `on_file` per Z, only at session-batch return.
+/// Pass `|_| {}` if disk-commit timing doesn't matter (in-process
+/// tests do this).
+///
 /// Returns the list of files received from the peer over the lifetime
 /// of the session (one S command per file batch — multiple batches
 /// possible across a single server-mode session).  Returns `Err` only
@@ -4039,6 +4053,7 @@ pub(crate) async fn kermit_server(
     is_tcp: bool,
     is_petscii: bool,
     verbose: bool,
+    mut on_file: impl FnMut(&KermitReceive),
 ) -> Result<Vec<KermitReceive>, String> {
     let cfg = config::get_config();
     if verbose {
@@ -4347,6 +4362,15 @@ pub(crate) async fn kermit_server(
                         "Kermit server: S-dispatch returned {} file(s)",
                         received.len()
                     );
+                }
+                // Commit each file via the caller's hook before the
+                // next dispatch.  Doing this here (instead of after
+                // `kermit_server` returns) means the file is on disk
+                // by the time we go back to reading the next command,
+                // so a peer disconnect or idle-timeout afterwards
+                // can't strand the data in memory.
+                for rx in &received {
+                    on_file(rx);
                 }
                 all_received.extend(received);
                 continue;
@@ -6062,7 +6086,7 @@ mod tests {
         let (mut s_read, mut s_write) = split(server_side);
         let (mut c_read, mut c_write) = split(client_side);
         let server_task = tokio::spawn(async move {
-            kermit_server(&mut s_read, &mut s_write, false, false, false).await
+            kermit_server(&mut s_read, &mut s_write, false, false, false, |_| {}).await
         });
         let client_result = client(&mut c_write, &mut c_read).await;
         // Flush so any pending bytes from client side reach the server.
@@ -6656,7 +6680,7 @@ mod tests {
         let (mut s_read, mut s_write) = split(server_side);
         let (mut c_read, mut c_write) = split(client_side);
         let server_task = tokio::spawn(async move {
-            kermit_server(&mut s_read, &mut s_write, false, false, false).await
+            kermit_server(&mut s_read, &mut s_write, false, false, false, |_| {}).await
         });
 
         let help = kermit_client_help(&mut c_read, &mut c_write, false, false, false)
@@ -6939,7 +6963,7 @@ mod tests {
         let (mut s_read, mut s_write) = split(server_side);
         let (mut c_read, mut c_write) = split(client_side);
         let server_task = tokio::spawn(async move {
-            kermit_server(&mut s_read, &mut s_write, false, false, false).await
+            kermit_server(&mut s_read, &mut s_write, false, false, false, |_| {}).await
         });
 
         config::update_config_value("transfer_dir", &dir_str);
@@ -7022,7 +7046,7 @@ mod tests {
         let (mut s_read, mut s_write) = split(server_side);
         let (mut c_read, mut c_write) = split(client_side);
         let server_task = tokio::spawn(async move {
-            kermit_server(&mut s_read, &mut s_write, false, false, false).await
+            kermit_server(&mut s_read, &mut s_write, false, false, false, |_| {}).await
         });
 
         config::update_config_value("transfer_dir", &dir_str);
@@ -7071,7 +7095,7 @@ mod tests {
         let (mut s_read, mut s_write) = split(server_side);
         let (mut c_read, mut c_write) = split(client_side);
         let server_task = tokio::spawn(async move {
-            kermit_server(&mut s_read, &mut s_write, false, false, false).await
+            kermit_server(&mut s_read, &mut s_write, false, false, false, |_| {}).await
         });
 
         // First upload via kermit_send.
@@ -7104,6 +7128,75 @@ mod tests {
         assert_eq!(received[0].data, payload_a);
         assert_eq!(received[1].filename, "second.bin");
         assert_eq!(received[1].data, payload_b);
+    }
+
+    #[tokio::test]
+    async fn test_server_on_file_callback_fires_per_s_dispatch() {
+        // Locks in the immediate-dispatch save semantics.  Each S
+        // command must invoke `on_file` before the dispatch loop
+        // reads the next command — otherwise the old "buffer until
+        // session end" behavior would silently re-emerge and a
+        // multi-file batch interrupted between dispatches would
+        // lose the completed files.  We synchronize via an mpsc
+        // channel so the test deterministically observes the
+        // callback firing without sleeping or polling.
+        let _guard = CONFIG_LOCK.lock().await;
+        init_test_config();
+
+        let payload_a: Vec<u8> = b"first immediate".to_vec();
+        let payload_b: Vec<u8> = b"second immediate".to_vec();
+        let pa = payload_a.clone();
+        let pb = payload_b.clone();
+
+        let (server_side, client_side) = duplex(65536);
+        let (mut s_read, mut s_write) = split(server_side);
+        let (mut c_read, mut c_write) = split(client_side);
+
+        let (cb_tx, mut cb_rx) =
+            tokio::sync::mpsc::unbounded_channel::<(String, Vec<u8>)>();
+        let server_task = tokio::spawn(async move {
+            kermit_server(&mut s_read, &mut s_write, false, false, false, move |rx| {
+                cb_tx
+                    .send((rx.filename.clone(), rx.data.clone()))
+                    .expect("test channel closed before callback");
+            })
+            .await
+        });
+
+        // File A.  After kermit_send returns, the client has seen
+        // the B-ACK; we then await the channel to confirm the
+        // server's on_file actually ran before we send file B.
+        let kfile_a = KermitSendFile {
+            name: "first.bin",
+            data: &pa,
+            modtime: None,
+            mode: None,
+        };
+        kermit_send(&mut c_read, &mut c_write, &[kfile_a], false, false, false)
+            .await
+            .unwrap();
+        let (name_a, data_a) = cb_rx.recv().await.expect("on_file must fire after B-ACK");
+        assert_eq!(name_a, "first.bin");
+        assert_eq!(data_a, payload_a);
+
+        // File B.  Same invariant — the callback fires for B
+        // independently of any session-end signal.
+        let kfile_b = KermitSendFile {
+            name: "second.bin",
+            data: &pb,
+            modtime: None,
+            mode: None,
+        };
+        kermit_send(&mut c_read, &mut c_write, &[kfile_b], false, false, false)
+            .await
+            .unwrap();
+        let (name_b, data_b) = cb_rx.recv().await.expect("on_file must fire for second file too");
+        assert_eq!(name_b, "second.bin");
+        assert_eq!(data_b, payload_b);
+
+        close_server_session(&mut c_write, &mut c_read).await;
+        let received = server_task.await.unwrap().unwrap();
+        assert_eq!(received.len(), 2);
     }
 
     #[tokio::test]
@@ -7163,7 +7256,7 @@ mod tests {
         let (mut s_read, mut s_write) = split(server_side);
         let (mut c_read, mut c_write) = split(client_side);
         let server_task = tokio::spawn(async move {
-            kermit_server(&mut s_read, &mut s_write, false, false, false).await
+            kermit_server(&mut s_read, &mut s_write, false, false, false, |_| {}).await
         });
         let fname = filename.to_string();
         let client_task = tokio::spawn(async move {
@@ -7291,7 +7384,7 @@ mod tests {
         let (mut s_read, mut s_write) = split(server_side);
         let (mut c_read, mut c_write) = split(client_side);
         let server_task = tokio::spawn(async move {
-            kermit_server(&mut s_read, &mut s_write, false, false, false).await
+            kermit_server(&mut s_read, &mut s_write, false, false, false, |_| {}).await
         });
         let client_result = client(&mut c_read, &mut c_write).await;
         let server_result = server_task.await.unwrap();
@@ -9426,7 +9519,7 @@ mod tests {
         // telnet-mode connection ckermit -j establishes.
         let server_result = tokio::time::timeout(
             tokio::time::Duration::from_secs(30),
-            kermit_server(&mut r, &mut w, true, false, true),
+            kermit_server(&mut r, &mut w, true, false, true, |_| {}),
         )
         .await
         .expect("kermit_server timed out");
@@ -9534,7 +9627,7 @@ mod tests {
 
         let server_result = tokio::time::timeout(
             tokio::time::Duration::from_secs(30),
-            kermit_server(&mut r, &mut w, true, false, true),
+            kermit_server(&mut r, &mut w, true, false, true, |_| {}),
         )
         .await
         .expect("kermit_server timed out");

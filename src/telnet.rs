@@ -3504,6 +3504,43 @@ impl TelnetSession {
         }
     }
 
+    /// Sync sibling of `save_received_file` for callers that can't
+    /// `.await` (e.g. the Kermit server's on-file callback, which runs
+    /// inside a non-async closure).  Same atomic create-new semantics
+    /// and the same `SaveError` discrimination — only the I/O backend
+    /// differs.  At the file sizes we deal with (≤8 MB) the blocking
+    /// write is sub-millisecond on SSD and a few ms on spinning disk;
+    /// briefly stalling the runtime is preferable to plumbing async
+    /// closures through `kermit_server`'s generic boundary.
+    fn save_received_file_sync(
+        path: &std::path::Path,
+        data: &[u8],
+        meta: Option<&crate::xmodem::YmodemReceiveMeta>,
+    ) -> Result<(), SaveError> {
+        use std::io::Write;
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(mut file) => {
+                if file.write_all(data).is_err() {
+                    return Err(SaveError::WriteFailed);
+                }
+                if file.flush().is_err() {
+                    return Err(SaveError::WriteFailed);
+                }
+                drop(file);
+                Self::apply_ymodem_meta(path, meta);
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(SaveError::AlreadyExists)
+            }
+            Err(_) => Err(SaveError::WriteFailed),
+        }
+    }
+
     /// Apply YMODEM block-0 metadata to a freshly saved file.  Both
     /// modtime and mode are best-effort — failures are ignored because
     /// they don't affect data integrity.  Mode is masked to `0o777` so
@@ -4601,12 +4638,12 @@ impl TelnetSession {
         self.send_line("  Compatible clients:").await?;
         self.send_line(&format!(
             "    {} use the built-in Kermit menu",
-            self.cyan("ExtraPuTTY / SyncTerm / Tera Term / IMP8 —")
+            self.cyan("Tera Term / Kermit-95 —")
         ))
         .await?;
         self.send_line(&format!(
             "    {} run from a separate shell:",
-            self.cyan("C-Kermit —")
+            self.cyan("C-Kermit / G-Kermit —")
         ))
         .await?;
         self.send_line(&format!(
@@ -4665,6 +4702,14 @@ impl TelnetSession {
         let verbose = config::get_config().verbose;
         let is_petscii = self.terminal_type == TerminalType::Petscii;
 
+        // Saved/skipped lists are populated by the on-file callback as
+        // each S-dispatch completes — see the `kermit_server` doc
+        // comment.  Hoisting them out here keeps the summary render
+        // below independent of what kermit_server returns.
+        let mut saved: Vec<(String, usize)> = Vec::new();
+        let mut skipped: Vec<(String, &'static str)> = Vec::new();
+        let target_dir = self.transfer_path();
+
         let start = std::time::Instant::now();
         let result = {
             let mut writer_guard = self.writer.lock().await;
@@ -4674,51 +4719,39 @@ impl TelnetSession {
                 self.xmodem_iac,
                 is_petscii,
                 verbose,
+                |rx| {
+                    if Self::validate_filename(&rx.filename).is_err() {
+                        skipped.push((rx.filename.clone(), "invalid filename"));
+                        return;
+                    }
+                    let filepath = target_dir.join(&rx.filename);
+                    let meta = crate::xmodem::YmodemReceiveMeta {
+                        size: rx.declared_size,
+                        modtime: rx.modtime,
+                        mode: rx.mode,
+                    };
+                    match Self::save_received_file_sync(&filepath, &rx.data, Some(&meta)) {
+                        Ok(()) => saved.push((rx.filename.clone(), rx.data.len())),
+                        Err(SaveError::AlreadyExists) => {
+                            skipped.push((rx.filename.clone(), "already exists"));
+                        }
+                        Err(SaveError::WriteFailed) => {
+                            skipped.push((rx.filename.clone(), "write failed"));
+                        }
+                    }
+                },
             )
             .await
         };
         let elapsed = start.elapsed();
 
-        // Save received files (from any S commands the peer sent
-        // during the session).  Mirror the existing upload save flow:
-        // validate filename, refuse to clobber existing files, apply
-        // mtime/mode if available.
-        let received = match result {
-            Ok(rxs) => rxs,
-            Err(e) => {
-                self.post_transfer_settle().await;
-                self.show_error(&format!("Server session failed: {}", e))
-                    .await?;
-                return Ok(());
-            }
-        };
-
-        let mut saved: Vec<(String, usize)> = Vec::new();
-        let mut skipped: Vec<(String, &'static str)> = Vec::new();
-        let target_dir = self.transfer_path();
-        for rx in &received {
-            if Self::validate_filename(&rx.filename).is_err() {
-                skipped.push((rx.filename.clone(), "invalid filename"));
-                continue;
-            }
-            let filepath = target_dir.join(&rx.filename);
-            let meta = crate::xmodem::YmodemReceiveMeta {
-                size: rx.declared_size,
-                modtime: rx.modtime,
-                mode: rx.mode,
-            };
-            match Self::save_received_file(&filepath, &rx.data, Some(&meta)).await {
-                Ok(()) => {
-                    saved.push((rx.filename.clone(), rx.data.len()));
-                }
-                Err(SaveError::AlreadyExists) => {
-                    skipped.push((rx.filename.clone(), "already exists"));
-                }
-                Err(SaveError::WriteFailed) => {
-                    skipped.push((rx.filename.clone(), "write failed"));
-                }
-            }
-        }
+        // On Err the closure may have already committed files to
+        // disk before the failure — fall through to the summary so
+        // the user sees which ones landed, with the error shown
+        // alongside.  Early-returning here would silently drop
+        // saved/skipped, which is the bug the audit caught.
+        let error_msg = result.err().map(|e| format!("Server session failed: {}", e));
+        let total = saved.len() + skipped.len();
 
         // Summary screen.
         self.post_transfer_settle().await;
@@ -4728,9 +4761,12 @@ impl TelnetSession {
             elapsed.as_secs_f64()
         ))
         .await?;
+        if let Some(msg) = &error_msg {
+            self.send_line(&format!("  {}", self.red(msg))).await?;
+        }
         self.send_line(&format!(
             "  Received: {} file(s), saved: {}, skipped: {}.",
-            received.len(),
+            total,
             saved.len(),
             skipped.len()
         ))
