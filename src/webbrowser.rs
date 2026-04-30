@@ -122,6 +122,7 @@ pub(crate) fn fetch_and_render(url: &str, width: usize) -> Result<WebPage, Strin
     );
 
     // Try the request; if HTTPS fails with a TLS error, retry with HTTP
+    let mut tls_downgraded = false;
     let response = match agent
         .get(url)
         .header("User-Agent", "EthernetGateway/1.0 (text-mode browser)")
@@ -130,6 +131,7 @@ pub(crate) fn fetch_and_render(url: &str, width: usize) -> Result<WebPage, Strin
     {
         Ok(r) => r,
         Err(e) if url.starts_with("https://") && is_tls_error(&e) => {
+            tls_downgraded = true;
             let http_url = format!("http://{}", &url["https://".len()..]);
             agent
                 .get(&http_url)
@@ -160,7 +162,7 @@ pub(crate) fn fetch_and_render(url: &str, width: usize) -> Result<WebPage, Strin
         .read_to_end(&mut body_bytes)
         .map_err(|e| format!("Read error: {}", e))?;
 
-    if content_type.contains("text/plain") {
+    let mut page = if content_type.contains("text/plain") {
         // Plain text: just split into lines and wrap
         let text = String::from_utf8_lossy(&body_bytes);
         let lines: Vec<String> = text
@@ -168,16 +170,44 @@ pub(crate) fn fetch_and_render(url: &str, width: usize) -> Result<WebPage, Strin
             .flat_map(|line| wrap_line(line, width))
             .take(MAX_RENDERED_LINES)
             .collect();
-        return Ok(WebPage {
+        WebPage {
             title: None,
             lines,
             links: Vec::new(),
             url: final_url,
             forms: Vec::new(),
-        });
-    }
+        }
+    } else {
+        render_html_body(&body_bytes, final_url, width)?
+    };
 
-    render_html_body(&body_bytes, final_url, width)
+    if tls_downgraded {
+        prepend_tls_downgrade_notice(&mut page, width);
+    }
+    Ok(page)
+}
+
+/// Insert a visible warning at the top of the page when we silently
+/// fell back from HTTPS to HTTP because of a TLS error.  Without this,
+/// the user has no signal that their request is now in the clear —
+/// dangerous for any page that reads cookies, form data, or
+/// authentication.
+fn prepend_tls_downgrade_notice(page: &mut WebPage, width: usize) {
+    let notice = "[!] HTTPS failed (TLS error) — page fetched over plain HTTP.";
+    let separator = "-".repeat(notice.len().min(width));
+    let mut header: Vec<String> = Vec::new();
+    header.extend(wrap_line(notice, width));
+    header.push(separator);
+    header.push(String::new());
+    // Prepend (cap total to MAX_RENDERED_LINES so we don't blow past
+    // the rendering budget).
+    let header_len = header.len();
+    header.append(&mut page.lines);
+    page.lines = header.into_iter().take(MAX_RENDERED_LINES).collect();
+    // Track that the notice was prepended so caller link offsets stay
+    // aligned — link indices are derived from page.links separately
+    // and don't index into page.lines, so no adjustment needed.
+    let _ = header_len;
 }
 
 /// Submit a form (GET or POST) and return the resulting page.
@@ -224,6 +254,7 @@ pub(crate) fn submit_form(base_url: &str, form: &WebForm, width: usize) -> Resul
     );
 
     if form.method == "post" {
+        let mut tls_downgraded = false;
         let response = match agent
             .post(&action_url)
             .header("User-Agent", "EthernetGateway/1.0 (text-mode browser)")
@@ -231,6 +262,7 @@ pub(crate) fn submit_form(base_url: &str, form: &WebForm, width: usize) -> Resul
         {
             Ok(r) => r,
             Err(e) if action_url.starts_with("https://") && is_tls_error(&e) => {
+                tls_downgraded = true;
                 let http_url = format!("http://{}", &action_url["https://".len()..]);
                 agent
                     .post(&http_url)
@@ -256,23 +288,27 @@ pub(crate) fn submit_form(base_url: &str, form: &WebForm, width: usize) -> Resul
             .read_to_end(&mut body_bytes)
             .map_err(|e| format!("Read error: {}", e))?;
 
-        if content_type.contains("text/plain") {
+        let mut page = if content_type.contains("text/plain") {
             let text = String::from_utf8_lossy(&body_bytes);
             let lines: Vec<String> = text
                 .lines()
                 .flat_map(|line| wrap_line(line, width))
                 .take(MAX_RENDERED_LINES)
                 .collect();
-            return Ok(WebPage {
+            WebPage {
                 title: None,
                 lines,
                 links: Vec::new(),
                 url: final_url,
                 forms: Vec::new(),
-            });
+            }
+        } else {
+            render_html_body(&body_bytes, final_url, width)?
+        };
+        if tls_downgraded {
+            prepend_tls_downgrade_notice(&mut page, width);
         }
-
-        render_html_body(&body_bytes, final_url, width)
+        Ok(page)
     } else {
         // GET: append query string to URL
         let mut url = url::Url::parse(&action_url)
@@ -854,8 +890,17 @@ pub(crate) fn fetch_gopher(url: &str, width: usize) -> Result<WebPage, String> {
 
     let mut stream = std::io::BufWriter::new(stream);
     use std::io::Write;
+    // Strip CR/LF from the selector so a user-supplied search query
+    // containing literal \r\n can't inject extra protocol lines.
+    // Gopher selectors are single-line by spec; only TAB is meaningful
+    // (delimits item-type 7 search queries).  NUL is also stripped to
+    // avoid C-string-style truncation by old gopher daemons.
+    let safe_selector: String = selector
+        .chars()
+        .filter(|&c| c != '\r' && c != '\n' && c != '\0')
+        .collect();
     stream
-        .write_all(format!("{}\r\n", selector).as_bytes())
+        .write_all(format!("{}\r\n", safe_selector).as_bytes())
         .map_err(|e| format!("Write error: {}", e))?;
     stream.flush().map_err(|e| format!("Flush error: {}", e))?;
 
