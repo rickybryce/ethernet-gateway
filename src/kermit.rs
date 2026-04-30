@@ -1440,6 +1440,11 @@ pub(crate) struct KermitReceive {
     /// Detected peer flavor for this session.  Telnet surfaces this in
     /// the post-transfer summary so the user knows whom they talked to.
     pub flavor: KermitFlavor,
+    /// True when an on-disk partial was pre-loaded into `data` and
+    /// merged with the sender's resumed stream.  The saver uses this
+    /// to atomically replace the partial file (tmp + rename) instead
+    /// of refusing the write with `AlreadyExists`.
+    pub resumed: bool,
 }
 
 /// Single source-file payload accepted by `kermit_send`.
@@ -1870,11 +1875,17 @@ pub(crate) fn parse_attributes(data: &[u8]) -> Attributes {
 // RESUME-PARTIAL HELPER
 // =============================================================================
 
-/// Maximum accepted filename length in safety-validated paths.
-/// Matches `TelnetSession::MAX_FILENAME_LEN` so a peer-supplied name
-/// that passes our kermit-layer guard is also acceptable to the
-/// telnet save path; this avoids an asymmetry where the protocol
-/// would round-trip a filename that the saver then refuses.
+/// Maximum accepted filename length in path-traversal checks.
+/// Matches `TelnetSession::MAX_FILENAME_LEN`.  The two checks live in
+/// different functions because they answer different questions:
+/// `validate_filename` (in telnet.rs) is the strict ruleset that
+/// decides whether we can save a file with this name — it runs at
+/// F-packet receipt to fail fast — while `is_safe_resume_filename`
+/// (below) is the path-traversal-only check used for resume lookup
+/// against `transfer_dir`.  The latter is intentionally looser so
+/// that names already on disk from earlier sessions (or external
+/// processes) remain eligible for resume even if a stricter saver
+/// rule lands later.
 const MAX_KERMIT_FILENAME_LEN: usize = 64;
 
 /// Maximum accepted CWD-subdir length.  Generous enough for several
@@ -3451,6 +3462,34 @@ pub(crate) async fn kermit_receive_with_init(
                         fname
                     );
                 }
+                // Refuse names that won't survive the saver's strict
+                // ruleset (`[A-Za-z0-9._-]`) up front rather than
+                // accepting the upload, consuming all the D-packets,
+                // and silently dropping at save time.  C-Kermit's
+                // default `set file names converted` produces names
+                // that pass; a sender insisting on a literal name
+                // with spaces / parens / unicode hits this and gets
+                // a clean refusal it can show the user, instead of
+                // a successful-looking transfer that vanished.
+                if let Err(reason) =
+                    crate::telnet::TelnetSession::validate_filename(&fname)
+                {
+                    send_error(
+                        writer,
+                        pkt.seq,
+                        reason,
+                        session.chkt,
+                        session.npad,
+                        session.padc,
+                        session.eol,
+                        is_tcp,
+                    )
+                    .await?;
+                    return Err(format!(
+                        "Kermit recv: refused filename '{}': {}",
+                        fname, reason
+                    ));
+                }
                 if received.len() >= MAX_BATCH_FILES {
                     send_error(
                         writer,
@@ -3509,6 +3548,7 @@ pub(crate) async fn kermit_receive_with_init(
                     modtime: None,
                     mode: None,
                     flavor: flavor.clone(),
+                    resumed: false,
                 });
                 send_ack(
                     writer,
@@ -3621,6 +3661,7 @@ pub(crate) async fn kermit_receive_with_init(
                             let effective = offset.min(actual);
                             bytes.truncate(effective as usize);
                             last.data = bytes;
+                            last.resumed = true;
                             let resume_attrs = Attributes {
                                 disposition: Some(b'R'),
                                 length: Some(effective),
@@ -7812,6 +7853,12 @@ mod tests {
             received[0].data, full,
             "merged data must equal full file byte-for-byte"
         );
+        assert!(
+            received[0].resumed,
+            "resumed flag must be set when partial bytes were merged — \
+             the saver depends on this to atomic-replace the partial \
+             instead of refusing the write with AlreadyExists"
+        );
     }
 
     #[tokio::test]
@@ -8067,6 +8114,96 @@ mod tests {
             err.contains("exceeds") && err.contains("byte cap"),
             "got: {}",
             err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_receive_refuses_invalid_filename_at_f_packet() {
+        // Locks in the early-refusal: a sender F-packet whose name
+        // wouldn't survive `validate_filename` (e.g. spaces, parens,
+        // any ASCII outside [A-Za-z0-9._-]) must be rejected with an
+        // E-packet at F-packet receipt — BEFORE any D-packet body
+        // is consumed.  Without the early check the upload would
+        // appear successful on the wire (full S/F/A/D…/Z/B), get
+        // accepted into memory, then silently drop at save time as
+        // "skipped (invalid filename)".  We verify two things: the
+        // server returns Err with a refusal reason, AND an E-packet
+        // landed on the wire (so the sender's client logs a real
+        // explanation rather than seeing a dead socket).
+        let _guard = CONFIG_LOCK.lock().await;
+        init_test_config();
+
+        let peer_caps = Capabilities {
+            chkt: b'1',
+            maxl: 80,
+            ..Capabilities::default()
+        };
+        let init_payload = build_send_init_payload(&peer_caps);
+        let mut wire = build_packet(TYPE_SEND_INIT, 0, &init_payload, b'1', 0, 0, CR);
+        // F-packet at seq 1 with a name containing a space — common-
+        // form-disabled C-Kermit sending `My File.txt` would emit this.
+        wire.extend_from_slice(&build_packet(
+            TYPE_FILE,
+            1,
+            b"My File.txt",
+            b'1',
+            0,
+            0,
+            CR,
+        ));
+
+        let (peer_to_gw, gw_in) = tokio::io::duplex(8192);
+        let (gw_out, peer_from_gw) = tokio::io::duplex(8192);
+        let (mut gw_r, _) = tokio::io::split(gw_in);
+        let (_, mut gw_w) = tokio::io::split(gw_out);
+        let (mut peer_r, mut peer_w) = (
+            tokio::io::split(peer_from_gw).0,
+            tokio::io::split(peer_to_gw).1,
+        );
+
+        let peer_task = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            peer_w.write_all(&wire).await.ok();
+            // Drain everything the server writes so it doesn't block
+            // — we'll inspect the bytes after the server returns.
+            let mut buf = Vec::new();
+            let mut tmp = vec![0u8; 4096];
+            while let Ok(n) = peer_r.read(&mut tmp).await {
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+            }
+            buf
+        });
+
+        let result = kermit_receive(&mut gw_r, &mut gw_w, false, false, false).await;
+        // Drop the gw_w handle so the peer's read loop sees EOF and
+        // returns the buffered server output for inspection.
+        drop(gw_w);
+        let server_output = peer_task.await.expect("peer task panicked");
+
+        let err = result.expect_err("invalid filename must abort the receive");
+        assert!(
+            err.contains("refused filename"),
+            "expected refusal-reason in error, got: {}",
+            err
+        );
+        // Server output must contain an E-packet (TYPE_ERROR = b'E')
+        // somewhere — we don't try to parse it strictly, just verify
+        // a 'E' packet-kind byte appears after the SOH in the stream.
+        // The first packet on the wire is the Y-ACK to the Send-Init;
+        // the E-packet follows.
+        assert!(
+            server_output.windows(2).any(|w| w[0] == 0x01 && {
+                // SOH byte; next non-control bytes are LEN + SEQ + TYPE.
+                // Walk forward to TYPE which sits at offset 3 after SOH.
+                let i = w.as_ptr() as usize - server_output.as_ptr() as usize;
+                server_output.get(i + 3).copied() == Some(b'E')
+            }),
+            "expected an E-packet in server output, got {} bytes: {:?}",
+            server_output.len(),
+            &server_output[..server_output.len().min(64)]
         );
     }
 
