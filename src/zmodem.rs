@@ -47,7 +47,6 @@ const ZCRCW: u8 = b'k';         // more data next frame, ACK required
 // Frame types
 const ZRQINIT: u8 = 0x00;
 const ZRINIT: u8 = 0x01;
-#[allow(dead_code)]
 const ZSINIT: u8 = 0x02;
 const ZACK: u8 = 0x03;
 const ZFILE: u8 = 0x04;
@@ -67,6 +66,13 @@ const ZCAN: u8 = 0x10;
 const CANFDX: u8 = 0x01;        // full-duplex link
 const CANOVIO: u8 = 0x02;       // can overlap I/O
 const CANFC32: u8 = 0x20;       // can receive CRC-32 frames
+
+// ZSINIT flags (ZF0 byte of the ZSINIT header) — Forsberg §11.3.
+// Sender uses these to tell the receiver about extra escaping the link
+// requires.
+const TESCCTL: u8 = 0x40;       // sender wants all control characters escaped
+#[allow(dead_code)]
+const TESC8: u8 = 0x80;         // sender wants the 8th-bit duals escaped too
 
 // Telnet IAC + raw I/O now live in `crate::tnio` (shared with xmodem
 // and kermit).
@@ -786,14 +792,29 @@ where
                 return Err("ZMODEM: sender aborted".into());
             }
             ZSINIT => {
-                // Per Forsberg §11.3: sender announces its escape
-                // requirements (TESCCTL bit in ZF0) and its Attn
-                // sequence in a small ZDLE-escaped subpacket.  We
-                // must drain the subpacket and respond with ZACK,
-                // otherwise the sender stalls waiting for our reply.
-                // We don't act on the Attn sequence — it's only used
-                // by senders that want the receiver to interrupt them
-                // mid-stream, which isn't part of our use case.
+                // Per Forsberg §11.3 the sender uses ZSINIT to declare
+                // extra escape requirements (TESCCTL/TESC8 bits in ZF0)
+                // and its Attn sequence.  We:
+                //   1. Parse ZF0 so a sender that asks for stricter
+                //      escaping (TESCCTL) sees us acknowledge the
+                //      request rather than silently ignoring it.  Our
+                //      receiver-side outbound is exclusively hex
+                //      headers (build_hex_header doesn't go through
+                //      push_escaped — the framing is 7-bit ASCII +
+                //      CR/LF/XON), so TESCCTL has no behavioral
+                //      change on our outbound.  Logged in verbose
+                //      mode so an operator chasing escape-related
+                //      interop bugs can see it.
+                //   2. Drain the subpacket carrying the Attn
+                //      sequence — required so the sender doesn't
+                //      stall waiting for ZACK.  We don't act on
+                //      Attn (only relevant to senders that want
+                //      the receiver to interrupt mid-stream).
+                //   3. ZACK with payload `0` (the de-facto convention
+                //      among lrzsz/Qodem/etc. — the spec leaves the
+                //      data field unspecified for ZSINIT.ZACK).
+                let escctl = hdr.data[0] & TESCCTL != 0;
+                let esc8 = hdr.data[0] & TESC8 != 0;
                 let _ = read_subpacket(
                     reader,
                     is_tcp,
@@ -802,9 +823,14 @@ where
                     32, // ZATTNLEN cap per spec
                 )
                 .await;
-                send_zack(writer, is_tcp, 1, verbose).await?;
+                send_zack(writer, is_tcp, 0, verbose).await?;
                 if verbose {
-                    glog!("ZMODEM recv: ACKed ZSINIT (escape-mode negotiation)");
+                    glog!(
+                        "ZMODEM recv: ACKed ZSINIT (ZF0=0x{:02X} escctl={} esc8={})",
+                        hdr.data[0],
+                        escctl,
+                        esc8
+                    );
                 }
                 continue;
             }
@@ -3367,6 +3393,98 @@ mod tests {
         const _: () = assert!(CANFDX == 0x01);
         const _: () = assert!(CANOVIO == 0x02);
         const _: () = assert!(CANFC32 == 0x20);
+    }
+
+    #[test]
+    fn test_forsberg_section11_3_zsinit_zf0_flag_bits() {
+        // §11.3 ZSINIT capability flags (ZF0 byte):
+        //   TESCCTL = 0x40 — sender wants all control chars escaped
+        //   TESC8   = 0x80 — sender wants 8th-bit duals escaped too
+        // We surface both during the ZSINIT handler so a sender that
+        // requests stricter escaping sees us acknowledge the request.
+        const _: () = assert!(TESCCTL == 0x40);
+        const _: () = assert!(TESC8 == 0x80);
+    }
+
+    /// Drive a ZSINIT with TESCCTL set in ZF0 through the receiver and
+    /// verify it ZACKs without aborting.  The receiver's outbound is
+    /// hex headers (no ZDLE escape), so TESCCTL has no behavioral
+    /// change; this test locks down the parsing + ack contract so a
+    /// future regression can't silently start dropping the request.
+    #[tokio::test]
+    async fn test_zsinit_escctl_acknowledged() {
+        let (sender_half, receiver_half) = tokio::io::duplex(8192);
+        let (mut s_read, mut s_write) = tokio::io::split(sender_half);
+        let (mut r_read, mut r_write) = tokio::io::split(receiver_half);
+
+        let recv_task = tokio::spawn(async move {
+            // Decline any file the sender offers.  We just want to
+            // verify ZSINIT handling; the rest of the session ends
+            // on the first ZFILE via ZSKIP.
+            zmodem_receive(&mut r_read, &mut r_write, false, false, |_, _, _| false)
+                .await
+        });
+
+        // Drain receiver's initial "rz\r" + ZRINIT.
+        let mut buf = [0u8; 256];
+        let n = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            s_read.read(&mut buf),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(n > 0);
+
+        // Send ZSINIT with TESCCTL set, then a small subpacket
+        // carrying an empty Attn sequence.
+        let zsinit = build_hex_header(ZSINIT, [TESCCTL, 0, 0, 0]);
+        s_write.write_all(&zsinit).await.unwrap();
+        // Empty Attn subpacket: just the close marker + CRC.
+        let attn_sub = build_subpacket(&[], ZCRCW);
+        s_write.write_all(&attn_sub).await.unwrap();
+
+        // Receiver should respond with ZACK then re-emit ZRINIT.
+        let n = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            s_read.read(&mut buf),
+        )
+        .await
+        .expect("receiver must respond to ZSINIT")
+        .unwrap();
+        let response = &buf[..n];
+        // ZACK is a hex header — its frame type byte sits at offset 6
+        // (ZPAD ZPAD ZDLE B + nibble-pair encoding the frame byte).
+        // Don't pin the exact bytes; instead assert ZACK appears
+        // somewhere in the response stream by searching the decoded
+        // hex nibbles.
+        let saw_zack = response
+            .windows(8)
+            .any(|w| w[0] == ZPAD && w[1] == ZPAD && w[2] == ZDLE
+                 && w[3] == ZHEX && w[4] == b'0' && w[5] == b'3');
+        assert!(
+            saw_zack,
+            "receiver must ZACK an ESCCTL ZSINIT (response was {:?})",
+            response
+        );
+
+        // Tear down: send a ZFIN.  Receiver mirrors and emits "OO",
+        // session ends cleanly.
+        let zfin = build_hex_header(ZFIN, [0, 0, 0, 0]);
+        s_write.write_all(&zfin).await.unwrap();
+        // Drain whatever the receiver emits during teardown.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            s_read.read(&mut buf),
+        )
+        .await;
+        drop(s_write);
+
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            recv_task,
+        )
+        .await;
     }
 
     #[test]

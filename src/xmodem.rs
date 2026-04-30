@@ -230,7 +230,14 @@ pub(crate) async fn xmodem_receive(
                     }
                     // Not YMODEM block 0 — treat as an ordinary first
                     // data block.  `receive_block_body` takes the
-                    // already-read header bytes.
+                    // already-read header bytes.  Pass `auto_detect=true`
+                    // so a trailer-format mismatch falls back to the
+                    // alternate mode and locks the session — closes the
+                    // negotiation timing race against vintage senders
+                    // (Christensen 1977 / CP/M MODEM7 / C64 BBS clients
+                    // that ignore 'C' until NAK'd) and against modern
+                    // senders that started in CRC mode but our flip to
+                    // checksum landed mid-flight.
                     match tokio::time::timeout(
                         std::time::Duration::from_secs(BLOCK_BODY_TIMEOUT_SECS),
                         receive_block_body(
@@ -238,11 +245,12 @@ pub(crate) async fn xmodem_receive(
                             block_num,
                             block_complement,
                             &mut expected_block,
-                            mode,
+                            &mut mode,
                             is_tcp,
                             verbose,
                             block_size,
                             state,
+                            true, // auto_detect on first block
                         ),
                     )
                     .await
@@ -314,7 +322,7 @@ pub(crate) async fn xmodem_receive(
                     receive_block(
                         reader,
                         &mut expected_block,
-                        mode,
+                        &mut mode,
                         is_tcp,
                         verbose,
                         block_size,
@@ -443,7 +451,7 @@ pub(crate) async fn xmodem_receive(
 async fn receive_block(
     reader: &mut (impl AsyncRead + Unpin),
     expected_block: &mut u8,
-    mode: TransferMode,
+    mode: &mut TransferMode,
     is_tcp: bool,
     verbose: bool,
     block_size: usize,
@@ -461,6 +469,7 @@ async fn receive_block(
         verbose,
         block_size,
         state,
+        false, // mode locked after first block
     )
     .await
 }
@@ -588,33 +597,63 @@ fn parse_ymodem_block_zero_payload(payload: &[u8]) -> Option<YmodemReceiveMeta> 
 /// already been read by the caller.  Used for YMODEM first-block
 /// handling where we peek at `block_num` to distinguish block 0
 /// (filename header) from block 1 (first data block).
+///
+/// `auto_detect` is true only for the first data block.  When true, a
+/// trailer-format mismatch falls back to the alternate mode and locks
+/// `mode` to whatever validates — closes the negotiation timing race
+/// where the receiver's mode-flip happened mid-flight against a sender
+/// that hadn't yet seen the new request.  After the first block we
+/// trust the mode; per-block auto-detect would carry a 1/256 false-
+/// positive risk that a coincidental checksum match swallows a CRC
+/// block's low byte.
 #[allow(clippy::too_many_arguments)]
 async fn receive_block_body(
     reader: &mut (impl AsyncRead + Unpin),
     block_num: u8,
     block_complement: u8,
     expected_block: &mut u8,
-    mode: TransferMode,
+    mode: &mut TransferMode,
     is_tcp: bool,
     verbose: bool,
     block_size: usize,
     state: &mut ReadState,
+    auto_detect: bool,
 ) -> Result<Vec<u8>, String> {
-    if verbose { glog!("XMODEM recv block: num=0x{:02X} complement=0x{:02X} expected=0x{:02X} size={} mode={}",
+    if verbose { glog!("XMODEM recv block: num=0x{:02X} complement=0x{:02X} expected=0x{:02X} size={} mode={}{}",
         block_num, block_complement, *expected_block, block_size,
-        match mode { TransferMode::Crc16 => "CRC16", TransferMode::Checksum => "Checksum" }); }
+        match *mode { TransferMode::Crc16 => "CRC16", TransferMode::Checksum => "Checksum" },
+        if auto_detect { " (auto-detect)" } else { "" }); }
 
     let mut data = vec![0u8; block_size];
     for byte in data.iter_mut() {
         *byte = nvt_read_byte(reader, is_tcp, state).await?;
     }
 
-    let valid = match mode {
+    let valid = match *mode {
         TransferMode::Checksum => {
             let recv_checksum = nvt_read_byte(reader, is_tcp, state).await?;
             let calc_checksum = data.iter().fold(0u8, |acc, &b| acc.wrapping_add(b));
             if verbose { glog!("XMODEM recv block: checksum recv=0x{:02X} calc=0x{:02X}", recv_checksum, calc_checksum); }
-            recv_checksum == calc_checksum
+            if recv_checksum == calc_checksum {
+                true
+            } else if auto_detect {
+                // Mismatch on the first block — sender may still be
+                // in CRC mode despite our checksum NAK.  Read one
+                // more byte and try CRC validation; if that matches,
+                // lock the session into CRC mode.
+                let crc_lo = nvt_read_byte(reader, is_tcp, state).await?;
+                let recv_crc = ((recv_checksum as u16) << 8) | crc_lo as u16;
+                let calc_crc = crc16_xmodem(&data);
+                if recv_crc == calc_crc {
+                    if verbose { glog!("XMODEM recv block: auto-detect locked to CRC16 (CRC=0x{:04X})", calc_crc); }
+                    *mode = TransferMode::Crc16;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
         }
         TransferMode::Crc16 => {
             let crc_hi = nvt_read_byte(reader, is_tcp, state).await?;
@@ -622,7 +661,29 @@ async fn receive_block_body(
             let recv_crc = ((crc_hi as u16) << 8) | crc_lo as u16;
             let calc_crc = crc16_xmodem(&data);
             if verbose { glog!("XMODEM recv block: CRC recv=0x{:04X} calc=0x{:04X}", recv_crc, calc_crc); }
-            recv_crc == calc_crc
+            if recv_crc == calc_crc {
+                true
+            } else if auto_detect {
+                // Mismatch on the first block — sender may be in
+                // checksum mode (vintage Christensen 1977 / CP/M
+                // MODEM7 / C64 BBS uploaders that don't speak CRC
+                // and ignored our 'C' until we NAK'd).  Validate
+                // crc_hi as a 1-byte checksum on the payload.  If
+                // it matches, crc_lo was actually the next byte on
+                // the wire (next block's SOH or EOT) — push it back
+                // for the next read.  Lock the session to checksum.
+                let calc_checksum = data.iter().fold(0u8, |acc, &b| acc.wrapping_add(b));
+                if crc_hi == calc_checksum {
+                    if verbose { glog!("XMODEM recv block: auto-detect locked to Checksum (sum=0x{:02X}, pushing back trailer byte 0x{:02X})", calc_checksum, crc_lo); }
+                    *mode = TransferMode::Checksum;
+                    state.pushback = Some(crc_lo);
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
         }
     };
 
@@ -2024,6 +2085,136 @@ mod tests {
         // block 0, stripping the NUL padding we sent to fill the
         // 128-byte block.
         assert_eq!(&received[..], &payload_data[..]);
+    }
+
+    /// Auto-detect, mode = Checksum but sender sent CRC-format trailer:
+    /// the function should validate as CRC, lock the mode to CRC, and
+    /// accept the block.  Models the negotiation timing race where our
+    /// mode-flip to checksum landed mid-flight against a CRC-capable
+    /// sender that already started transmitting in CRC mode.
+    #[tokio::test]
+    async fn test_receive_block_body_auto_detect_crc_under_checksum_mode() {
+        // Build wire bytes for a CRC-format block 1 with a known
+        // payload.  The block-num + complement bytes are NOT included
+        // because the test calls receive_block_body which expects
+        // those to have already been read by the caller.
+        let payload: Vec<u8> = (0..XMODEM_BLOCK_SIZE).map(|i| (i * 7) as u8).collect();
+        let crc = crc16_xmodem(&payload);
+        let mut wire = payload.clone();
+        wire.push((crc >> 8) as u8);
+        wire.push((crc & 0xFF) as u8);
+
+        let mut reader = std::io::Cursor::new(wire);
+        let mut state = ReadState::default();
+        let mut expected = 1u8;
+        let mut mode = TransferMode::Checksum;
+
+        let result = receive_block_body(
+            &mut reader,
+            1,    // block_num
+            !1u8, // block_complement
+            &mut expected,
+            &mut mode,
+            false, // is_tcp
+            false, // verbose
+            XMODEM_BLOCK_SIZE,
+            &mut state,
+            true, // auto_detect
+        )
+        .await
+        .expect("auto-detect should accept CRC-format trailer");
+
+        assert_eq!(result, payload);
+        assert!(matches!(mode, TransferMode::Crc16),
+            "mode must lock to CRC after auto-detect");
+        assert_eq!(expected, 2);
+    }
+
+    /// Inverse: mode = CRC but sender sent a checksum-format trailer
+    /// (vintage Christensen 1977 / CP/M MODEM7 / C64 BBS uploader that
+    /// ignored our 'C' and started in checksum mode).  Auto-detect
+    /// should fall back to checksum and pushback the would-be CRC-low
+    /// byte for the next read.
+    #[tokio::test]
+    async fn test_receive_block_body_auto_detect_checksum_under_crc_mode() {
+        let payload: Vec<u8> = (0..XMODEM_BLOCK_SIZE)
+            .map(|i| ((i * 11) ^ 0x5A) as u8)
+            .collect();
+        let checksum = payload.iter().fold(0u8, |acc, &b| acc.wrapping_add(b));
+        // After payload + 1-byte checksum, the wire would carry the
+        // next block's SOH (0x01) — simulate it so we can verify the
+        // pushback restores it for the next read.
+        let next_block_soh = SOH;
+        let mut wire = payload.clone();
+        wire.push(checksum);
+        wire.push(next_block_soh);
+
+        let mut reader = std::io::Cursor::new(wire);
+        let mut state = ReadState::default();
+        let mut expected = 1u8;
+        let mut mode = TransferMode::Crc16;
+
+        let result = receive_block_body(
+            &mut reader,
+            1,
+            !1u8,
+            &mut expected,
+            &mut mode,
+            false,
+            false,
+            XMODEM_BLOCK_SIZE,
+            &mut state,
+            true,
+        )
+        .await
+        .expect("auto-detect should accept checksum-format trailer");
+
+        assert_eq!(result, payload);
+        assert!(matches!(mode, TransferMode::Checksum),
+            "mode must lock to checksum after auto-detect");
+        assert_eq!(state.pushback, Some(next_block_soh),
+            "the byte read past the 1-byte checksum trailer must be pushed back");
+        assert_eq!(expected, 2);
+    }
+
+    /// Auto-detect off (subsequent blocks): a CRC-mode validation
+    /// failure must NOT silently fall back to checksum.  Locks down
+    /// the post-first-block mode-stability invariant.
+    #[tokio::test]
+    async fn test_receive_block_body_no_auto_detect_after_first_block() {
+        let payload: Vec<u8> = (0..XMODEM_BLOCK_SIZE).map(|i| (i * 13) as u8).collect();
+        let checksum = payload.iter().fold(0u8, |acc, &b| acc.wrapping_add(b));
+        // CRC mode expecting 2 bytes, but the sender sent only 1
+        // (checksum-format).  With auto_detect=false, the receiver
+        // reads 2 bytes (the checksum + the next block's SOH) and
+        // validates them as CRC — which fails.  No fallback.
+        let mut wire = payload.clone();
+        wire.push(checksum);
+        wire.push(SOH);
+
+        let mut reader = std::io::Cursor::new(wire);
+        let mut state = ReadState::default();
+        let mut expected = 1u8;
+        let mut mode = TransferMode::Crc16;
+
+        let err = receive_block_body(
+            &mut reader,
+            1,
+            !1u8,
+            &mut expected,
+            &mut mode,
+            false,
+            false,
+            XMODEM_BLOCK_SIZE,
+            &mut state,
+            false, // auto_detect off
+        )
+        .await
+        .expect_err("non-first-block must reject mode mismatch");
+
+        assert!(err.contains("Checksum/CRC error"));
+        assert!(matches!(mode, TransferMode::Crc16),
+            "mode must NOT flip after first block");
     }
 
     /// Test 3: duplicate block from an unusual sender (phantom NAK
