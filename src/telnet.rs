@@ -1445,11 +1445,18 @@ impl TelnetSession {
 
     /// Create a session for a serial modem connection.  Uses ASCII terminal
     /// (no color, no IAC), skips terminal detection and authentication.
+    ///
+    /// Serial sessions don't have a peer IP and don't run
+    /// `authenticate()`, so the lockout map is genuinely empty —
+    /// there's nothing to count against.  Kept as a constructor
+    /// parameter for API symmetry with `new_ssh` so future code can't
+    /// accidentally diverge.
     pub(crate) fn new_serial(
         reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>,
         writer: SharedWriter,
         shutdown: Arc<AtomicBool>,
         restart: Arc<AtomicBool>,
+        lockouts: LockoutMap,
     ) -> Self {
         Self {
             reader,
@@ -1459,7 +1466,7 @@ impl TelnetSession {
             current_menu: Menu::Main,
             terminal_type: TerminalType::Ascii,
             erase_char: 0x7F,
-            lockouts: Arc::new(Mutex::new(HashMap::new())),
+            lockouts,
             peer_addr: None,
             transfer_subdir: String::new(),
             xmodem_iac: false,
@@ -1489,12 +1496,20 @@ impl TelnetSession {
     /// Create a session for an SSH connection.  Uses ANSI terminal
     /// (color, no IAC), skips terminal detection and authentication
     /// (already handled by the SSH layer).
+    ///
+    /// `lockouts` is the SAME map the telnet listener uses, so any
+    /// future code that wires `TelnetSession::authenticate()` into
+    /// the SSH path inherits cross-IP attempt counting that already
+    /// applies to the SSH `auth_password` handler.  Without this
+    /// sharing, an SSH-side TelnetSession::authenticate() call would
+    /// silently bypass the lockout enforcement done in `ssh.rs`.
     pub(crate) fn new_ssh(
         reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>,
         writer: SharedWriter,
         shutdown: Arc<AtomicBool>,
         restart: Arc<AtomicBool>,
         peer_addr: Option<IpAddr>,
+        lockouts: LockoutMap,
     ) -> Self {
         Self {
             reader,
@@ -1504,7 +1519,7 @@ impl TelnetSession {
             current_menu: Menu::Main,
             terminal_type: TerminalType::Ansi,
             erase_char: 0x7F,
-            lockouts: Arc::new(Mutex::new(HashMap::new())),
+            lockouts,
             peer_addr,
             transfer_subdir: String::new(),
             xmodem_iac: false,
@@ -10928,8 +10943,18 @@ pub fn start_server(
                 result = listener.accept() => {
                     match result {
                         Ok((stream, addr)) => {
-                            let current = session_count.load(Ordering::SeqCst);
-                            if current >= max_sessions {
+                            // Atomic claim: fetch_add returns the value
+                            // BEFORE the increment, so concurrent
+                            // accepts each see a unique slot.  This
+                            // mirrors `ssh.rs:234` and closes the
+                            // load-then-fetch_add TOCTOU window where
+                            // two threads could both observe
+                            // `current < max_sessions` and bust the
+                            // cap.  If we end up over the limit, roll
+                            // back the increment before rejecting.
+                            let prev = session_count.fetch_add(1, Ordering::SeqCst);
+                            if prev >= max_sessions {
+                                session_count.fetch_sub(1, Ordering::SeqCst);
                                 glog!("Telnet: rejected {} (max {} sessions)", addr, max_sessions);
                                 let _ = stream.try_write(b"Too many connections. Try again later.\r\n");
                                 drop(stream);
@@ -10938,14 +10963,14 @@ pub fn start_server(
                             if !security_enabled
                                 && let Some(reason) = reject_insecure_ip(addr.ip())
                             {
+                                session_count.fetch_sub(1, Ordering::SeqCst);
                                 glog!("Telnet: rejected {} ({})", addr, reason);
                                 let msg = format!("{}\r\n", reason);
                                 let _ = stream.try_write(msg.as_bytes());
                                 drop(stream);
                                 continue;
                             }
-                            session_count.fetch_add(1, Ordering::SeqCst);
-                            glog!("Telnet: connection from {} ({}/{})", addr, current + 1, max_sessions);
+                            glog!("Telnet: connection from {} ({}/{})", addr, prev + 1, max_sessions);
                             let sd = shutdown.clone();
                             let rs = restart.clone();
                             let sc = session_count.clone();
@@ -11169,6 +11194,45 @@ mod tests {
         }
         assert!(is_locked_out(&lockouts, ip1));
         assert!(!is_locked_out(&lockouts, ip2));
+    }
+
+    /// Lockout counter must reset after `LOCKOUT_DURATION` elapses
+    /// without a successful auth.  Faking the elapsed time via direct
+    /// map manipulation rather than waiting 5 minutes — the production
+    /// code reads `entry.1.elapsed()` so we can backdate `entry.1` to
+    /// simulate a stale lockout.
+    #[test]
+    fn test_lockout_counter_resets_after_duration() {
+        let lockouts: LockoutMap = Arc::new(Mutex::new(HashMap::new()));
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+
+        // Drive the counter to the lockout threshold.
+        for _ in 0..MAX_AUTH_ATTEMPTS {
+            record_auth_failure(&lockouts, ip);
+        }
+        assert!(is_locked_out(&lockouts, ip));
+
+        // Backdate the timestamp so it appears the lockout window
+        // already elapsed (decay path uses Instant::elapsed()).
+        {
+            let mut map = lockouts.lock().unwrap();
+            let stale = std::time::Instant::now()
+                .checked_sub(LOCKOUT_DURATION + std::time::Duration::from_secs(1))
+                .expect("backdate must succeed on supported platforms");
+            map.entry(ip).and_modify(|e| e.1 = stale);
+        }
+
+        // Stale lockout: not active, and the next failure resets the
+        // counter to 1 rather than continuing from 3.
+        assert!(
+            !is_locked_out(&lockouts, ip),
+            "expired lockout should not block"
+        );
+        assert_eq!(
+            record_auth_failure(&lockouts, ip),
+            1,
+            "counter must reset after the lockout window expires"
+        );
     }
 
     // ─── Known hosts ─────────────────────────────────────

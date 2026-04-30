@@ -392,6 +392,7 @@ impl russh::server::Handler for SshHandler {
 
         // Spawn the TelnetSession on the gateway side of the duplex.
         let writer_for_task = writer_arc.clone();
+        let lockouts_for_task = self.lockouts.clone();
         tokio::spawn(async move {
             let mut sess = telnet::TelnetSession::new_ssh(
                 Box::new(gateway_read),
@@ -399,6 +400,7 @@ impl russh::server::Handler for SshHandler {
                 shutdown,
                 restart,
                 peer_addr,
+                lockouts_for_task,
             );
             if let Err(e) = sess.run().await {
                 glog!("SSH: session error: {}", e);

@@ -1145,11 +1145,17 @@ fn dial_ethernet_gateway(state: &mut ModemState) {
     // Spawn TelnetSession on the tokio runtime.
     let writer_for_task = writer_arc.clone();
     state.handle.spawn(async move {
+        // Serial sessions don't auth, so this lockout map is
+        // intentionally empty and unshared — nothing to count.
+        let lockouts: crate::telnet::LockoutMap = std::sync::Arc::new(
+            std::sync::Mutex::new(std::collections::HashMap::new()),
+        );
         let mut session = crate::telnet::TelnetSession::new_serial(
             Box::new(async_read),
             writer_for_task.clone(),
             shutdown,
             restart,
+            lockouts,
         );
         if let Err(e) = session.run().await {
             glog!("Serial modem: session error: {}", e);

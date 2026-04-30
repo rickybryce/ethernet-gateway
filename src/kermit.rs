@@ -155,12 +155,21 @@ const MAX_BATCH_FILES: usize = 1000;
 const D_PACKET_TRACE_LIMIT: u32 = 3;
 
 /// Sender-side reservation for worst-case quoting blowup, expressed as
-/// a fraction `NUM / DEN` of the negotiated `MAXL` payload area.  3/4
-/// gives ~33 % headroom — covers typical binary and text comfortably,
-/// and the sender will fail rather than malform a packet on adversarial
-/// all-control-byte input.
-const QUOTING_HEADROOM_NUM: usize = 3;
-const QUOTING_HEADROOM_DEN: usize = 4;
+/// a fraction `NUM / DEN` of the negotiated `MAXL` payload area.  We
+/// pick a chunk size of 1/2 × max_payload, leaving 100 % headroom for
+/// QCTL/QBIN expansion.  Typical binary and text quote at ~1.1 ×;
+/// medium-density control-byte input (e.g. all-byte-values 0..255)
+/// quotes at ~1.5 ×; worst-case all-control-byte input quotes at ~3 ×
+/// which exceeds even this headroom — for that case the per-chunk
+/// `check_encoded_fits` guard below turns silent packet malformation
+/// into a clean session abort instead of emitting an extended-length
+/// packet a peer that didn't negotiate `long_packets` can't parse.
+///
+/// History: 3/4 was too aggressive — at MAXL=94 with binary data it
+/// produced encoded chunks ~1.5 × MAXL which silently overflowed into
+/// extended-length form against peers with long_packets=off.
+const QUOTING_HEADROOM_NUM: usize = 1;
+const QUOTING_HEADROOM_DEN: usize = 2;
 
 // =============================================================================
 // CHARACTER ENCODING PRIMITIVES
@@ -782,6 +791,47 @@ pub(crate) fn build_packet(
     out
 }
 
+/// Max DATA-area payload for D-packets to this peer.  Subtracts per-
+/// packet header + check overhead from the negotiated MAXL so a chunk
+/// produced via [`encode_data`] can be checked against this before it
+/// goes on the wire.  Header overhead is 2 + cklen for classic-length
+/// packets, 6 + cklen for extended-length form (LEN=0 marker + SEQ +
+/// TYPE + LENX1 + LENX2 + HCHECK).
+fn max_payload_for(session: &Capabilities) -> usize {
+    let cklen = check_size(session.chkt);
+    let header_overhead =
+        if session.long_packets && session.maxl > CLASSIC_MAX_PACKET_LEN as u16 {
+            6 + cklen
+        } else {
+            2 + cklen
+        };
+    (session.maxl as usize).saturating_sub(header_overhead)
+}
+
+/// Fail-fast backstop for D-packet body size after `encode_data`.  The
+/// chunk-size math uses `QUOTING_HEADROOM` to reserve worst-case
+/// expansion room, but adversarial all-control-byte input can still
+/// quote past the budget.  Without this check, that case silently
+/// pushes `body_len` over `CLASSIC_MAX_PACKET_LEN` and forces the
+/// extended-length form on a peer that didn't advertise it — which
+/// the peer can't parse.  Returning an error here surfaces the
+/// problem cleanly.
+fn check_encoded_fits(
+    encoded: &[u8],
+    session: &Capabilities,
+) -> Result<(), String> {
+    let max_payload = max_payload_for(session);
+    if encoded.len() > max_payload {
+        Err(format!(
+            "Kermit send: encoded D-packet body {} B exceeds MAXL payload area {} B (worst-case quoting blowup on adversarial input; reduce chunk_size or disable QBIN)",
+            encoded.len(),
+            max_payload
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 /// Read one packet from the wire, performing telnet IAC unescaping and
 /// CR-NUL stripping along the way.  Skips pre-MARK bytes (pad
 /// characters, line noise, leftover EOL from the previous packet).
@@ -931,15 +981,26 @@ pub(crate) async fn read_packet(
     }
 
     // 6. Consume the trailing EOL (best-effort — peer may omit it).
+    //
+    // Use a tight 50 ms side-deadline rather than the full per-packet
+    // deadline.  A peer that omits EOL (spec says they shouldn't but
+    // some terse implementations do) would otherwise stall this read
+    // until the session deadline, which materially delays per-packet
+    // delivery in streaming mode.  If the next byte isn't EOL we
+    // pushback for the next packet's MARK hunt.
     if eol != 0 {
-        // We don't insist on it; if the next byte isn't EOL we push it
-        // back via the read state for the next packet's MARK hunt.
-        match read_byte_with_deadline(reader, is_tcp, state, deadline).await {
+        let now = tokio::time::Instant::now();
+        let eol_window = tokio::time::Duration::from_millis(50);
+        let eol_deadline = Some(match deadline {
+            Some(d) => d.min(now + eol_window),
+            None => now + eol_window,
+        });
+        match read_byte_with_deadline(reader, is_tcp, state, eol_deadline).await {
             Ok(b) if b == eol => {}
             Ok(b) => {
                 state.pushback = Some(b);
             }
-            Err(_) => {} // EOF after a valid packet is fine
+            Err(_) => {} // EOF or 50 ms timeout after a valid packet is fine
         }
     }
 
@@ -2223,12 +2284,14 @@ pub(crate) async fn kermit_send_with_starting_seq(
         }
         let data_to_send = &f.data[data_offset..];
 
-        // D-packets.  Pick chunk size so that after worst-case quoting
-        // blowup the encoded payload still fits in MAXL.  Worst case is
-        // 3x for high-bit control bytes (qbin + qctl + ctl(body));
-        // typical binary or text is closer to 1.1x.  75% headroom
-        // covers typical data; adversarial all-control-byte input
-        // would fail-fast rather than malforming a packet.
+        // D-packets.  Pick chunk size so that after typical quoting
+        // expansion the encoded payload still fits in MAXL.  Worst-
+        // case quoting (high-bit control bytes hitting qbin + qctl +
+        // ctl(body)) is ~3x; typical binary/text quotes at ~1.1x.
+        // 3/4 × MAXL leaves 25 % headroom — enough for typical data.
+        // Adversarial all-control-byte input *can* exceed the
+        // headroom, so each call site below also runs
+        // `check_encoded_fits` as a fail-fast backstop.
         let cklen = check_size(session.chkt);
         let header_overhead = if session.long_packets && session.maxl > CLASSIC_MAX_PACKET_LEN as u16
         {
@@ -2305,6 +2368,7 @@ pub(crate) async fn kermit_send_with_starting_seq(
             // ancient Kermits that don't advertise sliding.
             for chunk in data_to_send.chunks(chunk_size) {
                 let encoded = encode_data(chunk, send_q);
+                check_encoded_fits(&encoded, &session)?;
                 d_packets_sent += 1;
                 if verbose && d_packets_sent <= D_PACKET_TRACE_LIMIT {
                     let pct = if !chunk.is_empty() {
@@ -2646,6 +2710,7 @@ async fn send_d_packets_windowed(
                 break;
             };
             let encoded = encode_data(chunk, send_q);
+            check_encoded_fits(&encoded, session)?;
             *d_packets_sent += 1;
             if verbose && *d_packets_sent <= D_PACKET_TRACE_LIMIT {
                 let pct = if !chunk.is_empty() {
@@ -2865,6 +2930,7 @@ async fn send_d_and_z_streaming(
     //    Memory is bounded by MAX_FILE_SIZE × ~1.05 (quoting headroom).
     for chunk in file_data.chunks(chunk_size) {
         let encoded = encode_data(chunk, send_q);
+        check_encoded_fits(&encoded, session)?;
         *d_packets_sent += 1;
         if verbose && *d_packets_sent <= D_PACKET_TRACE_LIMIT {
             let pct = if !chunk.is_empty() {
@@ -3471,24 +3537,34 @@ pub(crate) async fn kermit_receive_with_init(
                 // with spaces / parens / unicode hits this and gets
                 // a clean refusal it can show the user, instead of
                 // a successful-looking transfer that vanished.
-                if let Err(reason) =
-                    crate::telnet::TelnetSession::validate_filename(&fname)
-                {
-                    send_error(
-                        writer,
-                        pkt.seq,
-                        reason,
-                        session.chkt,
-                        session.npad,
-                        session.padc,
-                        session.eol,
-                        is_tcp,
-                    )
-                    .await?;
-                    return Err(format!(
-                        "Kermit recv: refused filename '{}': {}",
-                        fname, reason
-                    ));
+                //
+                // Only applies to F-packet headers (save-to-disk).
+                // X-packet bodies (text-for-display per da Cruz §5.3
+                // — `remote dir`, `remote help`, etc.) carry synthetic
+                // names that legitimate third-party Kermit servers
+                // emit with spaces or punctuation; refusing those
+                // would break interop on text-display replies that
+                // never touch disk.
+                if pkt.kind == TYPE_FILE {
+                    if let Err(reason) =
+                        crate::telnet::TelnetSession::validate_filename(&fname)
+                    {
+                        send_error(
+                            writer,
+                            pkt.seq,
+                            reason,
+                            session.chkt,
+                            session.npad,
+                            session.padc,
+                            session.eol,
+                            is_tcp,
+                        )
+                        .await?;
+                        return Err(format!(
+                            "Kermit recv: refused filename '{}': {}",
+                            fname, reason
+                        ));
+                    }
                 }
                 if received.len() >= MAX_BATCH_FILES {
                     send_error(
@@ -3579,29 +3655,46 @@ pub(crate) async fn kermit_receive_with_init(
                         a.record_format.map(|c| c as char),
                     );
                 }
-                if let Some(last) = received.last_mut() {
-                    last.declared_size = declared;
-                    last.mode = a.mode;
-                    last.modtime = a.date.as_deref().and_then(parse_kermit_date);
-                    if let Some(sz) = declared
-                        && sz > MAX_FILE_SIZE
-                    {
-                        send_error(
-                            writer,
-                            pkt.seq,
-                            "File too large",
-                            session.chkt,
-                            session.npad,
-                            session.padc,
-                            session.eol,
-                            is_tcp,
-                        )
-                        .await?;
-                        return Err(format!(
-                            "Kermit recv: peer file size {} exceeds {} cap",
-                            sz, MAX_FILE_SIZE
-                        ));
-                    }
+                let Some(last) = received.last_mut() else {
+                    // Spec §5.6 says A-packets are per-file metadata
+                    // attached to the just-arrived F-packet.  Receiving
+                    // an A without a prior F is a protocol violation
+                    // — match the D/Z handlers' E-packet response
+                    // rather than silently dropping the metadata.
+                    send_error(
+                        writer,
+                        pkt.seq,
+                        "Attribute packet without file header",
+                        session.chkt,
+                        session.npad,
+                        session.padc,
+                        session.eol,
+                        is_tcp,
+                    )
+                    .await?;
+                    return Err("Kermit recv: A-packet arrived before any F-packet".into());
+                };
+                last.declared_size = declared;
+                last.mode = a.mode;
+                last.modtime = a.date.as_deref().and_then(parse_kermit_date);
+                if let Some(sz) = declared
+                    && sz > MAX_FILE_SIZE
+                {
+                    send_error(
+                        writer,
+                        pkt.seq,
+                        "File too large",
+                        session.chkt,
+                        session.npad,
+                        session.padc,
+                        session.eol,
+                        is_tcp,
+                    )
+                    .await?;
+                    return Err(format!(
+                        "Kermit recv: peer file size {} exceeds {} cap",
+                        sz, MAX_FILE_SIZE
+                    ));
                 }
                 // Resume path: advertise disposition='R' + length=offset
                 // in the A-packet ACK payload, then pre-load the partial
