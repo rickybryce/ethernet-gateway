@@ -538,11 +538,16 @@
   <span class="key">Kermit server ready. Send commands or files.</span>
 
   Drive from your Kermit client, e.g. C-Kermit:
-    <span class="key">send &lt;file&gt;</span>           — upload a file to us
-    <span class="key">get &lt;file&gt;</span>            — download a file from us
-    <span class="key">remote dir</span>              — list files in current dir
-    <span class="key">remote cwd &lt;subdir&gt;</span>     — change our working subdir
-    <span class="key">finish | bye</span>            — end server session
+    <span class="key">send &lt;file&gt;</span>             — upload a file to us
+    <span class="key">get &lt;file&gt;</span>              — download a file from us
+    <span class="key">remote dir</span>                — list files in current dir
+    <span class="key">remote cwd &lt;subdir&gt;</span>       — change our working subdir
+    <span class="key">remote type &lt;file&gt;</span>        — display file contents
+    <span class="key">remote delete &lt;file&gt;</span>      — delete a file (alias: era)
+    <span class="key">remote rename &lt;old&gt; &lt;new&gt;</span> — rename a file
+    <span class="key">remote mkdir &lt;dir&gt;</span>       — create a subdirectory
+    <span class="key">remote rmdir &lt;dir&gt;</span>       — remove an empty subdirectory
+    <span class="key">finish | bye</span>              — end server session
 
   Inactivity timeout: <span class="val">5</span> min.
                 </div>
@@ -563,7 +568,7 @@
                         <tr><td><code>S</code></td><td>Send-Init starting an upload</td><td>Y-ACK with our capabilities, then drives the receive flow (F/A/D…/Z/B).</td></tr>
                         <tr><td><code>R</code></td><td>Receive-request: peer wants a file from us</td><td>Y-ACK to R, then sends S+F+A+D…+Z+B for the requested file.</td></tr>
                         <tr><td><code>I</code></td><td>Init: peer asks us to advertise capabilities</td><td>Y-ACK with a fresh Send-Init payload listing our caps.</td></tr>
-                        <tr><td><code>G</code></td><td>Generic command (F/L/B/C/D/$/K/H/?)</td><td>See the <a href="#g-subcommands">G subcommand reference</a>.</td></tr>
+                        <tr><td><code>G</code></td><td>Generic command (F/L/B/I/X/C/D/$/K/H/?/E/R/T/m/d)</td><td>See the <a href="#g-subcommands">G subcommand reference</a>.</td></tr>
                         <tr><td><code>C</code></td><td>Host command (run a shell command)</td><td><strong style="color: var(--red);">Refused</strong> with E-packet "Host commands disabled". Always.</td></tr>
                         <tr><td><code>E</code></td><td>Error packet from peer</td><td>Logged; session ends silently (per spec, E is fatal both ways).</td></tr>
                         <tr><td><code>B</code></td><td>EOT — end of transmission</td><td>ACK; session ends cleanly.</td></tr>
@@ -638,6 +643,31 @@
                             <td>Display the gateway's supported-subcommand list. Both <code>H</code> and <code>?</code> are accepted on the wire so older clients work too.</td>
                         </tr>
                         <tr>
+                            <td><code>remote delete &lt;file&gt;</code><br><span class="dim-text">aka <code>remote era</code>, <code>rdel</code></span></td>
+                            <td>G E</td>
+                            <td>Delete a file in the gateway's current effective directory. Filename is path-traversal-validated; missing or unsafe names return an E-packet. Wildcards are <em>not</em> expanded — operate on one filename per call.</td>
+                        </tr>
+                        <tr>
+                            <td><code>remote rename &lt;old&gt; &lt;new&gt;</code><br><span class="dim-text">aka <code>rrename</code></span></td>
+                            <td>G R</td>
+                            <td>Rename a file in place. Both names are field-encoded per spec §6.7 and validated separately; if the destination already exists the server refuses with an E-packet rather than silently clobbering it.</td>
+                        </tr>
+                        <tr>
+                            <td><code>remote type &lt;file&gt;</code><br><span class="dim-text">aka <code>rtype</code></span></td>
+                            <td>G T</td>
+                            <td>Display a file's contents on your terminal. Server delivers the file via the same X+Z inverse-transfer pattern as <code>remote dir</code>. Intended for text files — sending a binary will spew control bytes to your terminal, just like real Kermit.</td>
+                        </tr>
+                        <tr>
+                            <td><code>remote mkdir &lt;dir&gt;</code></td>
+                            <td>G m</td>
+                            <td>Create an empty subdirectory under the current effective directory. Wire letter is <em>lowercase</em> <code>m</code> per C-Kermit's <code>setgen('m', …)</code> — distinct from <code>M</code> (which the spec reserves for <code>remote message</code>). Single-component name only; nested-path creation is refused.</td>
+                        </tr>
+                        <tr>
+                            <td><code>remote rmdir &lt;dir&gt;</code></td>
+                            <td>G d</td>
+                            <td>Remove an <em>empty</em> directory. Lowercase <code>d</code> wire letter — distinct from <code>D</code> (DIRectory listing). Non-empty directories return an E-packet refusal; the operator must <code>remote delete</code> the contents first.</td>
+                        </tr>
+                        <tr>
                             <td><code>finish</code></td>
                             <td>G F</td>
                             <td>End the protocol session and return the gateway to the File Transfer menu. Your client stays connected at the telnet/SSH layer — most polite end-of-session.</td>
@@ -656,13 +686,17 @@
                 </table>
 
                 <div class="callout callout-info">
-                    <strong>What about <code>type</code>, <code>delete</code>, <code>rename</code>, <code>copy</code>, <code>mkdir</code>?</strong>
-                    These are spec-defined G subcommands but the gateway doesn't
-                    implement them — the server's reply on any unrecognised
-                    subcommand is a bare ACK, so your client will report a generic
-                    "command unsupported" rather than a useful error. Stick to the
-                    commands above. Use <code>get</code> + a local pager to read
-                    files, and manage the on-disk state out-of-band.
+                    <strong>What about <code>copy</code>, <code>host</code>, <code>set</code>, <code>who</code>, <code>print</code>, <code>message</code>, <code>query</code>, <code>status</code>?</strong>
+                    These don't fit a file-transfer gateway: <code>host</code> is a
+                    remote-shell primitive (security risk), <code>who</code> /
+                    <code>set</code> / <code>login</code> assume a multi-user host
+                    the gateway doesn't model, and <code>copy</code> overloads the
+                    <code>K</code> wire letter with KERMIT-identity (the dispatch
+                    distinction needs special-casing on argument count, not landed
+                    yet). The server refuses every unsupported subcommand with an
+                    E-packet per spec §6, so your client surfaces a clean "command
+                    not supported" error rather than the silent-ACK no-op that
+                    pre-2026-05 builds emitted.
                 </div>
 
                 <div class="callout callout-tip">
@@ -956,7 +990,14 @@
                         <tr><td><code>$</code></td><td>SPACE</td><td>ACK + X + Z</td><td>Returns free-bytes count as a decimal string, or <code>unknown</code> on platforms without <code>statvfs</code>.</td></tr>
                         <tr><td><code>K</code></td><td>KERMIT</td><td>ACK + X + Z</td><td>Returns server identity + version (<code>Ethernet Gateway Kermit 0.5.2</code>).</td></tr>
                         <tr><td><code>H</code> / <code>?</code></td><td>Help</td><td>ACK + X+ + Z</td><td>Returns the list of supported subcommands. Both <code>H</code> and <code>?</code> are accepted for compatibility.</td></tr>
-                        <tr><td>other</td><td>(unknown)</td><td>ACK</td><td>Per spec, unknown G subcommands are silently acknowledged and ignored.</td></tr>
+                        <tr><td><code>E</code></td><td>Erase / Delete</td><td>ACK on success, E on failure</td><td>Field-encoded filename per spec §6.7. Path-traversal rejected; missing files return E-packet (not silent ACK). One filename per call — no wildcard expansion.</td></tr>
+                        <tr><td><code>R</code></td><td>Rename</td><td>ACK on success, E on failure</td><td>Two field-encoded names back-to-back: source then destination. Server refuses if the destination already exists, to avoid silent clobber.</td></tr>
+                        <tr><td><code>T</code></td><td>Type</td><td>ACK + X+ + Z</td><td>Field-encoded filename. Server delivers file contents via inverse transfer. Intended for text — sending a binary will spew control bytes to the client's terminal.</td></tr>
+                        <tr><td><code>m</code></td><td>Mkdir</td><td>ACK on success, E on failure</td><td><strong>Lowercase</strong> per C-Kermit ckuus7.c:8139. Field-encoded directory name; single component only. E-packet on collision (existing dir) or invalid name.</td></tr>
+                        <tr><td><code>d</code></td><td>Rmdir</td><td>ACK on success, E on failure</td><td><strong>Lowercase</strong> — distinct from <code>D</code> (DIR). Removes <em>only</em> empty directories per <code>std::fs::remove_dir</code> semantics; non-empty returns E-packet so the operator clears contents intentionally.</td></tr>
+                        <tr><td><code>I</code></td><td>Logout</td><td>ACK, exit</td><td>What C-Kermit's <code>remote logout</code> sends (<code>setgen('I', …)</code>). Same effect as F/L/B at the gateway. Distinct from the I-<em>packet</em> (TYPE_INIT) which is a different packet type.</td></tr>
+                        <tr><td><code>X</code></td><td>Exit</td><td>ACK, exit</td><td>What C-Kermit's <code>remote exit</code> sends. Same effect as F/L/B/I at the gateway.</td></tr>
+                        <tr><td>other</td><td>(unsupported)</td><td>E-packet</td><td>Per spec §6, unsupported subcommands return an explicit refusal so the peer's UI surfaces a real error. Pre-2026-05 builds silently ACKed and looked like phantom successes.</td></tr>
                     </tbody>
                 </table>
 
