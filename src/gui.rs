@@ -248,6 +248,11 @@ struct App {
     serial_popup_open: bool,
     /// Whether the File Transfer "More..." popup is open.
     file_transfer_popup_open: bool,
+    /// Whether the security-warning popup for `Allow ATDT KERMIT` is
+    /// open.  Shown when the operator first ticks the checkbox; gated
+    /// behind explicit confirmation because enabling the feature
+    /// bypasses the telnet menu's auth gate.
+    atdt_kermit_warn_open: bool,
     /// When the user clicks the folder-browse button, the native dialog
     /// runs on a background OS thread so it can't block the egui event
     /// loop.  This channel carries back the chosen path (or None if
@@ -315,6 +320,7 @@ impl App {
             server_popup_open: false,
             serial_popup_open: false,
             file_transfer_popup_open: false,
+            atdt_kermit_warn_open: false,
             pending_dir_pick: None,
         }
     }
@@ -628,6 +634,46 @@ impl App {
                 singleline_with_menu(ui, slot, false, Some(f32::INFINITY));
             });
         }
+
+        ui.add_space(6.0);
+        ui.separator();
+        ui.add_space(2.0);
+        ui.label(
+            egui::RichText::new("Direct-to-Kermit Dial Target")
+                .strong()
+                .color(AMBER),
+        );
+        // Bind the checkbox to a local copy and detect a change against
+        // the saved state.  This lets us intercept the off→on transition
+        // and gate it behind a confirmation popup before persisting.
+        // On→off is one-click safe (tightening security never needs a
+        // confirmation) — persist immediately.  Toggling against the
+        // popup-open state is suppressed so a second click while the
+        // popup is up doesn't double-fire.
+        ui.horizontal(|ui| {
+            let mut local = self.cfg.allow_atdt_kermit;
+            let prev = local;
+            let resp = ui.checkbox(&mut local, "Allow ATDT KERMIT");
+            ui.label(
+                egui::RichText::new("(bypasses security)")
+                    .small()
+                    .color(AMBER),
+            );
+            if resp.changed() && !self.atdt_kermit_warn_open {
+                if local && !prev {
+                    // Off → on: revert the visible state, open the
+                    // confirmation popup; the popup's Enable button
+                    // will commit the change if the operator confirms.
+                    self.atdt_kermit_warn_open = true;
+                } else if !local && prev {
+                    // On → off: commit immediately, no popup.
+                    self.cfg.allow_atdt_kermit = false;
+                    self.last_synced_cfg.allow_atdt_kermit = false;
+                    config::update_config_value("allow_atdt_kermit", "false");
+                    logger::log("ATDT KERMIT disabled.".into());
+                }
+            }
+        });
     }
 
     /// Render the File Transfer frame's primary rows.  The main layout
@@ -1585,6 +1631,89 @@ impl eframe::App for App {
             }
         });
         self.file_transfer_popup_open = ft_open;
+
+        // ATDT KERMIT enable-confirmation popup.  Shown when the
+        // operator first ticks the checkbox in the Serial — More popup;
+        // requires explicit Enable click to actually flip the bit
+        // because the feature bypasses the telnet auth gate.  Cancel
+        // (or closing the X) leaves `allow_atdt_kermit` at its prior
+        // false value — the checkbox snaps back automatically because
+        // we never wrote the change to `cfg`.
+        let mut warn_open = self.atdt_kermit_warn_open;
+        let mut close_warn = false;
+        let mut commit_enable = false;
+        egui::Window::new(
+            egui::RichText::new("Enable ATDT KERMIT?")
+                .strong()
+                .color(AMBER_BRIGHT),
+        )
+        .open(&mut warn_open)
+        .resizable(false)
+        .collapsible(false)
+        .default_width(440.0)
+        .frame(popup_frame)
+        .show(&ctx, |ui| {
+            ui.visuals_mut().extreme_bg_color = POPUP_INPUT_BG;
+            ui.label(
+                egui::RichText::new("Security warning")
+                    .strong()
+                    .color(AMBER),
+            );
+            ui.add_space(4.0);
+            ui.label(
+                "Enabling this lets anyone who can dial the serial \
+                 modem reach Kermit server mode directly — bypassing \
+                 the telnet menu's username/password gate. There is \
+                 no auth on this dial path.",
+            );
+            ui.add_space(6.0);
+            ui.label(
+                "If your gateway is configured with security_enabled = \
+                 true and you need every caller to authenticate, leave \
+                 this OFF and have callers go through the telnet menu \
+                 instead: F (File Transfer) then K (Kermit Server \
+                 Mode). That path runs the auth prompt before handing \
+                 off to Kermit.",
+            );
+            ui.add_space(6.0);
+            ui.label(
+                "Enable only when the serial line itself is trusted \
+                 (private cable, isolated lab, single-user setup).",
+            );
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add(egui::Button::new(
+                        egui::RichText::new("Enable")
+                            .strong()
+                            .color(AMBER_BRIGHT),
+                    ))
+                    .clicked()
+                {
+                    commit_enable = true;
+                    close_warn = true;
+                }
+                ui.add_space(8.0);
+                if ui
+                    .add(egui::Button::new(
+                        egui::RichText::new("Cancel").strong(),
+                    ))
+                    .clicked()
+                {
+                    close_warn = true;
+                }
+            });
+        });
+        if commit_enable {
+            self.cfg.allow_atdt_kermit = true;
+            self.last_synced_cfg.allow_atdt_kermit = true;
+            config::update_config_value("allow_atdt_kermit", "true");
+            logger::log("ATDT KERMIT enabled.".into());
+        }
+        if close_warn {
+            warn_open = false;
+        }
+        self.atdt_kermit_warn_open = warn_open;
 
         // Detect whether the user has unsaved edits.  Compare bound
         // config fields against the last-synced snapshot so that

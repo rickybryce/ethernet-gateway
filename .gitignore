@@ -8,3 +8,7 @@ todo.md
 .claude/
 *.AppImage
 *.AppImage.sha256
+ckermit-*/
+ckermit_*.tar.*
+ckermit_*.dsc
+ethernetgatewaylogo.png.orig
