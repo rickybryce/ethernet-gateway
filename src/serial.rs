@@ -469,6 +469,14 @@ enum AtResult {
 
 /// Parse an AT command line into a list of responses.  Pure function for
 /// testability — does not touch the serial port or active connection.
+///
+/// Real Hayes modems accept several commands chained on one `AT` line
+/// (`ATE0Q1V1`, `ATM0L0H` and so on).  We tokenize the rest after the
+/// `AT` prefix into one subcommand per iteration, dispatch each through
+/// `parse_one_at_subcommand`, and concatenate the results.  The
+/// chaining stops at the first `Error` or chain-terminator (`D...`,
+/// `A`, `O`, `&Z<n>=...`) — nothing on a real modem runs after a
+/// dial / answer / store-number / out-of-range S-reg, so we match that.
 fn parse_at_command(
     cmd: &str,
     echo: &mut bool,
@@ -485,12 +493,171 @@ fn parse_at_command(
         return vec![AtResult::Error];
     }
 
-    let rest = &upper[2..];
+    let rest_upper = &upper[2..];
+    // `cmd[2..]` shares byte boundaries with `rest_upper` because
+    // `to_ascii_uppercase` only flips ASCII letters in place — same
+    // length and same offsets.  We hand the original-case slice to the
+    // dispatcher so dial strings and stored-number values keep their
+    // case (hostnames are case-sensitive on lookup).
+    let rest_orig = &cmd[2..];
 
-    match rest {
-        "Z" => {
-            vec![AtResult::ResetStored]
+    let mut results: Vec<AtResult> = Vec::new();
+    let bytes = rest_upper.as_bytes();
+    let mut off = 0;
+    while off < bytes.len() {
+        // Hayes modems tolerate spaces between commands on a chained
+        // line (`ATE0 Q1 V1` reads the same as `ATE0Q1V1`).  Skip
+        // ASCII spaces between subcommands; spaces *inside* a token
+        // (e.g. dial strings) are handled by the per-token parser.
+        while off < bytes.len() && bytes[off] == b' ' {
+            off += 1;
         }
+        if off >= bytes.len() {
+            break;
+        }
+
+        let (consumed, is_terminator) = split_at_subcommand(&rest_upper[off..]);
+        if consumed == 0 {
+            break;
+        }
+        let token_upper = &rest_upper[off..off + consumed];
+        let token_orig = &rest_orig[off..off + consumed];
+
+        let mut sub = parse_one_at_subcommand(
+            token_upper, token_orig, echo, verbose, quiet,
+        );
+        let has_error = sub.iter().any(|r| matches!(r, AtResult::Error));
+        results.append(&mut sub);
+
+        if has_error || is_terminator {
+            break;
+        }
+        off += consumed;
+    }
+
+    if results.is_empty() {
+        // Empty token stream (only whitespace after `AT`) — match the
+        // bare-`AT` behavior of returning OK.
+        results.push(AtResult::Ok);
+    }
+    results
+}
+
+/// Decide how many bytes the next subcommand on a chained AT line
+/// covers, and whether it terminates the chain.  Operates on the
+/// uppercased rest-after-`AT`; case-preserving slicing is the
+/// caller's responsibility.
+///
+/// Terminators mirror real Hayes behavior:
+/// - `D...` — any dial command (including `DL`, `DS<n>`, `DT host`,
+///   `D host`) consumes the rest of the line and goes online; nothing
+///   chained after it would execute.
+/// - `A` / `O[0]` — answer / return-online; both leave command mode.
+/// - `&Z<n>=...` — store-number value can contain any character to
+///   end-of-line, so it eats the rest of the input.
+fn split_at_subcommand(rest: &str) -> (usize, bool) {
+    let bytes = rest.as_bytes();
+    if bytes.is_empty() {
+        return (0, false);
+    }
+    match bytes[0] {
+        b'D' => (rest.len(), true),
+        b'A' => (1, true),
+        b'O' => {
+            let n = if bytes.len() >= 2 && bytes[1].is_ascii_digit() {
+                2
+            } else {
+                1
+            };
+            (n, true)
+        }
+        b'&' if bytes.len() >= 2 && bytes[1] == b'Z' => (rest.len(), true),
+        b'&' => {
+            // &-letter with optional single-digit suffix (&F, &V, &W,
+            // &W0, &C0, &C1, &D0..&D3, &K0..&K4).
+            let n = if bytes.len() >= 3 && bytes[2].is_ascii_digit() {
+                3
+            } else if bytes.len() >= 2 {
+                2
+            } else {
+                1
+            };
+            (n, false)
+        }
+        b'S' => {
+            // S?, S<digits>?, or S<digits>=<digits>.  Stop at the
+            // boundary so the remainder of the chain can resume.
+            if bytes.len() < 2 {
+                return (1, false);
+            }
+            if bytes[1] == b'?' {
+                return (2, false);
+            }
+            let mut i = 1;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i >= bytes.len() {
+                return (i, false);
+            }
+            if bytes[i] == b'?' {
+                return (i + 1, false);
+            }
+            if bytes[i] == b'=' {
+                let mut j = i + 1;
+                // Tolerate one or more leading spaces inside the value
+                // (e.g. `ATS0= 5`).
+                while j < bytes.len() && bytes[j] == b' ' {
+                    j += 1;
+                }
+                let val_start = j;
+                while j < bytes.len() && bytes[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j == val_start {
+                    return (j, false);
+                }
+                return (j, false);
+            }
+            (i, false)
+        }
+        b'?' => (1, false),
+        b'Z' | b'H' | b'E' | b'V' | b'Q' | b'X' | b'I' => {
+            let n = if bytes.len() >= 2 && bytes[1].is_ascii_digit() {
+                2
+            } else {
+                1
+            };
+            (n, false)
+        }
+        _ => {
+            // Unknown letter — accept silently (legacy: ATL, ATM, ATB
+            // etc. for speaker / bell tones we don't model).  Eat the
+            // optional digit suffix so the chain continues past it.
+            let n = if bytes.len() >= 2 && bytes[1].is_ascii_digit() {
+                2
+            } else {
+                1
+            };
+            (n, false)
+        }
+    }
+}
+
+/// Dispatch a single AT subcommand token to its result(s).  `token_upper`
+/// is the uppercased token slice (e.g. `"E0"`, `"DT host:port"`,
+/// `"&Z0=bbs.example.com:23"`); `token_orig` is the same byte range
+/// from the original `cmd`, preserving case for dial strings and
+/// stored-number values.
+fn parse_one_at_subcommand(
+    token_upper: &str,
+    token_orig: &str,
+    echo: &mut bool,
+    verbose: &mut bool,
+    quiet: &mut bool,
+) -> Vec<AtResult> {
+    match token_upper {
+        "Z" => vec![AtResult::ResetStored],
         "H" | "H0" => vec![AtResult::Hangup],
         "E0" => {
             *echo = false;
@@ -572,10 +739,9 @@ fn parse_at_command(
         // &K2 is reserved (not defined in Hayes spec)
         "&K3" => vec![AtResult::FlowSet(3)],
         "&K4" => vec![AtResult::FlowSet(4)],
-        _ if rest.starts_with("&Z") => {
-            // AT&Zn=s — store a phone number.  n is a single digit slot 0-3.
-            // We slice from the original `cmd` to preserve case in `s`.
-            let after = &rest[2..];
+        _ if token_upper.starts_with("&Z") => {
+            // &Zn=s — store a phone number.  n is a single digit slot 0-3.
+            let after = &token_upper[2..];
             let (slot, eq_idx) = match after.find('=') {
                 Some(i) if i >= 1 => {
                     let slot_str = &after[..i];
@@ -586,22 +752,18 @@ fn parse_at_command(
                 }
                 _ => return vec![AtResult::Error],
             };
-            // Offset into `cmd`: "AT" (2) + "&Z" (2) + slot digits + "=".
-            // Use the ASCII-only prefix length via byte indexing — rest is
-            // all ASCII (came from to_ascii_uppercase of ASCII input).
-            let prefix_len = 2 + 2 + eq_idx + 1;
-            let value = cmd.get(prefix_len..).unwrap_or("").trim().to_string();
+            // Offset into `token_orig`: "&Z" (2) + slot digits + "=".
+            let prefix_len = 2 + eq_idx + 1;
+            let value = token_orig.get(prefix_len..).unwrap_or("").trim().to_string();
             vec![AtResult::StoreNumber(slot, value)]
         }
-        _ if rest.starts_with("S") && rest.len() > 1 => {
-            // S-register: ATS? (help), ATSn? (query), or ATSn=v (set)
-            let s_rest = &rest[1..];
+        _ if token_upper.starts_with("S") && token_upper.len() > 1 => {
+            // S-register: S? (help), Sn? (query), or Sn=v (set)
+            let s_rest = &token_upper[1..];
             if s_rest == "?" {
-                // ATS? — S-register help
                 return vec![AtResult::SRegHelp];
             }
             if let Some(qpos) = s_rest.find('?') {
-                // ATSn?
                 match s_rest[..qpos].parse::<usize>() {
                     std::result::Result::Ok(reg) if reg < NUM_S_REGS => {
                         vec![AtResult::SRegQuery(reg)]
@@ -609,7 +771,6 @@ fn parse_at_command(
                     _ => vec![AtResult::Error],
                 }
             } else if let Some(epos) = s_rest.find('=') {
-                // ATSn=v
                 let reg_str = &s_rest[..epos];
                 let val_str = s_rest[epos + 1..].trim();
                 match (reg_str.parse::<usize>(), val_str.parse::<u16>()) {
@@ -621,19 +782,19 @@ fn parse_at_command(
                     _ => vec![AtResult::Error],
                 }
             } else {
-                // Bare ATSn with no ? or = — error
                 vec![AtResult::Error]
             }
         }
         "DL" => vec![AtResult::Redial],
-        _ if rest.starts_with("DS") && {
+        _ if token_upper.starts_with("DS") && {
             // Only treat as ATDS if what follows `DS` is empty or a slot
             // digit.  This prevents swallowing legitimate `ATDsomething`
             // hostname dials that happen to start with 's'.
-            let tail = rest[2..].trim();
+            let tail = token_upper[2..].trim();
             tail.is_empty() || tail.chars().all(|c| c.is_ascii_digit())
-        } => {
-            let n_str = rest[2..].trim();
+        } =>
+        {
+            let n_str = token_upper[2..].trim();
             if n_str.is_empty() {
                 vec![AtResult::DialStored(0)]
             } else {
@@ -643,12 +804,15 @@ fn parse_at_command(
                 }
             }
         }
-        _ if rest.starts_with("DT") || rest.starts_with("DP") || rest.starts_with("D") => {
+        _ if token_upper.starts_with("DT")
+            || token_upper.starts_with("DP")
+            || token_upper.starts_with("D") =>
+        {
             // Preserve original case for the dial string (hostnames).
-            let dial_str = if rest.starts_with("DT") || rest.starts_with("DP") {
-                cmd[4..].trim()
+            let dial_str = if token_upper.starts_with("DT") || token_upper.starts_with("DP") {
+                token_orig[2..].trim()
             } else {
-                cmd[3..].trim()
+                token_orig[1..].trim()
             };
             if dial_str.is_empty() {
                 vec![AtResult::Error]
@@ -657,7 +821,7 @@ fn parse_at_command(
             }
         }
         _ => {
-            // Accept unknown AT commands silently (AT&C, AT&D, ATL, ATM, etc.)
+            // Accept unknown AT subcommands silently (ATL, ATM, ATB, etc.)
             vec![AtResult::Ok]
         }
     }
@@ -673,11 +837,25 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
         &mut state.verbose,
         &mut state.quiet,
     );
+    // Hayes-style chained command lines (`ATE0Q1V1`) emit exactly one
+    // OK at the end of the line — not one per subcommand.  We track
+    // whether at least one subcommand asked for an OK and emit it
+    // once at the end, unless a terminal response (ERROR / NO CARRIER /
+    // dial outcome) already ran.
+    let mut pending_ok = false;
+    let mut terminal_emitted = false;
     for result in results {
+        if terminal_emitted { break; }
         match result {
-            AtResult::Ok => { send_result(state, "OK"); }
-            AtResult::Error => { send_result(state, "ERROR"); }
-            AtResult::NoCarrier => { send_result(state, "NO CARRIER"); }
+            AtResult::Ok => { pending_ok = true; }
+            AtResult::Error => {
+                send_result(state, "ERROR");
+                terminal_emitted = true;
+            }
+            AtResult::NoCarrier => {
+                send_result(state, "NO CARRIER");
+                terminal_emitted = true;
+            }
             AtResult::Info(msg) => {
                 if !state.quiet {
                     send_response(state, &msg);
@@ -702,20 +880,20 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
             AtResult::Redial => {
                 if state.last_dial.is_empty() {
                     send_result(state, "ERROR");
-                } else {
-                    state.active_connection = None;
-                    let target = state.last_dial.clone();
-                    let parsed = parse_dial_string(&target, &state.s_regs);
-                    if parsed.pre_delay > Duration::ZERO {
-                        std::thread::sleep(parsed.pre_delay);
-                    }
-                    if parsed.target.is_empty() {
-                        send_result(state, "OK");
-                        return;
-                    }
-                    handle_dial_with_modifiers(state, &parsed);
                     return;
                 }
+                state.active_connection = None;
+                let target = state.last_dial.clone();
+                let parsed = parse_dial_string(&target, &state.s_regs);
+                if parsed.pre_delay > Duration::ZERO {
+                    std::thread::sleep(parsed.pre_delay);
+                }
+                if parsed.target.is_empty() {
+                    send_result(state, "OK");
+                    return;
+                }
+                handle_dial_with_modifiers(state, &parsed);
+                return;
             }
             AtResult::Online => {
                 handle_return_online(state);
@@ -723,7 +901,7 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
             }
             AtResult::Hangup => {
                 state.active_connection = None;
-                send_result(state, "OK");
+                pending_ok = true;
             }
             AtResult::Reset => {
                 // AT&F — reset to gateway-friendly factory defaults
@@ -736,7 +914,7 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
                 state.dtr_mode = DEFAULT_DTR_MODE;
                 state.flow_mode = DEFAULT_FLOW_MODE;
                 state.dcd_mode = DEFAULT_DCD_MODE;
-                send_result(state, "OK");
+                pending_ok = true;
             }
             AtResult::ResetStored => {
                 // ATZ — restore from config (saved by AT&W)
@@ -751,7 +929,7 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
                 state.dcd_mode = cfg.serial_dcd_mode;
                 state.stored_numbers = cfg.serial_stored_numbers.clone();
                 state.active_connection = None;
-                send_result(state, "OK");
+                pending_ok = true;
             }
             AtResult::SaveConfig => {
                 // AT&W — save current settings to config
@@ -769,48 +947,52 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
                     ("serial_stored_2", &state.stored_numbers[2]),
                     ("serial_stored_3", &state.stored_numbers[3]),
                 ]);
-                send_result(state, "OK");
+                pending_ok = true;
             }
             AtResult::XSet(n) => {
                 state.x_code = n;
-                send_result(state, "OK");
+                pending_ok = true;
             }
             AtResult::DcdSet(n) => {
                 state.dcd_mode = n;
-                send_result(state, "OK");
+                pending_ok = true;
             }
             AtResult::DtrSet(n) => {
                 state.dtr_mode = n;
-                send_result(state, "OK");
+                pending_ok = true;
             }
             AtResult::FlowSet(n) => {
                 state.flow_mode = n;
-                send_result(state, "OK");
+                pending_ok = true;
             }
             AtResult::StoreNumber(slot, value) => {
                 state.stored_numbers[slot] = value;
-                send_result(state, "OK");
+                pending_ok = true;
             }
             AtResult::DialStored(slot) => {
                 let stored = state.stored_numbers[slot].clone();
                 if stored.is_empty() {
                     send_result(state, "NO CARRIER");
-                } else {
-                    let parsed = parse_dial_string(&stored, &state.s_regs);
-                    state.active_connection = None;
-                    state.last_dial = stored;
-                    if parsed.pre_delay > Duration::ZERO {
-                        std::thread::sleep(parsed.pre_delay);
-                    }
-                    if parsed.target.is_empty() {
-                        send_result(state, "OK");
-                        return;
-                    }
-                    handle_dial_with_modifiers(state, &parsed);
                     return;
                 }
+                let parsed = parse_dial_string(&stored, &state.s_regs);
+                state.active_connection = None;
+                state.last_dial = stored;
+                if parsed.pre_delay > Duration::ZERO {
+                    std::thread::sleep(parsed.pre_delay);
+                }
+                if parsed.target.is_empty() {
+                    send_result(state, "OK");
+                    return;
+                }
+                handle_dial_with_modifiers(state, &parsed);
+                return;
             }
             AtResult::SRegQuery(reg) => {
+                // Hayes prints the value with no trailing OK on a non-
+                // chained line.  Don't set `pending_ok` here, but a
+                // chained `ATE0S0?` will still emit OK at the end via
+                // the ATE0's pending_ok.
                 if !state.quiet {
                     let val = state.s_regs[reg];
                     let formatted = format!("{:03}", val);
@@ -819,7 +1001,7 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
             }
             AtResult::SRegSet(reg, val) => {
                 state.s_regs[reg] = val;
-                send_result(state, "OK");
+                pending_ok = true;
             }
             AtResult::Help => {
                 if !state.quiet {
@@ -897,10 +1079,20 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
                         .join(" ");
                     let body = format!("{}\n{}\n{}", header, s_line, stored_lines);
                     send_response(state, &body);
-                    send_result(state, "OK");
                 }
+                // Don't set pending_ok here — bare AT&V historically
+                // emitted "<config>\r\nOK", and the OK followed because
+                // the ShowConfig arm called send_result.  Restore that
+                // by deferring to the loop epilogue: we make &V act
+                // like a settings command (pending_ok = true) so the
+                // single trailing OK is emitted whether or not the
+                // line was chained.
+                pending_ok = true;
             }
         }
+    }
+    if !terminal_emitted && pending_ok {
+        send_result(state, "OK");
     }
 }
 
@@ -2918,6 +3110,177 @@ mod tests {
             parse("ATDsomething", &mut echo),
             vec![AtResult::Dial("something".into())]
         );
+    }
+
+    // ─── Chained-command tests ───────────────────────────────
+    //
+    // Real Hayes modems accept multiple commands on one AT line
+    // (`ATE0Q1V1`, `ATE0DT host`).  These tests cover the chained
+    // path that `split_at_subcommand` opens up.
+
+    #[test]
+    fn test_chain_three_settings_apply_left_to_right() {
+        // `ATE0Q1V0` should set echo, quiet, verbose in order and emit
+        // one Ok per subcommand (process_at_command dedupes to a
+        // single wire OK).
+        let mut echo = true;
+        let mut verbose = true;
+        let mut quiet = false;
+        let results = parse_full("ATE0Q1V0", &mut echo, &mut verbose, &mut quiet);
+        assert_eq!(results, vec![AtResult::Ok, AtResult::Ok, AtResult::Ok]);
+        assert!(!echo);
+        assert!(quiet);
+        assert!(!verbose);
+    }
+
+    #[test]
+    fn test_chain_with_spaces_between_subcommands() {
+        // Real modems tolerate `ATE0 Q1 V0` as the same chain.
+        let mut echo = true;
+        let mut verbose = true;
+        let mut quiet = false;
+        let results = parse_full("ATE0 Q1 V0", &mut echo, &mut verbose, &mut quiet);
+        assert_eq!(results, vec![AtResult::Ok, AtResult::Ok, AtResult::Ok]);
+        assert!(!echo);
+        assert!(quiet);
+        assert!(!verbose);
+    }
+
+    #[test]
+    fn test_chain_setting_then_dial_terminator() {
+        // `ATE0DT host` should apply echo-off and then dial; no
+        // commands chain after a dial.
+        let mut echo = true;
+        let results = parse("ATE0DT bbs.example.com:23", &mut echo);
+        assert_eq!(
+            results,
+            vec![AtResult::Ok, AtResult::Dial("bbs.example.com:23".into())]
+        );
+        assert!(!echo);
+    }
+
+    #[test]
+    fn test_chain_setting_then_d_dial_preserves_case() {
+        // Bare `D` (no T/P prefix) is also a terminator; the dial
+        // string preserves case from the original input — hostnames
+        // are case-sensitive on lookup at some sites.
+        let mut echo = true;
+        let results = parse("ATE0D Server.Example.com", &mut echo);
+        assert_eq!(
+            results,
+            vec![AtResult::Ok, AtResult::Dial("Server.Example.com".into())]
+        );
+    }
+
+    #[test]
+    fn test_chain_info_then_setting() {
+        // ATIE0 should print the version string and apply echo-off,
+        // returning one Info plus per-token Oks.  process_at_command
+        // emits a single trailing OK on the wire.
+        let mut echo = true;
+        let results = parse("ATIE0", &mut echo);
+        assert_eq!(results.len(), 3);
+        assert!(matches!(&results[0], AtResult::Info(s) if s.contains("Ethernet Gateway")));
+        assert_eq!(results[1], AtResult::Ok);
+        assert_eq!(results[2], AtResult::Ok);
+        assert!(!echo);
+    }
+
+    #[test]
+    fn test_chain_stops_on_first_error() {
+        // `ATE0S0=999` — E0 succeeds (echo set) but S0=999 is out of
+        // range; chain stops, no further tokens parsed.
+        let mut echo = true;
+        let results = parse("ATE0S0=999", &mut echo);
+        assert_eq!(results, vec![AtResult::Ok, AtResult::Error]);
+        assert!(!echo);
+    }
+
+    #[test]
+    fn test_chain_after_error_token_is_dropped() {
+        // After an Error token, subsequent commands must NOT be parsed
+        // — `ATS0=999E0` should not flip echo from true (the trailing
+        // E0 never runs).
+        let mut echo = true;
+        let results = parse("ATS0=999E0", &mut echo);
+        assert_eq!(results, vec![AtResult::Error]);
+        assert!(echo, "echo must not be touched after an Error halts the chain");
+    }
+
+    #[test]
+    fn test_chain_ata_terminator_drops_remainder() {
+        // `ATE0AE1` — E0 applies, A is a terminator (NoCarrier), and
+        // the trailing E1 must NOT parse (echo stays at false).
+        let mut echo = true;
+        let results = parse("ATE0AE1", &mut echo);
+        assert_eq!(results, vec![AtResult::Ok, AtResult::NoCarrier]);
+        assert!(!echo);
+    }
+
+    #[test]
+    fn test_chain_s_register_set_then_setting() {
+        // `ATS0=2E0` — splitter must stop the S-register value at the
+        // non-digit, then continue with E0.
+        let mut echo = true;
+        let results = parse("ATS0=2E0", &mut echo);
+        assert_eq!(results, vec![AtResult::SRegSet(0, 2), AtResult::Ok]);
+        assert!(!echo);
+    }
+
+    #[test]
+    fn test_chain_s_register_query_then_setting() {
+        // `ATS0?E0` — splitter ends S-token at '?', then continues.
+        let mut echo = true;
+        let results = parse("ATS0?E0", &mut echo);
+        assert_eq!(results, vec![AtResult::SRegQuery(0), AtResult::Ok]);
+        assert!(!echo);
+    }
+
+    #[test]
+    fn test_chain_ampersand_command_with_digit_then_setting() {
+        // `AT&C1E0` — &C1 sets DCD mode 1, then E0 turns echo off.
+        let mut echo = true;
+        let results = parse("AT&C1E0", &mut echo);
+        assert_eq!(results, vec![AtResult::DcdSet(1), AtResult::Ok]);
+        assert!(!echo);
+    }
+
+    #[test]
+    fn test_chain_ampersand_z_terminates() {
+        // `AT&Z0=bbs.example.com:23E0` — &Z0= consumes to end of line
+        // (the value can contain any character); E0 must NOT chain.
+        let mut echo = true;
+        let results = parse("AT&Z0=bbs.example.com:23E0", &mut echo);
+        assert_eq!(
+            results,
+            vec![AtResult::StoreNumber(0, "bbs.example.com:23E0".into())]
+        );
+        assert!(echo, "&Z is a terminator; trailing E0 must not run");
+    }
+
+    #[test]
+    fn test_chain_handles_unknown_commands_silently() {
+        // `ATL2E0` — L2 (speaker volume) is unknown but accepted; chain
+        // continues with E0.
+        let mut echo = true;
+        let results = parse("ATL2E0", &mut echo);
+        assert_eq!(results, vec![AtResult::Ok, AtResult::Ok]);
+        assert!(!echo);
+    }
+
+    #[test]
+    fn test_chain_factory_reset_then_setting() {
+        // `AT&FE0` — &F resets all toggles to factory defaults
+        // (echo=true), then E0 turns echo off.  Order matters: the
+        // override takes effect.
+        let mut echo = false;
+        let mut verbose = false;
+        let mut quiet = true;
+        let results = parse_full("AT&FE0", &mut echo, &mut verbose, &mut quiet);
+        assert_eq!(results, vec![AtResult::Reset, AtResult::Ok]);
+        assert!(!echo, "E0 after &F must leave echo off");
+        assert!(verbose, "&F must restore verbose");
+        assert!(!quiet, "&F must restore quiet");
     }
 
 }
