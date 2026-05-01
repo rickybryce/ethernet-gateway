@@ -9574,6 +9574,11 @@ impl TelnetSession {
                 self.amber(&cfg.kermit_8bit_quote)
             ))
             .await?;
+            self.send_line(&format!(
+                "  ATDT KERMIT (serial direct-to-Kermit): {}",
+                self.amber(if cfg.allow_atdt_kermit { "enabled" } else { "disabled" })
+            ))
+            .await?;
             self.send_line("").await?;
 
             self.send_line(&format!(
@@ -9616,6 +9621,11 @@ impl TelnetSession {
                 "  {}  Cycle 8-bit quote   {}  Restart server",
                 self.cyan("8"),
                 self.cyan("R")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Toggle ATDT KERMIT (serial; bypasses security)",
+                self.cyan("K"),
             ))
             .await?;
             self.send_line("").await?;
@@ -9784,16 +9794,153 @@ impl TelnetSession {
                 "r" => {
                     self.config_restart_server().await?;
                 }
+                "k" => {
+                    self.kermit_toggle_atdt_kermit(cfg.allow_atdt_kermit).await?;
+                }
                 "h" => {
                     self.kermit_show_help().await?;
                 }
                 "q" => return Ok(()),
                 _ => {
-                    self.show_error("Press a listed key, I, R, H, or Q.")
+                    self.show_error("Press a listed key, I, R, K, H, or Q.")
                         .await?;
                 }
             }
         }
+    }
+
+    /// Toggle `allow_atdt_kermit`.  When enabling, show a full-screen
+    /// security warning and prompt for explicit Y/N confirmation —
+    /// flipping this on lets serial callers reach Kermit server mode
+    /// without going through the telnet auth gate, so we want the
+    /// operator's intent on the record.  Disabling is one-click safe
+    /// (no popup): tightening security never needs a confirmation.
+    /// On confirmation (or unconditional disable), persist immediately
+    /// via `update_config_value` so the change takes effect for the
+    /// next ATDT without a server restart.
+    async fn kermit_toggle_atdt_kermit(
+        &mut self,
+        currently_enabled: bool,
+    ) -> Result<(), std::io::Error> {
+        if currently_enabled {
+            // Disable path — no confirmation needed.
+            tokio::task::spawn_blocking(move || {
+                config::update_config_value("allow_atdt_kermit", "false");
+            })
+            .await
+            .ok();
+            self.send_line("").await?;
+            self.send_line(&format!(
+                "  {}",
+                self.green("ATDT KERMIT disabled.")
+            ))
+            .await?;
+            self.send_line("").await?;
+            self.send("  Press any key to continue.").await?;
+            self.flush().await?;
+            self.wait_for_key().await?;
+            return Ok(());
+        }
+
+        // Enable path — full-screen warning, Y/N prompt.
+        self.clear_screen().await?;
+        let sep = self.separator();
+        self.send_line(&sep).await?;
+        self.send_line(&format!(
+            "  {}",
+            self.yellow("ENABLE ATDT KERMIT — SECURITY WARNING")
+        ))
+        .await?;
+        self.send_line(&sep).await?;
+        self.send_line("").await?;
+        self.send_line(&format!(
+            "  {}",
+            self.amber("This bypasses telnet authentication.")
+        ))
+        .await?;
+        self.send_line("").await?;
+        self.send_line(
+            "  When enabled, anyone who can reach the serial port",
+        )
+        .await?;
+        self.send_line(
+            "  can dial ATDT KERMIT and land directly in Kermit",
+        )
+        .await?;
+        self.send_line(
+            "  server mode — no username, no password, no menu.",
+        )
+        .await?;
+        self.send_line("").await?;
+        self.send_line(
+            "  If your gateway has security_enabled = true and you",
+        )
+        .await?;
+        self.send_line(
+            "  need every caller to authenticate, leave this OFF",
+        )
+        .await?;
+        self.send_line(&format!(
+            "  and have callers go via the {} menu's {} entry",
+            self.cyan("File Transfer"),
+            self.cyan("K")
+        ))
+        .await?;
+        self.send_line(&format!(
+            "  (main menu {} then {}) — that path runs the auth",
+            self.cyan("F"),
+            self.cyan("K")
+        ))
+        .await?;
+        self.send_line("  prompt before handing off to Kermit.").await?;
+        self.send_line("").await?;
+        self.send_line(
+            "  Enable only when the serial line itself is trusted",
+        )
+        .await?;
+        self.send_line(
+            "  (private cable, isolated lab, single-user setup).",
+        )
+        .await?;
+        self.send_line("").await?;
+        self.send(&format!(
+            "  Enable ATDT KERMIT? ({}/{}): ",
+            self.cyan("Y"),
+            self.cyan("N")
+        ))
+        .await?;
+        self.flush().await?;
+
+        let answer = self.get_menu_input(false).await?;
+        let confirmed = matches!(
+            answer.as_deref().map(|s| s.trim()),
+            Some("y") | Some("Y")
+        );
+
+        self.send_line("").await?;
+        if confirmed {
+            tokio::task::spawn_blocking(move || {
+                config::update_config_value("allow_atdt_kermit", "true");
+            })
+            .await
+            .ok();
+            self.send_line(&format!(
+                "  {}",
+                self.green("ATDT KERMIT enabled.")
+            ))
+            .await?;
+        } else {
+            self.send_line(&format!(
+                "  {}",
+                self.dim("ATDT KERMIT left disabled.")
+            ))
+            .await?;
+        }
+        self.send_line("").await?;
+        self.send("  Press any key to continue.").await?;
+        self.flush().await?;
+        self.wait_for_key().await?;
+        Ok(())
     }
 
     /// Helper: flip a Kermit boolean config key, persist, and confirm.
@@ -9843,6 +9990,8 @@ impl TelnetSession {
                 "  C  Block check type 1/2/3",
                 "  L/S/T/A/E/I  toggles",
                 "  8  cycle 8-bit quote mode",
+                "  K  ATDT KERMIT toggle",
+                "     (bypasses security)",
                 "",
                 "  Streaming auto-degrades to",
                 "  sliding/stop-and-wait when",
@@ -9868,6 +10017,9 @@ impl TelnetSession {
                 "  E  Repeat-count compression",
                 "  I  Telnet IAC escape during transfer",
                 "  8  8-bit quote: auto / on / off",
+                "  K  Allow ATDT KERMIT from the serial modem",
+                "     (bypasses security_enabled auth gate;",
+                "     prompts for explicit Y/N before enabling)",
                 "",
                 "  Streaming requires a reliable transport.",
                 "  Disable when bridging to flaky serial.",

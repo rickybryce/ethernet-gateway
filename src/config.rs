@@ -127,6 +127,15 @@ const DEFAULT_KERMIT_RESUME_MAX_AGE_HOURS: u32 = 168;
 /// E-Kermit) negotiates it; flip it on if you're talking to a
 /// strict-spec implementation that does.
 const DEFAULT_KERMIT_LOCKING_SHIFTS: bool = false;
+/// Allow `ATDT KERMIT` (or `ATDT kermit-server`) from the serial modem
+/// emulator to drop directly into Kermit server mode without going
+/// through the telnet menu's auth gate.  Off by default because it
+/// bypasses any `security_enabled` username/password the operator has
+/// configured.  Enable only when the serial line itself is trusted
+/// (private cable, isolated lab); for any auth-required deployment
+/// keep this off and have callers go through the regular telnet
+/// menu (F → K) instead.
+const DEFAULT_ALLOW_ATDT_KERMIT: bool = false;
 const DEFAULT_SERIAL_ECHO: bool = true;
 const DEFAULT_SERIAL_VERBOSE: bool = true;
 const DEFAULT_SERIAL_QUIET: bool = false;
@@ -256,6 +265,10 @@ pub struct Config {
     /// Advertise locking-shift (SO/SI) capability for 8-bit transit
     /// over 7-bit-only links.  Off by default; modern peers use QBIN.
     pub kermit_locking_shifts: bool,
+    /// Allow `ATDT KERMIT` to drop callers directly into Kermit server
+    /// mode from the serial modem emulator, bypassing any telnet-menu
+    /// auth gate.  Off by default.
+    pub allow_atdt_kermit: bool,
     /// Enable serial modem emulation.
     pub serial_enabled: bool,
     /// Serial port device (e.g. /dev/ttyUSB0, COM3). Empty = not configured.
@@ -346,6 +359,7 @@ impl Default for Config {
             kermit_resume_partial: DEFAULT_KERMIT_RESUME_PARTIAL,
             kermit_resume_max_age_hours: DEFAULT_KERMIT_RESUME_MAX_AGE_HOURS,
             kermit_locking_shifts: DEFAULT_KERMIT_LOCKING_SHIFTS,
+            allow_atdt_kermit: DEFAULT_ALLOW_ATDT_KERMIT,
             serial_enabled: DEFAULT_SERIAL_ENABLED,
             serial_port: DEFAULT_SERIAL_PORT.into(),
             serial_baud: DEFAULT_SERIAL_BAUD,
@@ -611,6 +625,10 @@ fn read_config_file(path: &str) -> Config {
             .get("kermit_locking_shifts")
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(DEFAULT_KERMIT_LOCKING_SHIFTS),
+        allow_atdt_kermit: map
+            .get("allow_atdt_kermit")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(DEFAULT_ALLOW_ATDT_KERMIT),
         serial_enabled: map
             .get("serial_enabled")
             .map(|v| v.eq_ignore_ascii_case("true"))
@@ -915,6 +933,14 @@ fn write_config_file(path: &str, cfg: &Config) {
 #                              peer (C-Kermit, G-Kermit, Kermit-95, E-Kermit)
 #                              negotiates it; flip on only if you're talking
 #                              to a strict-spec implementation that does.
+# allow_atdt_kermit:           let `ATDT KERMIT` from the serial modem
+#                              emulator drop directly into Kermit server mode
+#                              without going through the telnet menu.  Off
+#                              by default because it bypasses any
+#                              security_enabled username/password gate.
+#                              Enable only on trusted serial lines; for any
+#                              auth-required deployment leave this off and
+#                              have callers go via the telnet F/K path.
 ");
     write_kv(&mut content, "kermit_negotiation_timeout", cfg.kermit_negotiation_timeout);
     write_kv(&mut content, "kermit_packet_timeout", cfg.kermit_packet_timeout);
@@ -932,6 +958,7 @@ fn write_config_file(path: &str, cfg: &Config) {
     write_kv(&mut content, "kermit_resume_partial", cfg.kermit_resume_partial);
     write_kv(&mut content, "kermit_resume_max_age_hours", cfg.kermit_resume_max_age_hours);
     write_kv(&mut content, "kermit_locking_shifts", cfg.kermit_locking_shifts);
+    write_kv(&mut content, "allow_atdt_kermit", cfg.allow_atdt_kermit);
     content.push('\n');
 
     content.push_str("\
@@ -1222,6 +1249,9 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
         "kermit_locking_shifts" => {
             cfg.kermit_locking_shifts = value.eq_ignore_ascii_case("true");
         }
+        "allow_atdt_kermit" => {
+            cfg.allow_atdt_kermit = value.eq_ignore_ascii_case("true");
+        }
         "serial_enabled" => cfg.serial_enabled = value.eq_ignore_ascii_case("true"),
         "serial_port" => cfg.serial_port = value.to_string(),
         "serial_baud" => {
@@ -1474,6 +1504,7 @@ mod tests {
         assert!(!cfg.kermit_resume_partial);
         assert_eq!(cfg.kermit_resume_max_age_hours, 168);
         assert!(!cfg.kermit_locking_shifts);
+        assert!(!cfg.allow_atdt_kermit);
         assert!(!cfg.serial_enabled);
         assert_eq!(cfg.serial_port, "");
         assert_eq!(cfg.serial_baud, 9600);
@@ -1665,6 +1696,7 @@ mod tests {
             kermit_resume_partial: true,
             kermit_resume_max_age_hours: 72,
             kermit_locking_shifts: true,
+            allow_atdt_kermit: true,
             serial_enabled: true,
             serial_port: "/dev/ttyUSB0".into(),
             serial_baud: 115200,
@@ -1769,6 +1801,7 @@ mod tests {
             loaded.kermit_locking_shifts,
             original.kermit_locking_shifts
         );
+        assert_eq!(loaded.allow_atdt_kermit, original.allow_atdt_kermit);
         assert_eq!(loaded.serial_enabled, original.serial_enabled);
         assert_eq!(loaded.serial_port, original.serial_port);
         assert_eq!(loaded.serial_baud, original.serial_baud);

@@ -1260,6 +1260,20 @@ fn handle_dial(state: &mut ModemState, target: &str) {
 
     if lower == "ethernet-gateway" || lower == "ethernet gateway" {
         dial_ethernet_gateway(state);
+    } else if matches!(lower.as_str(), "kermit" | "kermit-server" | "kermit server") {
+        // Direct-to-Kermit-server entry.  Only honored when the operator
+        // has explicitly opted in via `allow_atdt_kermit = true` in
+        // egateway.conf because this dial target bypasses the telnet
+        // menu's auth gate.  When disabled, behave like a missing
+        // hostname — emit NO CARRIER without any hint that the keyword
+        // exists, so an attacker probing a security_enabled gateway
+        // can't tell us apart from a server that simply doesn't know
+        // the name.
+        if config::get_config().allow_atdt_kermit {
+            dial_kermit_server(state);
+        } else {
+            send_result(state, "NO CARRIER");
+        }
     } else {
         // If the target looks like a phone number (digits, dashes, spaces,
         // parens, etc.), look it up in the dialup mapping file.
@@ -1364,6 +1378,87 @@ fn dial_ethernet_gateway(state: &mut ModemState) {
     state.mode = ModemMode::Command;
     match exit {
         OnlineExit::Escaped => {
+            state.active_connection = Some(ActiveConnection::Duplex {
+                read: duplex_read,
+                write: duplex_write,
+            });
+            send_result(state, "OK");
+        }
+        OnlineExit::Disconnected => {
+            send_result(state, "NO CARRIER");
+        }
+    }
+}
+
+/// Dial directly into Kermit server mode via an in-memory duplex bridge.
+///
+/// Behaves on the wire exactly like dialing a real Kermit server (e.g. a
+/// remote `kermit -j host` left in `server` mode): no banner, no menu,
+/// no prompt — the bridge sits silently waiting for the caller's first
+/// Kermit packet.  The local CONNECT/NO CARRIER messages are emitted by
+/// the modem emulator and never reach the wire, so a remote Kermit
+/// client can't distinguish us from a real server.
+///
+/// Bypasses the telnet menu's auth gate by design.  Caller has already
+/// verified `config.allow_atdt_kermit == true` before reaching here.
+fn dial_kermit_server(state: &mut ModemState) {
+    send_result(state, "CONNECT");
+    state.mode = ModemMode::Online;
+
+    let (async_stream, serial_stream) = tokio::io::duplex(65536);
+    let (mut async_read, mut async_write) = tokio::io::split(async_stream);
+
+    let shutdown = state.shutdown.clone();
+    let verbose = config::get_config().verbose;
+
+    // Spawn kermit_server on the tokio runtime.  When it returns
+    // (Finish/BYE/idle-timeout/E-packet) the duplex stream EOFs, which
+    // propagates as `OnlineExit::Disconnected` in the bridge below and
+    // we emit NO CARRIER.  Idle-timeout enforcement comes from the
+    // standard `kermit_idle_timeout` config — same as the telnet
+    // F→K entry path.
+    state.handle.spawn(async move {
+        // is_tcp = false: no telnet IAC escaping on a serial bridge.
+        // is_petscii = false: serial sessions don't terminal-detect;
+        // Kermit packets are protocol bytes, terminal type is irrelevant.
+        let result = crate::kermit::kermit_server_with_outcome(
+            &mut async_read,
+            &mut async_write,
+            false,
+            false,
+            verbose,
+            |_| {
+                // No banner / summary on serial — match the
+                // transparent-server behavior.  Disk commits still
+                // happen inside kermit_server itself before returning.
+            },
+        )
+        .await;
+        if let Err(e) = result {
+            glog!("ATDT KERMIT: server error: {}", e);
+        }
+        // Closing the writer half EOFs the bridge so the serial side
+        // sees Disconnected and reports NO CARRIER.
+        let _ = tokio::io::AsyncWriteExt::shutdown(&mut async_write).await;
+        // shutdown reference kept alive for the task lifetime; future
+        // versions could check it inside the server loop, but
+        // `kermit_server_with_outcome` already honors the gateway's
+        // global shutdown via reads timing out and returning errors.
+        let _ = shutdown;
+    });
+
+    let (mut duplex_read, mut duplex_write) =
+        tokio::io::split(serial_stream);
+    let exit = online_mode_duplex(state, &mut duplex_read, &mut duplex_write);
+
+    state.mode = ModemMode::Command;
+    match exit {
+        OnlineExit::Escaped => {
+            // User hit +++ to escape back to command mode mid-session.
+            // Preserve the duplex so ATO can resume — same as
+            // dial_ethernet_gateway.  Note that the spawned Kermit
+            // server keeps reading on its half; ATO reattaches and
+            // packets flow again.
             state.active_connection = Some(ActiveConnection::Duplex {
                 read: duplex_read,
                 write: duplex_write,
@@ -2630,6 +2725,33 @@ mod tests {
         let target = "host:99999";
         let (_, p) = target.rsplit_once(':').unwrap();
         assert!(p.parse::<u16>().is_err());
+    }
+
+    #[test]
+    fn test_atdt_kermit_parses_as_dial() {
+        // The serial AT parser should recognize ATDT kermit (and the
+        // common variants) as a dial command — handle_dial then
+        // dispatches to dial_kermit_server when allow_atdt_kermit=true.
+        // The parser layer is target-agnostic; whether the operator
+        // has actually opted in is a runtime check on the dial side.
+        let variants = [
+            "ATDT kermit",
+            "ATDT KERMIT",
+            "ATDT Kermit",
+            "ATDT kermit-server",
+            "ATDT KERMIT-SERVER",
+            "ATDT kermit server",
+        ];
+        for cmd in &variants {
+            let mut echo = true;
+            let results = parse(cmd, &mut echo);
+            assert_eq!(results.len(), 1, "failed for: {}", cmd);
+            assert!(
+                matches!(&results[0], AtResult::Dial(_)),
+                "expected Dial for: {}",
+                cmd
+            );
+        }
     }
 
     #[test]
