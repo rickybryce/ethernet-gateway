@@ -4017,22 +4017,32 @@ pub(crate) async fn kermit_receive_with_init(
 /// length.  The `None` cases are treated as "no argument given"
 /// by callers — typically meaning "reset to default" for CWD.
 pub(crate) fn parse_g_field_argument(tail: &[u8]) -> Option<&[u8]> {
+    parse_g_field_argument_with_remainder(tail).map(|(arg, _)| arg)
+}
+
+/// Same as `parse_g_field_argument` but also returns the bytes that
+/// follow the consumed field — used by multi-argument generic
+/// commands (e.g. `G R` rename, which encodes `oldname` then
+/// `newname` back-to-back).  Returns `None` when the field is
+/// missing or under-length (same semantics as the single-field
+/// helper); callers chain the remainder back into another call.
+pub(crate) fn parse_g_field_argument_with_remainder(
+    tail: &[u8],
+) -> Option<(&[u8], &[u8])> {
     if tail.is_empty() {
         return None;
     }
     let declared_len = unchar(tail[0]) as usize;
     if declared_len == 0 {
-        return Some(&[]);
+        return Some((&[], &tail[1..]));
     }
     if tail.len() < 1 + declared_len {
-        // Under-length payload — peer is malformed.  Caller treats
-        // None as "no argument".  We deliberately do not return a
-        // partial slice: silently truncating a short field would
-        // mask sender bugs and could let an attacker land arbitrary
-        // bytes by setting the length byte higher than the body.
+        // Under-length payload — peer is malformed.  Refuse rather
+        // than silently truncate: a partial slice could let an
+        // attacker land arbitrary bytes by lying in the length byte.
         return None;
     }
-    Some(&tail[1..1 + declared_len])
+    Some((&tail[1..1 + declared_len], &tail[1 + declared_len..]))
 }
 
 /// any `..` component, per-component leading dots, or an over-cap
@@ -4192,15 +4202,20 @@ async fn send_g_inverse_file_response(
 fn kermit_g_help_text() -> &'static str {
     "Ethernet Gateway Kermit server.\n\
      Supported generic commands (G):\n\
-       F  Finish     - end protocol session\n\
-       L  Logout     - end protocol session\n\
-       B  BYE        - end protocol session\n\
-       C  CWD <dir>  - change working subdir\n\
-       D  DIRectory  - list current dir\n\
-       $  SPACE      - free disk bytes\n\
-       K  KERMIT     - server identity\n\
-       H  HELP / ?   - this text\n\
-     Other commands: I (re-init), R (get file), S (send file).\n"
+       F / L / B / I / X     - end protocol session\n\
+                                (Finish / BYE / Logout / Exit)\n\
+       C  CWD <dir>          - change working subdir\n\
+       D  DIRectory          - list current dir\n\
+       $  SPACE              - free disk bytes\n\
+       K  KERMIT             - server identity\n\
+       E  Erase <file>       - delete a file\n\
+       R  Rename <old> <new> - rename a file\n\
+       T  Type <file>        - display file contents\n\
+       m  Mkdir <dir>        - create a directory\n\
+       d  Rmdir <dir>        - remove an empty directory\n\
+       H  HELP / ?           - this text\n\
+     Other packet types: I (re-init), R-packet (get file), S-packet (send file).\n\
+     Unsupported subcommands return an E-packet refusal.\n"
 }
 
 /// Server-mode dispatch: idle waiting for an incoming command from a
@@ -4394,7 +4409,17 @@ pub(crate) async fn kermit_server(
                 let raw = decode_data(&pkt.payload, recv_q).unwrap_or_default();
                 let action = raw.first().copied().unwrap_or(0);
                 match action {
-                    b'F' | b'L' | b'B' => {
+                    // F/L/B are spec-defined session-exit signals; I and
+                    // X are what real C-Kermit emits for `remote logout`
+                    // (`setgen('I',...)`) and `remote exit`
+                    // (`setgen('X',...)`).  Treating them all as
+                    // equivalent matches what the gateway actually
+                    // supports — the connection lives at the telnet/SSH
+                    // layer, so any of these just ends the protocol
+                    // session.  Note: G `I` is distinct from the I-packet
+                    // (TYPE_INIT, re-init) — different packet types
+                    // entirely, just letter overlap.
+                    b'F' | b'L' | b'B' | b'I' | b'X' => {
                         send_ack(writer, pkt.seq, b'1', 0, 0, CR, is_tcp).await?;
                         if verbose {
                             glog!("Kermit server: G '{}' → exit", action as char);
@@ -4520,11 +4545,321 @@ pub(crate) async fn kermit_server(
                         .await?;
                         continue;
                     }
+                    b'E' => {
+                        // DELETE — `remote delete <filename>`, spec §6.7.
+                        // Field-encoded filename argument.  We refuse
+                        // wildcards, traversal, and missing args — the
+                        // file lookup is rooted under the per-session
+                        // subdir (so deletes outside `transfer_dir/<subdir>`
+                        // are impossible by construction).
+                        let fname = parse_g_field_argument(&raw[1..])
+                            .map(|b| String::from_utf8_lossy(b).into_owned())
+                            .unwrap_or_default();
+                        if !is_safe_resume_filename(&fname) {
+                            send_error(writer, pkt.seq, "Invalid filename",
+                                b'1', 0, 0, CR, is_tcp).await?;
+                            if verbose {
+                                glog!(
+                                    "Kermit server: G E '{}' refused (unsafe filename)",
+                                    fname
+                                );
+                            }
+                            continue;
+                        }
+                        let path = effective_transfer_path(&cfg, &subdir).join(&fname);
+                        match std::fs::remove_file(&path) {
+                            Ok(()) => {
+                                send_ack(writer, pkt.seq, b'1', 0, 0, CR, is_tcp).await?;
+                                if verbose {
+                                    glog!("Kermit server: G E '{}' → deleted", fname);
+                                }
+                            }
+                            Err(e) => {
+                                let msg = if e.kind() == std::io::ErrorKind::NotFound {
+                                    "File not found"
+                                } else {
+                                    "Delete failed"
+                                };
+                                send_error(writer, pkt.seq, msg,
+                                    b'1', 0, 0, CR, is_tcp).await?;
+                                if verbose {
+                                    glog!(
+                                        "Kermit server: G E '{}' refused: {}",
+                                        fname, e
+                                    );
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    b'R' => {
+                        // RENAME — `remote rename <old> <new>`, spec §6.7.
+                        // Two field-encoded args back-to-back.  Both
+                        // names must pass `is_safe_resume_filename`;
+                        // both are rooted at the per-session subdir.
+                        let parsed = parse_g_field_argument_with_remainder(&raw[1..])
+                            .and_then(|(old, rest)| {
+                                parse_g_field_argument_with_remainder(rest)
+                                    .map(|(new, _)| (old, new))
+                            });
+                        let Some((old_bytes, new_bytes)) = parsed else {
+                            send_error(writer, pkt.seq,
+                                "Rename needs two field-encoded names",
+                                b'1', 0, 0, CR, is_tcp).await?;
+                            if verbose {
+                                glog!("Kermit server: G R refused (missing args)");
+                            }
+                            continue;
+                        };
+                        let old_name = String::from_utf8_lossy(old_bytes).into_owned();
+                        let new_name = String::from_utf8_lossy(new_bytes).into_owned();
+                        if !is_safe_resume_filename(&old_name)
+                            || !is_safe_resume_filename(&new_name)
+                        {
+                            send_error(writer, pkt.seq, "Invalid filename",
+                                b'1', 0, 0, CR, is_tcp).await?;
+                            if verbose {
+                                glog!(
+                                    "Kermit server: G R '{}' '{}' refused (unsafe)",
+                                    old_name, new_name
+                                );
+                            }
+                            continue;
+                        }
+                        let dir = effective_transfer_path(&cfg, &subdir);
+                        let old_path = dir.join(&old_name);
+                        let new_path = dir.join(&new_name);
+                        // Refuse rename-to-existing — would silently
+                        // clobber an unrelated file.  Make the operator
+                        // delete the target first if that's their intent.
+                        if new_path.exists() {
+                            send_error(writer, pkt.seq, "Destination exists",
+                                b'1', 0, 0, CR, is_tcp).await?;
+                            if verbose {
+                                glog!(
+                                    "Kermit server: G R '{}' → '{}' refused (target exists)",
+                                    old_name, new_name
+                                );
+                            }
+                            continue;
+                        }
+                        match std::fs::rename(&old_path, &new_path) {
+                            Ok(()) => {
+                                send_ack(writer, pkt.seq, b'1', 0, 0, CR, is_tcp).await?;
+                                if verbose {
+                                    glog!(
+                                        "Kermit server: G R '{}' → '{}' renamed",
+                                        old_name, new_name
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                let msg = if e.kind() == std::io::ErrorKind::NotFound {
+                                    "Source not found"
+                                } else {
+                                    "Rename failed"
+                                };
+                                send_error(writer, pkt.seq, msg,
+                                    b'1', 0, 0, CR, is_tcp).await?;
+                                if verbose {
+                                    glog!(
+                                        "Kermit server: G R '{}' → '{}' refused: {}",
+                                        old_name, new_name, e
+                                    );
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    b'T' => {
+                        // TYPE — `remote type <filename>`, spec §6.7.
+                        // Server delivers the file's contents to the
+                        // client via the same X-headed inverse transfer
+                        // we use for DIR/SPACE/KERMIT — the difference
+                        // is just where the bytes come from.  For binary
+                        // files this dumps raw bytes to the client's
+                        // screen; that's what real Kermit does too —
+                        // matching `remote type` on a binary is the
+                        // user's call.
+                        let fname = parse_g_field_argument(&raw[1..])
+                            .map(|b| String::from_utf8_lossy(b).into_owned())
+                            .unwrap_or_default();
+                        if !is_safe_resume_filename(&fname) {
+                            send_error(writer, pkt.seq, "Invalid filename",
+                                b'1', 0, 0, CR, is_tcp).await?;
+                            if verbose {
+                                glog!(
+                                    "Kermit server: G T '{}' refused (unsafe filename)",
+                                    fname
+                                );
+                            }
+                            continue;
+                        }
+                        let path = effective_transfer_path(&cfg, &subdir).join(&fname);
+                        let bytes = match std::fs::read(&path) {
+                            Ok(b) => b,
+                            Err(e) => {
+                                let msg = if e.kind() == std::io::ErrorKind::NotFound {
+                                    "File not found"
+                                } else {
+                                    "Read failed"
+                                };
+                                send_error(writer, pkt.seq, msg,
+                                    b'1', 0, 0, CR, is_tcp).await?;
+                                if verbose {
+                                    glog!(
+                                        "Kermit server: G T '{}' refused: {}",
+                                        fname, e
+                                    );
+                                }
+                                continue;
+                            }
+                        };
+                        if bytes.len() as u64 > MAX_FILE_SIZE {
+                            send_error(writer, pkt.seq, "File too large",
+                                b'1', 0, 0, CR, is_tcp).await?;
+                            continue;
+                        }
+                        send_g_inverse_file_response(
+                            reader,
+                            writer,
+                            &fname,
+                            &bytes,
+                            is_tcp,
+                            is_petscii,
+                            verbose,
+                        )
+                        .await?;
+                        continue;
+                    }
+                    b'm' => {
+                        // MKDIR — `remote mkdir <dirname>`.  C-Kermit
+                        // ships this as wire letter `m` (lowercase) per
+                        // ckuus7.c:8139 (`setgen('m', dirname, ...)`).
+                        // Lowercase keeps it distinct from `M` (which
+                        // C-Kermit reserves for `remote message`).
+                        // Field-encoded directory name; rooted at the
+                        // per-session subdir so we can't escape the
+                        // sandbox.  Reuses `is_safe_resume_filename` —
+                        // a single-component name with no traversal —
+                        // because directory names are leaves, not paths.
+                        let dname = parse_g_field_argument(&raw[1..])
+                            .map(|b| String::from_utf8_lossy(b).into_owned())
+                            .unwrap_or_default();
+                        if !is_safe_resume_filename(&dname) {
+                            send_error(writer, pkt.seq, "Invalid directory name",
+                                b'1', 0, 0, CR, is_tcp).await?;
+                            if verbose {
+                                glog!(
+                                    "Kermit server: G m '{}' refused (unsafe name)",
+                                    dname
+                                );
+                            }
+                            continue;
+                        }
+                        let path = effective_transfer_path(&cfg, &subdir).join(&dname);
+                        match std::fs::create_dir(&path) {
+                            Ok(()) => {
+                                send_ack(writer, pkt.seq, b'1', 0, 0, CR, is_tcp).await?;
+                                if verbose {
+                                    glog!("Kermit server: G m '{}' → created", dname);
+                                }
+                            }
+                            Err(e) => {
+                                let msg = if e.kind() == std::io::ErrorKind::AlreadyExists {
+                                    "Directory already exists"
+                                } else {
+                                    "Mkdir failed"
+                                };
+                                send_error(writer, pkt.seq, msg,
+                                    b'1', 0, 0, CR, is_tcp).await?;
+                                if verbose {
+                                    glog!(
+                                        "Kermit server: G m '{}' refused: {}",
+                                        dname, e
+                                    );
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    b'd' => {
+                        // RMDIR — `remote rmdir <dirname>`.  C-Kermit
+                        // ships this as wire letter `d` (lowercase) per
+                        // ckuus7.c:8139 (`setgen('d', dirname, ...)`).
+                        // Lowercase keeps it distinct from `D` (which
+                        // is the DIRECTORY listing command).  We use
+                        // `std::fs::remove_dir`, which only removes
+                        // *empty* directories — the operator must
+                        // delete the contents first via `remote delete`.
+                        // Refusing recursive delete by default avoids
+                        // the worst footgun.
+                        let dname = parse_g_field_argument(&raw[1..])
+                            .map(|b| String::from_utf8_lossy(b).into_owned())
+                            .unwrap_or_default();
+                        if !is_safe_resume_filename(&dname) {
+                            send_error(writer, pkt.seq, "Invalid directory name",
+                                b'1', 0, 0, CR, is_tcp).await?;
+                            if verbose {
+                                glog!(
+                                    "Kermit server: G d '{}' refused (unsafe name)",
+                                    dname
+                                );
+                            }
+                            continue;
+                        }
+                        let path = effective_transfer_path(&cfg, &subdir).join(&dname);
+                        match std::fs::remove_dir(&path) {
+                            Ok(()) => {
+                                send_ack(writer, pkt.seq, b'1', 0, 0, CR, is_tcp).await?;
+                                if verbose {
+                                    glog!("Kermit server: G d '{}' → removed", dname);
+                                }
+                            }
+                            Err(e) => {
+                                let msg = if e.kind() == std::io::ErrorKind::NotFound {
+                                    "Directory not found"
+                                } else {
+                                    // ErrorKind::DirectoryNotEmpty is
+                                    // unstable on stable Rust; let the
+                                    // caller infer from the message.
+                                    "Rmdir failed (directory not empty?)"
+                                };
+                                send_error(writer, pkt.seq, msg,
+                                    b'1', 0, 0, CR, is_tcp).await?;
+                                if verbose {
+                                    glog!(
+                                        "Kermit server: G d '{}' refused: {}",
+                                        dname, e
+                                    );
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     _ => {
-                        send_ack(writer, pkt.seq, b'1', 0, 0, CR, is_tcp).await?;
+                        // Per spec §6, a server that doesn't implement a
+                        // generic command should reply with E-packet —
+                        // not silently ACK.  Silent-ACK leaves the peer
+                        // believing the command succeeded (e.g.
+                        // `remote delete foo` reports "ok" while nothing
+                        // happened on disk).  An E-packet surfaces the
+                        // refusal cleanly so the operator sees the right
+                        // failure.  Pre-2026-05 builds silently ACKed.
+                        send_error(
+                            writer,
+                            pkt.seq,
+                            "Command not supported",
+                            b'1',
+                            0,
+                            0,
+                            CR,
+                            is_tcp,
+                        )
+                        .await?;
                         if verbose {
                             glog!(
-                                "Kermit server: G '{}' acknowledged (no-op)",
+                                "Kermit server: G '{}' refused (unsupported)",
                                 action as char
                             );
                         }
@@ -5047,10 +5382,39 @@ pub(crate) async fn kermit_client_bye(
     kermit_client_send_g_simple(reader, writer, b'B', &[], is_tcp, is_petscii, verbose).await
 }
 
+/// tochar(N) length byte caps single-field arguments at 94 bytes
+/// (`tochar(95)` would land on `DEL`/0x7F which the spec excludes).
+/// Senders refuse over-long names here so we don't ship a body the
+/// peer will reject as malformed.
+const KERMIT_FIELD_MAX: usize = 94;
+
+/// Field-encode a single argument per Kermit Protocol Manual §6.7:
+/// `tochar(N)` length byte + N argument bytes.  An empty argument
+/// produces an empty vector (callers append nothing — the spec
+/// distinguishes "field omitted" from "field of length zero").
+/// Returns `Err` if the argument exceeds the per-field tochar cap.
+fn encode_g_field(label: &str, bytes: &[u8]) -> Result<Vec<u8>, String> {
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    if bytes.len() > KERMIT_FIELD_MAX {
+        return Err(format!(
+            "Kermit client: {} field {} bytes exceeds tochar cap of {}",
+            label,
+            bytes.len(),
+            KERMIT_FIELD_MAX
+        ));
+    }
+    let mut out = Vec::with_capacity(1 + bytes.len());
+    out.push(tochar(bytes.len() as u8));
+    out.extend_from_slice(bytes);
+    Ok(out)
+}
+
 /// Change the remote server's working subdirectory (`G C <subdir>`).
-/// The subdir argument is sent as raw UTF-8 bytes after the action
-/// byte; servers typically validate it against their own sandbox
-/// rules and refuse with E-packet on path-traversal attempts.
+/// The subdir is sent field-encoded per spec §6.7; servers validate
+/// it against their own sandbox rules and refuse with E-packet on
+/// path-traversal attempts.  Empty subdir signals "reset to home".
 #[allow(dead_code)]
 pub(crate) async fn kermit_client_cwd(
     reader: &mut (impl AsyncRead + Unpin),
@@ -5060,37 +5424,129 @@ pub(crate) async fn kermit_client_cwd(
     is_petscii: bool,
     verbose: bool,
 ) -> Result<(), String> {
-    // Field-encode the subdir per Kermit Protocol Manual §6.7:
-    // tochar(N) length byte + N bytes of path.  Required for
-    // real-Kermit interop; without it our C-Kermit peer reads the
-    // first path byte as a length and then refuses the rest as
-    // garbage (or, worse, walks a different directory than asked).
-    // Empty subdir → no length byte at all (signals "reset to home"
-    // on both sides).
-    let subdir_bytes = subdir.as_bytes();
-    let mut field_encoded = Vec::with_capacity(1 + subdir_bytes.len());
-    if !subdir_bytes.is_empty() {
-        if subdir_bytes.len() > 94 {
-            // tochar(N) only encodes N up to 94 (95 + 0x20 = 0x7F /
-            // DEL, the one printable boundary the spec excludes).
-            // Refuse over-long names here so we don't ship a body
-            // the peer will reject as malformed.
-            return Err(format!(
-                "Kermit client: CWD path {} bytes exceeds field-encoding cap of 94",
-                subdir_bytes.len()
-            ));
-        }
-        field_encoded.push(tochar(subdir_bytes.len() as u8));
-        field_encoded.extend_from_slice(subdir_bytes);
+    let field = encode_g_field("CWD path", subdir.as_bytes())?;
+    kermit_client_send_g_simple(
+        reader, writer, b'C', &field, is_tcp, is_petscii, verbose,
+    )
+    .await
+}
+
+/// Delete a file from the remote Kermit server (`G E <filename>`,
+/// the wire form of C-Kermit's `remote delete` / `remote era`).
+/// Field-encoded filename argument.  Server-side validation rejects
+/// path-traversal and absent files with E-packet.
+#[allow(dead_code)]
+pub(crate) async fn kermit_client_delete(
+    reader: &mut (impl AsyncRead + Unpin),
+    writer: &mut (impl AsyncWrite + Unpin),
+    filename: &str,
+    is_tcp: bool,
+    is_petscii: bool,
+    verbose: bool,
+) -> Result<(), String> {
+    let field = encode_g_field("DELETE filename", filename.as_bytes())?;
+    if field.is_empty() {
+        return Err("Kermit client: DELETE requires a filename".into());
     }
     kermit_client_send_g_simple(
-        reader,
-        writer,
-        b'C',
-        &field_encoded,
-        is_tcp,
-        is_petscii,
-        verbose,
+        reader, writer, b'E', &field, is_tcp, is_petscii, verbose,
+    )
+    .await
+}
+
+/// Rename a file on the remote Kermit server (`G R <old> <new>`).
+/// Two field-encoded names back-to-back per spec §6.7.  Server
+/// refuses traversal, missing source, or destination-exists with
+/// an E-packet.
+#[allow(dead_code)]
+pub(crate) async fn kermit_client_rename(
+    reader: &mut (impl AsyncRead + Unpin),
+    writer: &mut (impl AsyncWrite + Unpin),
+    old_name: &str,
+    new_name: &str,
+    is_tcp: bool,
+    is_petscii: bool,
+    verbose: bool,
+) -> Result<(), String> {
+    if old_name.is_empty() || new_name.is_empty() {
+        return Err("Kermit client: RENAME requires both old and new names".into());
+    }
+    let mut field = encode_g_field("RENAME source", old_name.as_bytes())?;
+    field.extend(encode_g_field("RENAME destination", new_name.as_bytes())?);
+    kermit_client_send_g_simple(
+        reader, writer, b'R', &field, is_tcp, is_petscii, verbose,
+    )
+    .await
+}
+
+/// Display a file on the remote Kermit server (`G T <filename>`).
+/// Server replies with an inverse file transfer carrying the file's
+/// bytes; we return them as a UTF-8 string (lossy on non-UTF-8 since
+/// `remote type` is intended for text files — for binaries the user
+/// should use GET instead).
+#[allow(dead_code)]
+pub(crate) async fn kermit_client_type(
+    reader: &mut (impl AsyncRead + Unpin),
+    writer: &mut (impl AsyncWrite + Unpin),
+    filename: &str,
+    is_tcp: bool,
+    is_petscii: bool,
+    verbose: bool,
+) -> Result<String, String> {
+    let field = encode_g_field("TYPE filename", filename.as_bytes())?;
+    if field.is_empty() {
+        return Err("Kermit client: TYPE requires a filename".into());
+    }
+    kermit_client_send_g_text(
+        reader, writer, b'T', &field, is_tcp, is_petscii, verbose,
+    )
+    .await
+}
+
+/// Create a directory on the remote Kermit server (`G m <name>`).
+/// Wire letter is lowercase `m` per C-Kermit ckuus7.c:8139 — distinct
+/// from `M` which the spec reserves for `remote message`.  The name
+/// is treated as a single component under the server's current
+/// effective directory (no nested-path creation).
+#[allow(dead_code)]
+pub(crate) async fn kermit_client_mkdir(
+    reader: &mut (impl AsyncRead + Unpin),
+    writer: &mut (impl AsyncWrite + Unpin),
+    name: &str,
+    is_tcp: bool,
+    is_petscii: bool,
+    verbose: bool,
+) -> Result<(), String> {
+    let field = encode_g_field("MKDIR name", name.as_bytes())?;
+    if field.is_empty() {
+        return Err("Kermit client: MKDIR requires a directory name".into());
+    }
+    kermit_client_send_g_simple(
+        reader, writer, b'm', &field, is_tcp, is_petscii, verbose,
+    )
+    .await
+}
+
+/// Remove an *empty* directory on the remote Kermit server
+/// (`G d <name>`).  Wire letter is lowercase `d` per C-Kermit
+/// ckuus7.c:8139 — distinct from `D` (DIRECTORY listing).  The
+/// server refuses if the directory is non-empty; the caller must
+/// delete contents first.
+#[allow(dead_code)]
+pub(crate) async fn kermit_client_rmdir(
+    reader: &mut (impl AsyncRead + Unpin),
+    writer: &mut (impl AsyncWrite + Unpin),
+    name: &str,
+    is_tcp: bool,
+    is_petscii: bool,
+    verbose: bool,
+) -> Result<(), String> {
+    let field = encode_g_field("RMDIR name", name.as_bytes())?;
+    if field.is_empty() {
+        return Err("Kermit client: RMDIR requires a directory name".into());
+    }
+    kermit_client_send_g_simple(
+        reader, writer, b'd', &field, is_tcp, is_petscii, verbose,
     )
     .await
 }
@@ -6457,17 +6913,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_server_g_unknown_subcommand_acks_and_continues() {
-        // Unknown G subcommand (not F/L): ACK and stay in the loop.
-        // Verify by sending a follow-up B and expecting a second ACK.
+    async fn test_server_g_unknown_subcommand_returns_e_packet_and_continues() {
+        // Unknown G subcommand: per spec §6 we E-packet the refusal so
+        // the peer doesn't see a phantom-success.  Pre-2026-05 builds
+        // silently ACKed unknown commands, which made `remote delete`
+        // and `remote era` look successful while doing nothing.  After
+        // the refusal the dispatch loop must stay in the loop so the
+        // peer can issue its next command — verify by following up
+        // with EOT (BYE) and expecting a second ACK.
+        //
+        // Use `P` (print) as the unknown letter — it's a real spec
+        // command (PRINT) that we deliberately don't implement, so it
+        // exercises the catch-all without colliding with any of the
+        // exit letters (F/L/B/I/X).
         let ((), result) = run_server_with_client(async |w, r| {
-            // Custom unknown G subcommand 'X' — server must ACK and
-            // continue, not exit.  Spec §6.7 fallback for unknown G
-            // subcommands: silent ACK.
-            w.write_all(&wire_packet(TYPE_GENERIC, 0, b"X")).await.unwrap();
+            w.write_all(&wire_packet(TYPE_GENERIC, 0, b"P")).await.unwrap();
             let resp = read_server_packet(r).await;
-            assert_eq!(resp.kind, TYPE_ACK, "G X should be ACKed");
-            // Follow up with B to close.
+            assert_eq!(resp.kind, TYPE_ERROR, "G P must be E-packet refused");
+            // Follow up with EOT to close.
             w.write_all(&wire_packet(TYPE_EOT, 1, &[])).await.unwrap();
             let close = read_server_packet(r).await;
             assert_eq!(close.kind, TYPE_ACK);
@@ -6728,7 +7191,7 @@ mod tests {
         // `remote help` user sees what works.
         let ((), result) = run_server_with_client(async |w, r| {
             let body = run_g_text_command(w, r, b'H', &[]).await;
-            for letter in &["F", "L", "B", "C", "D", "$", "K", "H"] {
+            for letter in &["F", "L", "B", "C", "D", "$", "K", "H", "E", "T", "I", "X"] {
                 assert!(
                     body.contains(letter),
                     "help text missing subcommand '{}'; got: {:?}",
@@ -6736,6 +7199,11 @@ mod tests {
                     body
                 );
             }
+            // R / m / d are also supported but the bare letter appears
+            // in lots of words; assert on the user-visible labels instead.
+            assert!(body.contains("Rename"), "help missing Rename: {:?}", body);
+            assert!(body.contains("Mkdir"),  "help missing Mkdir: {:?}",  body);
+            assert!(body.contains("Rmdir"),  "help missing Rmdir: {:?}",  body);
             close_server_session(w, r).await;
         })
         .await;
@@ -7132,6 +7600,394 @@ mod tests {
             close_server_session(w, r).await;
         })
         .await;
+        result.unwrap();
+    }
+
+    /// Build a single-arg field-encoded G-command body for E / T:
+    /// action letter + tochar(N) + N bytes of name.  Run through
+    /// `encode_data` so QCTL bytes in the length char survive the
+    /// receiver's `decode_data`.
+    fn g_single_arg_body(action: u8, arg: &[u8]) -> Vec<u8> {
+        let mut raw = Vec::with_capacity(2 + arg.len());
+        raw.push(action);
+        if !arg.is_empty() {
+            raw.push(tochar(arg.len() as u8));
+            raw.extend_from_slice(arg);
+        }
+        encode_data(&raw, Quoting::default())
+    }
+
+    /// Build a two-arg field-encoded G-command body for R (rename):
+    /// `R` + tochar(N1) + old + tochar(N2) + new.
+    fn g_two_arg_body(action: u8, a: &[u8], b: &[u8]) -> Vec<u8> {
+        let mut raw = Vec::with_capacity(3 + a.len() + b.len());
+        raw.push(action);
+        raw.push(tochar(a.len() as u8));
+        raw.extend_from_slice(a);
+        raw.push(tochar(b.len() as u8));
+        raw.extend_from_slice(b);
+        encode_data(&raw, Quoting::default())
+    }
+
+    #[tokio::test]
+    async fn test_server_g_delete_removes_file() {
+        // G E with a field-encoded filename deletes the file under
+        // <transfer_dir>/<subdir> and ACKs.  Subsequent stat must show
+        // the file is gone.
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("xmodem_g_delete_{}", pid));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("doomed.txt"), b"goodbye").unwrap();
+        let dir_str = dir.to_str().unwrap().to_string();
+        let dir_for_cleanup = dir.clone();
+        let path_check = dir.join("doomed.txt");
+
+        let ((), result) = run_server_with_client(async move |w, r| {
+            config::update_config_value("transfer_dir", &dir_str);
+            w.write_all(&wire_packet(TYPE_GENERIC, 0,
+                &g_single_arg_body(b'E', b"doomed.txt"))).await.unwrap();
+            let ack = read_server_packet(r).await;
+            assert_eq!(ack.kind, TYPE_ACK, "G E should ACK on success");
+            close_server_session(w, r).await;
+        })
+        .await;
+
+        assert!(!path_check.exists(), "file should have been deleted");
+        config::update_config_value("transfer_dir", "transfer");
+        let _ = std::fs::remove_dir_all(&dir_for_cleanup);
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_server_g_delete_missing_file_returns_e_packet() {
+        // Delete of non-existent file returns E-packet, not silent ACK.
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("xmodem_g_delete_missing_{}", pid));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir_str = dir.to_str().unwrap().to_string();
+        let dir_for_cleanup = dir.clone();
+
+        let ((), result) = run_server_with_client(async move |w, r| {
+            config::update_config_value("transfer_dir", &dir_str);
+            w.write_all(&wire_packet(TYPE_GENERIC, 0,
+                &g_single_arg_body(b'E', b"nope.txt"))).await.unwrap();
+            let resp = read_server_packet(r).await;
+            assert_eq!(resp.kind, TYPE_ERROR, "missing file → E-packet");
+            close_server_session(w, r).await;
+        })
+        .await;
+
+        config::update_config_value("transfer_dir", "transfer");
+        let _ = std::fs::remove_dir_all(&dir_for_cleanup);
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_server_g_delete_unsafe_filename_refused() {
+        // Path-traversal filename → E-packet, no disk I/O.  Specifically
+        // checks the validate-before-stat order so a `../something`
+        // never even gets opened.
+        let ((), result) = run_server_with_client(async |w, r| {
+            w.write_all(&wire_packet(TYPE_GENERIC, 0,
+                &g_single_arg_body(b'E', b"../etc/passwd"))).await.unwrap();
+            let resp = read_server_packet(r).await;
+            assert_eq!(resp.kind, TYPE_ERROR);
+            let q = Quoting::default();
+            let msg = decode_error_message(&resp.payload, q).to_ascii_lowercase();
+            assert!(msg.contains("invalid"), "expected 'invalid filename', got: {}", msg);
+            close_server_session(w, r).await;
+        })
+        .await;
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_server_g_rename_moves_file() {
+        // G R with two field-encoded names renames a file in place.
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("xmodem_g_rename_{}", pid));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("old.txt"), b"contents").unwrap();
+        let dir_str = dir.to_str().unwrap().to_string();
+        let dir_for_cleanup = dir.clone();
+        let old_path = dir.join("old.txt");
+        let new_path = dir.join("renamed.txt");
+
+        let ((), result) = run_server_with_client(async move |w, r| {
+            config::update_config_value("transfer_dir", &dir_str);
+            w.write_all(&wire_packet(TYPE_GENERIC, 0,
+                &g_two_arg_body(b'R', b"old.txt", b"renamed.txt"))).await.unwrap();
+            let ack = read_server_packet(r).await;
+            assert_eq!(ack.kind, TYPE_ACK, "rename should ACK");
+            close_server_session(w, r).await;
+        })
+        .await;
+
+        assert!(!old_path.exists(), "old name should be gone");
+        assert!(new_path.exists(), "new name should exist");
+        assert_eq!(std::fs::read(&new_path).unwrap(), b"contents");
+
+        config::update_config_value("transfer_dir", "transfer");
+        let _ = std::fs::remove_dir_all(&dir_for_cleanup);
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_server_g_rename_clobber_refused() {
+        // Refuse rename when the destination already exists — the spec
+        // is silent on this, but silently clobbering an unrelated file
+        // is a footgun.  Operator can `remote delete` first if intended.
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("xmodem_g_rename_clobber_{}", pid));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), b"a").unwrap();
+        std::fs::write(dir.join("b.txt"), b"b").unwrap();
+        let dir_str = dir.to_str().unwrap().to_string();
+        let dir_for_cleanup = dir.clone();
+
+        let ((), result) = run_server_with_client(async move |w, r| {
+            config::update_config_value("transfer_dir", &dir_str);
+            w.write_all(&wire_packet(TYPE_GENERIC, 0,
+                &g_two_arg_body(b'R', b"a.txt", b"b.txt"))).await.unwrap();
+            let resp = read_server_packet(r).await;
+            assert_eq!(resp.kind, TYPE_ERROR, "clobber must refuse");
+            // Both files should still exist.
+            assert!(std::path::Path::new(&dir_str).join("a.txt").exists());
+            assert!(std::path::Path::new(&dir_str).join("b.txt").exists());
+            close_server_session(w, r).await;
+        })
+        .await;
+
+        config::update_config_value("transfer_dir", "transfer");
+        let _ = std::fs::remove_dir_all(&dir_for_cleanup);
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_server_g_rename_missing_second_arg_refused() {
+        // R with only one field-encoded arg (no destination): E-packet
+        // refusal, original file untouched.
+        let ((), result) = run_server_with_client(async |w, r| {
+            // Hand-build a body with only one field — server should
+            // see the missing second arg and refuse.
+            w.write_all(&wire_packet(TYPE_GENERIC, 0,
+                &g_single_arg_body(b'R', b"a.txt"))).await.unwrap();
+            let resp = read_server_packet(r).await;
+            assert_eq!(resp.kind, TYPE_ERROR);
+            close_server_session(w, r).await;
+        })
+        .await;
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_server_g_type_returns_file_contents() {
+        // G T with a field-encoded filename delivers the file's bytes
+        // via the same X+Z inverse-transfer pattern used by D / $ / K.
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("xmodem_g_type_{}", pid));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let body_bytes = b"hello from type\n".to_vec();
+        std::fs::write(dir.join("greet.txt"), &body_bytes).unwrap();
+        let dir_str = dir.to_str().unwrap().to_string();
+        let dir_for_cleanup = dir.clone();
+        let body_clone = body_bytes.clone();
+
+        let ((), result) = run_server_with_client(async move |w, r| {
+            config::update_config_value("transfer_dir", &dir_str);
+            // Drive the inverse-transfer manually since the body is
+            // delivered via S → X(name) → D…D → Z → B, which is what
+            // `kermit_receive_with_init` expects.
+            w.write_all(&wire_packet(TYPE_GENERIC, 0,
+                &g_single_arg_body(b'T', b"greet.txt"))).await.unwrap();
+            let s_pkt = read_server_packet(r).await;
+            assert_eq!(s_pkt.kind, TYPE_SEND_INIT,
+                "T-response should drive an inverse transfer starting at S");
+            let received = kermit_receive_with_init(r, w, false, false, false, Some(s_pkt))
+                .await
+                .unwrap();
+            assert_eq!(received.len(), 1);
+            assert_eq!(received[0].data, body_clone);
+            close_server_session(w, r).await;
+        })
+        .await;
+
+        config::update_config_value("transfer_dir", "transfer");
+        let _ = std::fs::remove_dir_all(&dir_for_cleanup);
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_server_g_mkdir_creates_directory() {
+        // G m (lowercase) creates an empty directory under the current
+        // effective path.  Wire letter is `m` per C-Kermit ckuus7.c:8139
+        // (`setgen('m', ...)` for `remote mkdir`).
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("xmodem_g_mkdir_{}", pid));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir_str = dir.to_str().unwrap().to_string();
+        let dir_for_cleanup = dir.clone();
+        let new_subdir = dir.join("created");
+
+        let ((), result) = run_server_with_client(async move |w, r| {
+            config::update_config_value("transfer_dir", &dir_str);
+            w.write_all(&wire_packet(TYPE_GENERIC, 0,
+                &g_single_arg_body(b'm', b"created"))).await.unwrap();
+            let ack = read_server_packet(r).await;
+            assert_eq!(ack.kind, TYPE_ACK, "mkdir should ACK on success");
+            close_server_session(w, r).await;
+        })
+        .await;
+
+        assert!(new_subdir.is_dir(), "new directory should exist");
+        config::update_config_value("transfer_dir", "transfer");
+        let _ = std::fs::remove_dir_all(&dir_for_cleanup);
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_server_g_mkdir_existing_returns_e_packet() {
+        // mkdir of an already-existing directory: E-packet refusal,
+        // not a misleading silent ACK.
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("xmodem_g_mkdir_dup_{}", pid));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("preexisting")).unwrap();
+        let dir_str = dir.to_str().unwrap().to_string();
+        let dir_for_cleanup = dir.clone();
+
+        let ((), result) = run_server_with_client(async move |w, r| {
+            config::update_config_value("transfer_dir", &dir_str);
+            w.write_all(&wire_packet(TYPE_GENERIC, 0,
+                &g_single_arg_body(b'm', b"preexisting"))).await.unwrap();
+            let resp = read_server_packet(r).await;
+            assert_eq!(resp.kind, TYPE_ERROR, "duplicate mkdir → E");
+            close_server_session(w, r).await;
+        })
+        .await;
+
+        config::update_config_value("transfer_dir", "transfer");
+        let _ = std::fs::remove_dir_all(&dir_for_cleanup);
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_server_g_rmdir_removes_empty_directory() {
+        // G d (lowercase) removes an *empty* directory.  Distinct
+        // from G D (uppercase) which is the DIRECTORY listing.
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("xmodem_g_rmdir_{}", pid));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("empty")).unwrap();
+        let dir_str = dir.to_str().unwrap().to_string();
+        let dir_for_cleanup = dir.clone();
+        let target = dir.join("empty");
+
+        let ((), result) = run_server_with_client(async move |w, r| {
+            config::update_config_value("transfer_dir", &dir_str);
+            w.write_all(&wire_packet(TYPE_GENERIC, 0,
+                &g_single_arg_body(b'd', b"empty"))).await.unwrap();
+            let ack = read_server_packet(r).await;
+            assert_eq!(ack.kind, TYPE_ACK, "rmdir of empty dir should ACK");
+            close_server_session(w, r).await;
+        })
+        .await;
+
+        assert!(!target.exists(), "empty subdir should have been removed");
+        config::update_config_value("transfer_dir", "transfer");
+        let _ = std::fs::remove_dir_all(&dir_for_cleanup);
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_server_g_rmdir_non_empty_refuses() {
+        // rmdir of a non-empty directory must refuse with E-packet —
+        // matches `std::fs::remove_dir` semantics, which is the safe
+        // default (operator can `remote delete` contents first).
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("xmodem_g_rmdir_full_{}", pid));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("populated")).unwrap();
+        std::fs::write(dir.join("populated").join("inhabitant.txt"), b"x").unwrap();
+        let dir_str = dir.to_str().unwrap().to_string();
+        let dir_for_cleanup = dir.clone();
+        let target = dir.join("populated");
+
+        let ((), result) = run_server_with_client(async move |w, r| {
+            config::update_config_value("transfer_dir", &dir_str);
+            w.write_all(&wire_packet(TYPE_GENERIC, 0,
+                &g_single_arg_body(b'd', b"populated"))).await.unwrap();
+            let resp = read_server_packet(r).await;
+            assert_eq!(resp.kind, TYPE_ERROR, "non-empty rmdir must refuse");
+            close_server_session(w, r).await;
+        })
+        .await;
+
+        assert!(target.is_dir(), "directory must still exist after refused rmdir");
+        config::update_config_value("transfer_dir", "transfer");
+        let _ = std::fs::remove_dir_all(&dir_for_cleanup);
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_server_g_logout_letter_treated_as_exit() {
+        // C-Kermit's `remote logout` sends G I (uppercase, no args)
+        // per ckuus7.c:7922 (`setgen('I', "", "", "")`).  The gateway
+        // treats it as a session-exit signal — same effect as F/L/B.
+        // Distinct from the I-packet (TYPE_INIT) which is a different
+        // packet type entirely.
+        let ((), result) = run_server_with_client(async |w, r| {
+            w.write_all(&wire_packet(TYPE_GENERIC, 0, b"I")).await.unwrap();
+            let ack = read_server_packet(r).await;
+            assert_eq!(ack.kind, TYPE_ACK, "G I must be treated as exit");
+            // After the ACK the server returns from kermit_server.
+            // The `result.unwrap()` below will see Ok(empty) — no
+            // further packets needed.
+        })
+        .await;
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_server_g_remote_exit_letter_treated_as_exit() {
+        // `remote exit` sends G X per ckuus7.c:8144 (`setgen('X', "", ...)`).
+        // Same exit semantics as F/L/B/I.
+        let ((), result) = run_server_with_client(async |w, r| {
+            w.write_all(&wire_packet(TYPE_GENERIC, 0, b"X")).await.unwrap();
+            let ack = read_server_packet(r).await;
+            assert_eq!(ack.kind, TYPE_ACK, "G X must be treated as exit");
+        })
+        .await;
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_server_g_type_missing_file_returns_e_packet() {
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("xmodem_g_type_missing_{}", pid));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir_str = dir.to_str().unwrap().to_string();
+        let dir_for_cleanup = dir.clone();
+
+        let ((), result) = run_server_with_client(async move |w, r| {
+            config::update_config_value("transfer_dir", &dir_str);
+            w.write_all(&wire_packet(TYPE_GENERIC, 0,
+                &g_single_arg_body(b'T', b"absent.txt"))).await.unwrap();
+            let resp = read_server_packet(r).await;
+            assert_eq!(resp.kind, TYPE_ERROR);
+            close_server_session(w, r).await;
+        })
+        .await;
+
+        config::update_config_value("transfer_dir", "transfer");
+        let _ = std::fs::remove_dir_all(&dir_for_cleanup);
         result.unwrap();
     }
 

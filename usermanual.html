@@ -1285,12 +1285,14 @@ the gnarly ones.
 From the File Transfer menu, press <span class="kbd">K</span> to drop the
 session into Kermit Server Mode. The terminal displays a banner listing
 the supported peer commands (<code>send</code>, <code>get</code>,
-<code>remote dir</code>, <code>remote cwd</code>, <code>remote kermit</code>,
-<code>remote help</code>, <code>finish</code>, <code>bye</code>). The
-gateway then idles waiting for protocol packets; when the peer sends
-<code>finish</code>, <code>bye</code>, or disconnects, control returns to
-the File Transfer menu with a per-file &check;/&times; summary of received
-files.
+<code>remote dir</code>, <code>remote cwd</code>, <code>remote type</code>,
+<code>remote delete</code>, <code>remote rename</code>,
+<code>remote mkdir</code>, <code>remote rmdir</code>,
+<code>remote kermit</code>, <code>remote help</code>, <code>finish</code>,
+<code>bye</code>). The gateway then idles waiting for protocol packets;
+when the peer sends <code>finish</code>, <code>bye</code>, or
+disconnects, control returns to the File Transfer menu with a per-file
+&check;/&times; summary of received files.
 </p>
 
 <h3>What the peer can do</h3>
@@ -1301,11 +1303,17 @@ files.
         <tr><td><code>send &lt;file&gt;</code></td><td>S + F + A + D&hellip; + Z + B</td><td>Upload a file from the peer to the gateway's <code>transfer_dir</code> (or current sub-directory).</td></tr>
         <tr><td><code>get &lt;file&gt;</code></td><td>R, then we send</td><td>Download a file from the gateway to the peer.</td></tr>
         <tr><td><code>remote dir</code></td><td>G D</td><td>List files in the current effective directory.</td></tr>
-        <tr><td><code>remote cd &lt;subdir&gt;</code></td><td>G C</td><td>Change the gateway's working sub-directory for subsequent commands.</td></tr>
+        <tr><td><code>remote cd &lt;subdir&gt;</code></td><td>G C</td><td>Change the gateway's working sub-directory for subsequent commands. Field-encoded path argument per spec &sect;6.7.</td></tr>
         <tr><td><code>remote space</code></td><td>G $</td><td>Report free disk bytes at the current effective directory.</td></tr>
         <tr><td><code>remote kermit</code></td><td>G K</td><td>Identify the server (<code>Ethernet Gateway Kermit 0.5.2</code>).</td></tr>
         <tr><td><code>remote help</code></td><td>G H / G ?</td><td>List supported subcommands.</td></tr>
-        <tr><td><code>finish</code> / <code>logout</code> / <code>bye</code></td><td>G F / G L / G B</td><td>End the protocol session politely.</td></tr>
+        <tr><td><code>remote delete &lt;file&gt;</code> / <code>remote era</code></td><td>G E</td><td>Delete a file in the current effective directory. Path-traversal rejected; missing files return E-packet (not silent ACK). One filename per call &mdash; no wildcard expansion.</td></tr>
+        <tr><td><code>remote rename &lt;old&gt; &lt;new&gt;</code></td><td>G R</td><td>Rename a file in place. Both names field-encoded per spec &sect;6.7. Server refuses if the destination already exists, to avoid silent clobber.</td></tr>
+        <tr><td><code>remote type &lt;file&gt;</code></td><td>G T</td><td>Display a file's contents on the peer's terminal via the X+Z inverse-transfer pattern. Intended for text files; binaries will spew control bytes.</td></tr>
+        <tr><td><code>remote mkdir &lt;dir&gt;</code></td><td>G m</td><td>Create an empty subdirectory under the current effective directory. Wire letter is <em>lowercase</em> <code>m</code> (per C-Kermit's <code>setgen('m', &hellip;)</code>) &mdash; distinct from <code>M</code> reserved for <code>remote message</code>.</td></tr>
+        <tr><td><code>remote rmdir &lt;dir&gt;</code></td><td>G d</td><td>Remove an <em>empty</em> directory. Lowercase <code>d</code> wire letter &mdash; distinct from <code>D</code> (DIRectory listing). Non-empty directories are refused; clear contents first with <code>remote delete</code>.</td></tr>
+        <tr><td><code>finish</code> / <code>bye</code> / <code>logout</code> / <code>remote exit</code></td><td>G F / G L / G I / G X</td><td>End the protocol session politely. The gateway accepts all four since C-Kermit emits different letters for them (e.g. <code>logout</code> sends G I, <code>remote exit</code> sends G X).</td></tr>
+        <tr><td><em>any other</em> <code>remote ...</code></td><td>G <em>letter</em></td><td>Refused with an explicit E-packet (per spec &sect;6) so the peer's UI surfaces a clean &ldquo;command not supported&rdquo; error instead of a phantom-success ACK.</td></tr>
     </tbody>
 </table>
 
