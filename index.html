@@ -1338,6 +1338,10 @@ zmodem_negotiation_retry_interval = 5</span></code></pre>
                 </table>
 
                 <div class="callout">
+                    <strong>Command chaining:</strong> multiple AT commands can ride on one line — <code>ATE0Q1V1</code>, <code>ATIE0</code>, <code>ATE0DT bbs.example.com:23</code>. The emulator parses left-to-right, applies each subcommand, and emits a single <code>OK</code> at the end (or <code>ERROR</code> at the first failure). Dial commands (<code>D…</code>), answer (<code>A</code>), online (<code>O</code>), and store-number (<code>&amp;Z<em>n</em>=…</code>) terminate the chain because their value or action runs to end-of-line. Spaces between subcommands are tolerated.
+                </div>
+
+                <div class="callout">
                     <strong>Dial-string modifiers</strong> (phone-number context only): <code>,</code> pauses for <em>S8</em> seconds, <code>W</code> adds <em>S6</em> seconds (wait for dial tone), <code>;</code> returns to command mode after connect, <code>*</code> and <code>#</code> are preserved as DTMF digits, <code>P</code>/<code>T</code>/<code>@</code>/<code>!</code> are accepted and ignored. Hostnames like <code>pine.example.com</code> are <em>not</em> stripped because they don't match the phone-digit pattern.
                 </div>
 

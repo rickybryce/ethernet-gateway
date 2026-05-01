@@ -278,6 +278,7 @@ hr { border: 0; border-top: 1px solid #bbb; margin: 1em 0; }
             <li><a href="#ch9-sregs">S-Registers</a></li>
             <li><a href="#ch9-escape">The +++ Escape Sequence</a></li>
             <li><a href="#ch9-aslash">A/ Repeat-Last-Command</a></li>
+            <li><a href="#ch9-chain">Chained Command Lines</a></li>
         </ol>
     </li>
     <li><span class="num">10.</span> <a href="#ch10">SSH Gateway (Outbound)</a></li>
@@ -1672,7 +1673,52 @@ recognise this as a special two-character command. Useful for re-dialling or
 re-sending the last <code>ATZ</code> while debugging.
 </p>
 
-<h2>9.10 Ring Emulator</h2>
+<h2 id="ch9-chain">9.10 Chained Command Lines</h2>
+
+<p>
+Multiple AT commands can be combined on a single <code>AT</code> line —
+the same way real Hayes modems have always accepted them in init strings.
+The emulator parses the line left-to-right, applies each subcommand, and
+emits exactly one <code>OK</code> at the end (or <code>ERROR</code> if any
+subcommand failed). Spaces between subcommands are tolerated.
+</p>
+
+<pre><code>ATE0Q1V1            ; echo off, quiet, verbose, single OK
+ATE0 Q1 V1          ; same — spaces between tokens are fine
+ATIE0               ; print version, then echo off
+ATE0DT bbs.example.com:23   ; settings then dial (dial terminates)
+AT&amp;FE0           ; factory reset, then echo off — order matters
+ATS0=2H             ; set S0=2 then hang up</code></pre>
+
+<p>
+The chain stops at the first <em>terminator</em> — anything that ends
+command mode or has a value that runs to end-of-line:
+</p>
+
+<ul>
+    <li><code>D…</code> — any dial command (<code>ATD</code>, <code>ATDT</code>, <code>ATDP</code>, <code>ATDL</code>, <code>ATDS<em>n</em></code>) consumes the rest of the line and goes online.</li>
+    <li><code>A</code> — answer; the modem leaves command mode after this.</li>
+    <li><code>O</code> / <code>O0</code> — return to online mode.</li>
+    <li><code>&amp;Z<em>n</em>=…</code> — store-number value runs to end of line (it can contain any character — phone numbers, hostnames, ports).</li>
+</ul>
+
+<p>
+The chain also stops at the first <strong>error</strong>. Commands before
+the failure run to completion (their state changes apply); commands after
+do not run. A line like <code>ATS0=999E0</code> (S0=999 is out of range)
+returns <code>ERROR</code> and leaves the echo setting untouched.
+</p>
+
+<p>
+S-register set values stop at the first non-digit, so chaining works
+naturally: <code>ATS0=2E0</code> sets S0 to 2 and then echo off, even
+though there is no separator between <code>2</code> and <code>E</code>.
+Unknown subcommands (<code>ATL</code>, <code>ATM</code>, <code>ATB</code>,
+etc.) do not break the chain — they are accepted silently as if they ran
+to no effect.
+</p>
+
+<h2>9.11 Ring Emulator</h2>
 
 <p>
 Telnet and SSH users can simulate an incoming phone call to the serial device
@@ -1684,7 +1730,7 @@ just as if it had dialled in with <code>ATDT ethernet-gateway</code>. The
 serial device can also answer manually with <code>ATA</code> during ringing.
 </p>
 
-<h2>9.11 Unknown AT Commands</h2>
+<h2>9.12 Unknown AT Commands</h2>
 
 <p>
 Commands the emulator has no hardware to implement — <code>ATB</code>,
@@ -2208,8 +2254,9 @@ numeric values fall back to the default.
 <p>
 Quick reference for every AT command the emulator understands. See chapter 9
 for detailed explanations. All commands are case-insensitive. Multiple
-commands may be combined on a single <code>AT</code> line (e.g.
-<code>ATE0Q1V0</code>).
+commands may be combined on a single <code>AT</code> line — see
+<a href="#ch9-chain">section 9.10</a> for the chaining rules
+(<code>ATE0Q1V0</code>, <code>ATE0DT host</code>, …).
 </p>
 
 <h2>B.1 Core Commands</h2>
