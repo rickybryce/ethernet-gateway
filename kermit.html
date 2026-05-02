@@ -542,6 +542,8 @@
     <span class="key">get &lt;file&gt;</span>              — download a file from us
     <span class="key">remote dir</span>                — list files in current dir
     <span class="key">remote cwd &lt;subdir&gt;</span>       — change our working subdir
+    <span class="key">remote cdup</span>               — go up one level
+    <span class="key">remote cd</span>                 — return to the transfer_dir root
     <span class="key">remote type &lt;file&gt;</span>        — display file contents
     <span class="key">remote delete &lt;file&gt;</span>      — delete a file (alias: era)
     <span class="key">remote rename &lt;old&gt; &lt;new&gt;</span> — rename a file
@@ -625,7 +627,13 @@
                         <tr>
                             <td><code>remote cwd &lt;subdir&gt;</code><br><span class="dim-text">aka <code>remote cd</code></span></td>
                             <td>G C</td>
-                            <td>Change the gateway's working sub-directory for the rest of this session. Resolved relative to <code>transfer_dir</code>. Three special cases: <code>remote cd</code> with <em>no argument</em> resets back to the <code>transfer_dir</code> root; <code>remote cd ..</code> (or <code>remote cdup</code>) pops one component (no-op at the root); a target that doesn't exist on disk is refused with an E-packet so a typo'd <code>remote cd asembly</code> fails fast instead of silently dropping uploads into a bogus path. Path-traversal (<code>..</code> as a component anywhere except as the bare argument, leading dot, backslash, NUL) is refused.</td>
+                            <td>Change the gateway's working sub-directory for the rest of this session. Resolved relative to <code>transfer_dir</code>. Special cases:
+                                <ul style="margin: 6px 0 0 18px; padding: 0;">
+                                    <li><code>remote cd</code> with <em>no argument</em> resets back to the <code>transfer_dir</code> root.</li>
+                                    <li><code>remote cdup</code> pops one component (no-op at the root). This is the reliable form for "go up." <code>remote cd ..</code> works only when the C-Kermit client passes <code>..</code> straight through to the wire; some C-Kermit builds canonicalize <code>..</code> against the local filesystem first, in which case the server never sees it. <code>cdup</code> always sends the literal <code>..</code> per <code>ckuus7.c:7762</code>.</li>
+                                    <li>A target that doesn't exist on disk is refused with an E-packet, so a typo'd <code>remote cd asembly</code> fails fast instead of silently dropping uploads into a bogus path.</li>
+                                </ul>
+                                Path-traversal (<code>..</code> as a component anywhere except as the bare CDUP argument, leading dot, backslash, NUL) is refused.</td>
                         </tr>
                         <tr>
                             <td><code>remote space</code></td>
