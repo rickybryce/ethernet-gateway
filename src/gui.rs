@@ -410,8 +410,10 @@ impl App {
             ui.checkbox(&mut self.cfg.ssh_enabled, "SSH");
             ui.add_space(16.0);
             labeled_field(ui, "Port:", &mut self.ssh_port_buf, 50.0);
-        });
-        ui.horizontal(|ui| {
+            // Kermit Server shares the SSH row.  The wide gutter makes
+            // the second listener visually distinct from the first
+            // pair so the row doesn't read as one four-field cluster.
+            ui.add_space(24.0);
             let mut local = self.cfg.kermit_server_enabled;
             let prev = local;
             let resp = ui.checkbox(&mut local, "Kermit Server");
