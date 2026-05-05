@@ -1,10 +1,11 @@
 # Ethernet Gateway
 
 A telnet-based XMODEM/YMODEM/ZMODEM/Kermit file transfer server, SSH
-gateway, Hayes-compatible modem emulator for serial-attached retro
-hardware, text-mode web browser, and AI chat client written in Rust.
-Supports PETSCII (Commodore 64), ANSI, and ASCII terminals. Designed
-for local network use with retro and modern terminal clients.
+gateway, Hayes-compatible modem emulator (with optional telnet-serial
+console bridge) for serial-attached retro hardware, text-mode web
+browser, and AI chat client written in Rust. Supports PETSCII (Commodore
+64), ANSI, and ASCII terminals. Designed for local network use with
+retro and modern terminal clients.
 
 **[User Manual](http://ethernetgateway.com/index.html)**
 &nbsp;&middot;&nbsp;
@@ -361,9 +362,12 @@ opens on startup. The GUI provides:
 - **Live console output** -- server log messages stream in the bottom panel
 - **Configuration editing** -- all `egateway.conf` settings can be changed and
   saved without editing the file by hand
-- **Serial port auto-detection** -- the Serial Modem section lists detected
-  serial ports in a dropdown; click the refresh button to re-scan
-- **"More..." popups** -- the Server, File Transfer, and Serial Modem frames
+- **Serial port auto-detection** -- the Console Mode section lists detected
+  serial ports in a dropdown; click the refresh button to re-scan. The
+  Mode dropdown beside the Enabled checkbox switches the port between
+  **Modem (AT Command) Mode** and **Telnet-Serial Mode** (see Console Mode
+  below) -- changes are persistent and immediate
+- **"More..." popups** -- the Server, File Transfer, and Console Mode frames
   each have a **More...** button that opens an advanced-options window. The
   File Transfer popup exposes the XMODEM-family timeouts plus the independent
   ZMODEM tunables (handshake, frame timeout, retry cap) side by side.
@@ -391,12 +395,19 @@ enabled), the main menu offers:
   B  Simple Browser
   C  Configuration
   F  File Transfer
+  G  Serial Gateway
   R  Troubleshooting
   S  SSH Gateway
   T  Telnet Gateway
   W  Weather
   X  Exit
 ```
+
+The **Serial Gateway** option is only useful when the serial port is
+configured in **console mode** (see Console Mode below); it bridges the
+telnet/SSH session directly to the wire so a remote user can talk to
+whatever the serial port is connected to. Press **ESC** twice to leave
+the bridge and return to the menu.
 
 ## Configuration
 
@@ -405,7 +416,8 @@ Most settings can be changed from within a telnet or SSH session using the
 
 - **E** Security -- toggle login requirement, set telnet/SSH credentials
 - **G** Gateway Configuration -- outbound Telnet and SSH Gateway options
-- **M** Modem Emulator -- serial port selection and parameters
+- **M** Modem / Console -- serial port selection, framing, and the
+  Modem-vs-Console mode toggle (see Console Mode below)
 - **S** Server Configuration -- enable/disable telnet and SSH, set ports
 - **F** File Transfer -- submenu with shared transfer directory and
   per-protocol settings pages:
@@ -498,12 +510,17 @@ zmodem_frame_timeout = 30
 zmodem_max_retries = 10
 zmodem_negotiation_retry_interval = 5
 
-# Serial modem emulation (Hayes AT commands)
+# Serial console (modem emulator or direct telnet bridge).
 # Set serial_enabled = true and configure the port to activate.
+# serial_mode selects the role of the configured port:
+#   modem    — run the Hayes AT command emulator (default)
+#   console  — expose the port via the telnet menu's Serial Gateway,
+#              bridging the telnet client directly to the wire.
 serial_enabled = false
+serial_mode = modem
 
 # Serial port device (e.g. /dev/ttyUSB0 on Linux, COM3 on Windows)
-# Leave empty if not configured. Use the Modem Emulator menu to detect ports.
+# Leave empty if not configured. Use the Modem/Console menu to detect ports.
 serial_port =
 
 # Serial port parameters
@@ -819,14 +836,28 @@ port. This allows retro hardware (Commodore 64, CP/M machines, etc.) to connect
 to the gateway and to remote telnet hosts using a serial connection and standard
 modem commands.
 
+The configured serial port can run in one of two modes:
+
+- **Modem (AT Command) Mode** (default) — runs the Hayes emulator described
+  below.
+- **Telnet-Serial Mode** — keeps the port idle until a telnet/SSH user
+  selects **G  Serial Gateway** from the main menu, at which point the
+  session is bridged directly to the wire. See **Console Mode** below.
+
+The dropdown beside the **Enabled** checkbox in the GUI's Console Mode
+frame, and the **M** (Toggle Modem/Console mode) item in the telnet
+**Configuration > Modem/Console** menu, both switch between the two
+modes. The setting persists in `serial_mode` in `egateway.conf`.
+
 ### Setting Up
 
 1. From the main menu, press **C** (Configuration)
-2. Press **M** (Modem Emulator)
-3. Press **E** to enable the emulator
-4. Press **S** to select a serial port (auto-detected)
-5. Configure baud rate, data bits, parity, stop bits, and flow control as needed
-6. Press **Q** to apply -- settings take effect immediately (no restart needed)
+2. Press **M** (Modem/Console)
+3. Press **E** to enable the port
+4. Press **M** to set the mode (default is **Modem**)
+5. Press **S** to select a serial port (auto-detected)
+6. Configure baud rate, data bits, parity, stop bits, and flow control as needed
+7. Press **Q** to apply -- settings take effect immediately (no restart needed)
 
 Or edit `egateway.conf` directly and restart the server.
 
@@ -1041,6 +1072,43 @@ when configured to ignore DCD (sometimes labeled "Force DTR" or "Ignore
 Carrier" in the terminal program settings). If your software requires DCD to
 be asserted before it will communicate, check its configuration for an
 option to disable carrier detection.
+
+### Console Mode (Telnet-Serial Bridge)
+
+When the serial port is set to **Telnet-Serial Mode**, the Hayes emulator
+is disabled and the port is exposed via the **G  Serial Gateway** option
+on the main menu. This is useful for talking to a microcontroller or
+embedded console that's connected to the serial port — your telnet/SSH
+session becomes a transparent pipe to the wire in both directions.
+
+**Switching modes:**
+
+- **GUI:** in the **Console Mode** frame, set the dropdown beside the
+  **Enabled** checkbox to **Telnet-Serial Mode**. The change is saved
+  immediately and reconfigures the running serial thread.
+- **Telnet/SSH:** **Configuration > Modem/Console**, then press **M** to
+  toggle. The header changes from `MODEM EMULATOR` to `SERIAL CONSOLE`
+  and the Dialup Mapping / Ring Emulator items disappear (they only
+  apply to modem mode).
+- **`egateway.conf`:** set `serial_mode = console` and restart.
+
+**Using the bridge:**
+
+1. From the main menu, press **G** (Serial Gateway).
+2. The gateway prints the active framing (port, baud, data/parity/stop,
+   flow) and asks `Connect now? (Y/N):` — type **Y** to enter the
+   bridge.
+3. Bytes flow in both directions until you press **ESC twice in a row**
+   (PETSCII `<-` twice on Commodore terminals). A single ESC is
+   forwarded to the wire on the next keystroke, so editors that need
+   ESC (vi, emacs) keep working.
+
+The bridge is single-user: only one telnet/SSH session at a time can
+hold the port. Subsequent attempts get **Another session is already
+using the serial port** until the first session disconnects.
+
+The Serial Gateway option is hidden from sessions that came in over the
+serial port itself (you can't bridge a port back into its own bridge).
 
 ## Web Browser
 

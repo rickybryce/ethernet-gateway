@@ -230,9 +230,10 @@ hr { border: 0; border-top: 1px solid #bbb; margin: 1em 0; }
     <div class="author">Ricky Bryce</div>
     <div class="tag">
         A telnet/SSH file-transfer gateway, SSH proxy, Hayes-compatible
-        modem emulator, text-mode web browser, AI chat client, and weather
-        service for retro hardware — XMODEM, XMODEM-1K, YMODEM, and ZMODEM
-        over PETSCII, ANSI, and ASCII terminals.
+        modem emulator (with optional telnet-serial console bridge),
+        text-mode web browser, AI chat client, and weather service for
+        retro hardware — XMODEM, XMODEM-1K, YMODEM, and ZMODEM over
+        PETSCII, ANSI, and ASCII terminals.
     </div>
 </div>
 
@@ -279,6 +280,7 @@ hr { border: 0; border-top: 1px solid #bbb; margin: 1em 0; }
             <li><a href="#ch9-escape">The +++ Escape Sequence</a></li>
             <li><a href="#ch9-aslash">A/ Repeat-Last-Command</a></li>
             <li><a href="#ch9-chain">Chained Command Lines</a></li>
+            <li><a href="#ch9-console">Console Mode (Telnet-Serial Bridge)</a></li>
         </ol>
     </li>
     <li><span class="num">10.</span> <a href="#ch10">SSH Gateway (Outbound)</a></li>
@@ -350,6 +352,7 @@ Commodore, ANSI escape sequences on modern terminals, and plain text on ASCII.
 <ul>
     <li><strong>File transfer</strong> — XMODEM (128-byte), XMODEM-1K, and YMODEM with auto-detection on upload and a selection prompt on download.</li>
     <li><strong>Hayes AT modem emulator</strong> — real serial port, full command set, S-registers S0–S26, stored phone-number slots, and <code>+++</code> escape.</li>
+    <li><strong>Telnet-serial console bridge</strong> — the same serial port can be flipped to <em>console mode</em> so a telnet/SSH user can drive a microcontroller or RS-232 device directly through the <strong>G&nbsp;&nbsp;Serial Gateway</strong> menu (chapter 9.13).</li>
     <li><strong>SSH server</strong> — optional encrypted access with its own credentials and a persistent Ed25519 host key.</li>
     <li><strong>SSH gateway</strong> — outbound proxy for SSH servers, with TOFU host-key trust and Ed25519 public-key auth.</li>
     <li><strong>Telnet gateway</strong> — outbound proxy with RFC-1143 Q-method option negotiation or a raw-TCP escape hatch.</li>
@@ -576,7 +579,8 @@ phone-number slots are covered in chapter 9.
         <tr><td><code>zmodem_frame_timeout</code></td><td>u64</td><td><code>30</code></td><td>Per-frame read timeout once a transfer is live (headers / subpackets).</td></tr>
         <tr><td><code>zmodem_max_retries</code></td><td>u32</td><td><code>10</code></td><td>Retry cap for ZRQINIT, ZRPOS, and ZDATA frames.</td></tr>
         <tr><td><code>zmodem_negotiation_retry_interval</code></td><td>u64</td><td><code>5</code></td><td>Seconds between ZRINIT / ZRQINIT re-sends during the handshake. Analogous to <code>xmodem_negotiation_retry_interval</code> but for ZMODEM.</td></tr>
-        <tr><td><code>serial_enabled</code></td><td>bool</td><td><code>false</code></td><td>Run the Hayes modem emulator on the configured serial port.</td></tr>
+        <tr><td><code>serial_enabled</code></td><td>bool</td><td><code>false</code></td><td>Activate the configured serial port. Pairs with <code>serial_mode</code> to choose its role.</td></tr>
+        <tr><td><code>serial_mode</code></td><td>string</td><td><code>modem</code></td><td><code>modem</code> = run the Hayes AT command emulator (chapter 9). <code>console</code> = expose the port via the telnet menu's <strong>G&nbsp;&nbsp;Serial Gateway</strong> option as a direct telnet-serial bridge (chapter 9.13).</td></tr>
         <tr><td><code>serial_port</code></td><td>string</td><td>empty</td><td>Device path (e.g. <code>/dev/ttyUSB0</code>, <code>COM3</code>).</td></tr>
         <tr><td><code>serial_baud</code></td><td>u32</td><td><code>9600</code></td><td>Baud rate. Must be &ge; 300.</td></tr>
         <tr><td><code>serial_databits</code></td><td>u8</td><td><code>8</code></td><td>Data bits: 5, 6, 7, or 8.</td></tr>
@@ -637,7 +641,7 @@ and a console panel at the bottom:
     <li><strong>Security</strong> — Require Login toggle, plus separate username and password fields for telnet and SSH.</li>
     <li><strong>File Transfer (XMODEM)</strong> — transfer directory, XMODEM-family timeouts (negotiation, per-block, retries). The card's subtitle reads <em>(More for YMODEM / ZMODEM)</em>: a <em>More&#8230;</em> button opens a popup with the full per-protocol breakdown covering the XMODEM/XMODEM-1K/YMODEM shared keys and the independent ZMODEM tunables (handshake timeout, frame timeout, retry cap, and retry interval).</li>
     <li><strong>AI Chat, Browser, and Weather</strong> — Groq API key (rendered as a password field), browser homepage URL, and weather ZIP.</li>
-    <li><strong>Serial Modem</strong> — Enabled checkbox, port dropdown with a refresh (&#8634;) button, baud, data bits, parity, stop bits, flow control. A <em>More&#8230;</em> button reveals the Hayes AT state popup.</li>
+    <li><strong>Console Mode</strong> — Enabled checkbox, mode dropdown (<em>Modem (AT Command) Mode</em> / <em>Telnet-Serial Mode</em>), port dropdown with a refresh (&#8634;) button, baud, data bits, parity, stop bits, flow control. Mode changes save and reconfigure the running serial thread immediately. A <em>More&#8230;</em> button reveals the Hayes AT state popup.</li>
     <li><strong>General</strong> — Verbose XMODEM Logging, Show GUI on Startup.</li>
 </ul>
 
@@ -683,7 +687,7 @@ fields so they're visually distinct from the navy main window. This is a
 UI convention — it doesn't affect any setting.
 </aside>
 
-<h3>4.2.2 Serial Modem — More</h3>
+<h3>4.2.2 Console Mode — More</h3>
 
 <p>
 Mirrors the primary serial port, baud, framing, and flow-control controls, and
@@ -846,11 +850,21 @@ not a default.
   B  Simple Browser
   C  Configuration
   F  File Transfer
+  G  Serial Gateway
   R  Troubleshooting
   S  SSH Gateway
   T  Telnet Gateway
   W  Weather
   X  Exit</code></pre>
+
+<p>
+<strong>G&nbsp;&nbsp;Serial Gateway</strong> is only useful when the
+configured serial port is set to <em>console</em> mode (see chapter 9.10).
+It bridges the telnet/SSH session straight to the wire so you can drive a
+microcontroller, RS-232 device, or other serial console remotely. From a
+session that came in over the serial port itself the option is hidden.
+Press <span class="kbd">ESC</span> twice to leave the bridge.
+</p>
 
 <!-- ═══════════════════ 6. SSH ═══════════════════ -->
 <h1 id="ch6">6. SSH Access</h1>
@@ -1423,11 +1437,12 @@ S0–S26, the <code>A/</code> repeat-last-command shortcut, and the
 <h2 id="ch9-setup">9.1 Enabling the Emulator</h2>
 
 <p>
-From the GUI Serial Modem frame:
+From the GUI Console Mode frame:
 </p>
 
 <ol>
     <li>Check <em>Enabled</em>.</li>
+    <li>Confirm the mode dropdown is set to <em>Modem (AT Command) Mode</em>. (To run a direct telnet-serial bridge instead, switch to <em>Telnet-Serial Mode</em> — see chapter 9.10.)</li>
     <li>Pick a port from the dropdown. If your port does not appear, plug in the adapter and click the refresh (&#8634;) button.</li>
     <li>Set the baud rate, data bits, parity, stop bits, and wire-level flow control.</li>
     <li>Click <em>Save and Restart Server</em> so the serial thread restarts with the new settings.</li>
@@ -1435,8 +1450,9 @@ From the GUI Serial Modem frame:
 
 <p>
 You can also configure everything live from an in-session telnet / SSH user:
-<em>Configuration</em> &rarr; <em>Modem Emulator</em>. That menu has
-<span class="kbd">E</span> to enable, <span class="kbd">S</span> to detect and
+<em>Configuration</em> &rarr; <em>Modem/Console</em>. That menu has
+<span class="kbd">E</span> to enable, <span class="kbd">M</span> to toggle
+between modem and console mode, <span class="kbd">S</span> to detect and
 select a port, and submenus for baud / framing / flow control. Changes
 applied through the in-session menu take effect immediately with no restart.
 </p>
@@ -1782,6 +1798,58 @@ Commands the emulator has no hardware to implement — <code>ATB</code>,
 keeps legacy init strings working instead of halting mid-setup with
 <code>ERROR</code>.
 </p>
+
+<h2 id="ch9-console">9.13 Console Mode (Telnet-Serial Bridge)</h2>
+
+<p>
+The same physical serial port can be repurposed as a transparent
+telnet-serial bridge. When <code>serial_mode = console</code>, the Hayes
+emulator is disabled and the port idles until a telnet/SSH user picks
+<strong>G&nbsp;&nbsp;Serial Gateway</strong> from the main menu — at
+which point bytes flow in both directions between the user's session
+and the wire, with no AT processing.
+</p>
+
+<p>
+This is the right mode when the serial port is connected to something
+that already speaks its own protocol — a microcontroller's debug
+console, a router's serial console, an embedded test fixture — and you
+want to drive it remotely.
+</p>
+
+<aside class="tip">
+<span class="label">Switching modes</span>
+<ul>
+    <li><strong>GUI:</strong> change the dropdown beside <em>Enabled</em> in the Console Mode frame from <em>Modem (AT Command) Mode</em> to <em>Telnet-Serial Mode</em>. The change is persistent and immediate; the running serial thread reconfigures on the spot.</li>
+    <li><strong>Telnet/SSH menu:</strong> <em>Configuration</em> &rarr; <em>Modem/Console</em>, then press <span class="kbd">M</span> to toggle. The screen header changes from <code>MODEM EMULATOR</code> to <code>SERIAL CONSOLE</code> and the Dialup Mapping / Ring Emulator items disappear (modem-only features).</li>
+    <li><strong>Config file:</strong> <code>serial_mode = console</code>, then restart.</li>
+</ul>
+</aside>
+
+<h3>9.13.1 Using the Bridge</h3>
+
+<ol>
+    <li>From the main menu, press <span class="kbd">G</span> (Serial Gateway).</li>
+    <li>The gateway prints the active framing (port, baud, data/parity/stop, flow) and asks <code>Connect now? (Y/N):</code>. Press <span class="kbd">Y</span> to enter the bridge.</li>
+    <li>Type to the wire; the wire types back. The connection is fully 8-bit transparent and the gateway does not interpret AT commands or insert IAC sequences.</li>
+    <li>Press <span class="kbd">ESC</span> twice in a row to leave the bridge (PETSCII <span class="kbd">&larr;</span> twice on Commodore terminals). A single <span class="kbd">ESC</span> is held for one read cycle; if you type any other key after it the held <span class="kbd">ESC</span> goes through to the wire, so editors that need <span class="kbd">ESC</span> (vi, ed, emacs) keep working.</li>
+</ol>
+
+<aside class="note">
+<span class="label">One session at a time</span>
+The bridge is single-user. If a second telnet/SSH session tries to open
+it while another holds the port, the second session sees
+<em>Another session is already using the serial port</em> and is
+returned to the main menu. The port is released as soon as the first
+session leaves the bridge or disconnects.
+</aside>
+
+<aside class="warn">
+<span class="label">Self-bridging is blocked</span>
+A session that arrived over the serial port itself does <em>not</em>
+see the Serial Gateway item — bridging the port back into its own
+bridge would loop your terminal to itself.
+</aside>
 
 <!-- ═══════════════════ 10. SSH Gateway ═══════════════════ -->
 <h1 id="ch10">10. SSH Gateway (Outbound)</h1>
@@ -2258,8 +2326,9 @@ numeric values fall back to the default.
         <tr><td><code>serial_dcd_mode</code></td><td>u8</td><td><code>1</code></td><td>0 or 1</td><td>Saved <code>AT&amp;C</code> DCD mode.</td></tr>
         <tr><td><code>serial_dtr_mode</code></td><td>u8</td><td><code>0</code></td><td>0–3</td><td>Saved <code>AT&amp;D</code> DTR-handling mode.</td></tr>
         <tr><td><code>serial_echo</code></td><td>bool</td><td><code>true</code></td><td>true/false</td><td>Saved <code>ATE</code> echo state.</td></tr>
-        <tr><td><code>serial_enabled</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Run the Hayes modem emulator on the configured port.</td></tr>
+        <tr><td><code>serial_enabled</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Activate the configured serial port. Pairs with <code>serial_mode</code>.</td></tr>
         <tr><td><code>serial_flow_mode</code></td><td>u8</td><td><code>0</code></td><td>0–4</td><td>Saved <code>AT&amp;K</code> modem-layer flow mode.</td></tr>
+        <tr><td><code>serial_mode</code></td><td>string</td><td><code>modem</code></td><td><code>modem</code> or <code>console</code></td><td><code>modem</code> = Hayes AT emulator. <code>console</code> = expose the port via <strong>G&nbsp;&nbsp;Serial Gateway</strong> as a telnet-serial bridge (§9.13).</td></tr>
         <tr><td><code>serial_flowcontrol</code></td><td>string</td><td><code>none</code></td><td>none / hardware / software</td><td>Wire-level flow control.</td></tr>
         <tr><td><code>serial_parity</code></td><td>string</td><td><code>none</code></td><td>none / odd / even</td><td>Parity bit.</td></tr>
         <tr><td><code>serial_port</code></td><td>string</td><td>empty</td><td>OS-specific path</td><td>Serial device. <code>/dev/ttyUSB0</code>, <code>COM3</code>, etc.</td></tr>

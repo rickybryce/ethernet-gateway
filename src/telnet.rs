@@ -3124,6 +3124,11 @@ impl TelnetSession {
         ))
         .await?;
         self.send_line(&format!(
+            "  {}  Serial Gateway",
+            self.cyan("G")
+        ))
+        .await?;
+        self.send_line(&format!(
             "  {}  Troubleshooting",
             self.cyan("R")
         ))
@@ -3163,6 +3168,8 @@ impl TelnetSession {
                 lines.extend_from_slice(&[
                     "  F  File Transfer: upload/download",
                     "     files using the XMODEM protocol",
+                    "  G  Serial Gateway: bridge to the",
+                    "     console-mode serial port",
                     "  R  Troubleshooting: diagnose",
                     "     terminal input issues",
                     "  S  SSH Gateway: connect to a",
@@ -3206,6 +3213,9 @@ impl TelnetSession {
             "f" => {
                 self.current_menu = Menu::FileTransfer;
             }
+            "g" => {
+                self.gateway_serial().await?;
+            }
             "s" => {
                 self.gateway_ssh().await?;
             }
@@ -3217,7 +3227,7 @@ impl TelnetSession {
                 return Ok(false);
             }
             _ => {
-                self.show_error("Press A-C, F, R, S, T, W, X, or H.").await?;
+                self.show_error("Press A-C, F, G, R, S, T, W, X, or H.").await?;
             }
         }
         Ok(true)
@@ -6133,6 +6143,260 @@ impl TelnetSession {
         Ok(())
     }
 
+    // ─── SERIAL GATEWAY ─────────────────────────────────────
+
+    /// Bridge the telnet session directly to the configured serial port.
+    /// Requires `serial_enabled = true` and `serial_mode = "console"` —
+    /// otherwise we explain how to switch and return.
+    ///
+    /// The escape sequence is two consecutive ESC presses (PETSCII `<-`
+    /// on Commodore terminals).  A single ESC is forwarded to the wire
+    /// after one read cycle, so editors that need ESC (vi, ed) keep
+    /// working as long as the user types a normal key after each ESC.
+    async fn gateway_serial(&mut self) -> Result<(), std::io::Error> {
+        // The same pumping loop is reachable from a serial-side login,
+        // but bridging the modem-emulator's own port back into itself
+        // is a footgun — block it.
+        if self.is_serial {
+            self.show_error_lines(&[
+                "Serial Gateway is not available",
+                "from a serial-side session.",
+            ])
+            .await?;
+            return Ok(());
+        }
+
+        let cfg = config::get_config();
+        if !cfg.serial_enabled || cfg.serial_port.is_empty() {
+            self.show_error_lines(&[
+                "Serial port is not enabled.",
+                "",
+                "Enable it under Configuration >",
+                "Modem Emulator (set Mode to",
+                "Console and pick a port).",
+            ])
+            .await?;
+            return Ok(());
+        }
+        if cfg.serial_mode != "console" {
+            self.show_error_lines(&[
+                "Serial port is in modem mode.",
+                "",
+                "Switch to console mode under",
+                "Configuration > Modem Emulator",
+                "(M = toggle Mode).",
+            ])
+            .await?;
+            return Ok(());
+        }
+
+        let esc_label = match self.terminal_type {
+            TerminalType::Petscii => "<-",
+            _ => "ESC",
+        };
+
+        self.clear_screen().await?;
+        let sep = self.separator();
+        self.send_line(&sep).await?;
+        self.send_line(&format!("  {}", self.yellow("SERIAL GATEWAY")))
+            .await?;
+        self.send_line(&sep).await?;
+        self.send_line("").await?;
+        // Stack the port info so a long device path
+        // (e.g. /dev/ttyUSB10) can never overflow the 40-col
+        // PETSCII width.
+        self.send_line(&format!(
+            "  Port: {}",
+            self.amber(&cfg.serial_port)
+        ))
+        .await?;
+        self.send_line(&format!(
+            "  Baud: {}",
+            self.amber(&cfg.serial_baud.to_string())
+        ))
+        .await?;
+        self.send_line(&format!(
+            "  Data: {}{}{} flow={}",
+            cfg.serial_databits,
+            cfg.serial_parity.chars().next().unwrap_or('N').to_uppercase(),
+            cfg.serial_stopbits,
+            cfg.serial_flowcontrol,
+        ))
+        .await?;
+        self.send_line("").await?;
+        self.send_line(&format!(
+            "  Press {} {} to disconnect.",
+            self.cyan(esc_label),
+            self.cyan(esc_label)
+        ))
+        .await?;
+        self.send_line("  Single ESC passes through on the").await?;
+        self.send_line("  next keystroke.").await?;
+        self.send_line("").await?;
+        self.send(&format!(
+            "  {} ",
+            self.cyan("Connect now? (Y/N):")
+        ))
+        .await?;
+        self.flush().await?;
+
+        let confirm = match self.read_byte_filtered().await? {
+            Some(b) => b,
+            None => return Ok(()),
+        };
+        // Terminate the prompt line.  The user's terminal supplies
+        // its own echo of `Y` (or its absence) — the gateway only
+        // emits a CRLF here so subsequent output starts cleanly,
+        // matching the convention used by `modem_apply_settings`.
+        self.send_line("").await?;
+        if confirm != b'Y' && confirm != b'y' {
+            return Ok(());
+        }
+
+        // Acquire the bridge BEFORE printing "Connected." so the
+        // user doesn't see a confusing "Connected." followed
+        // immediately by an acquisition error.  The request returns
+        // quickly when the serial-manager loop is healthy (it polls
+        // the slot every 150 ms).
+        self.send_line(&format!(
+            "  {}",
+            self.dim("Acquiring serial port...")
+        ))
+        .await?;
+        self.flush().await?;
+        let bridge = match crate::serial::request_console_bridge().await {
+            Ok(b) => b,
+            Err(e) => {
+                self.show_error_lines(&[
+                    "Could not acquire serial port:",
+                    "",
+                    e.as_str(),
+                ])
+                .await?;
+                return Ok(());
+            }
+        };
+
+        self.send_line(&format!(
+            "  {}",
+            self.green("Connected.")
+        ))
+        .await?;
+        self.send_line("").await?;
+        self.flush().await?;
+
+        let result = self.run_serial_console_loop(bridge).await;
+
+        self.send_line("").await?;
+        self.send_line(&format!(
+            "  {}",
+            self.yellow("Serial bridge closed.")
+        ))
+        .await?;
+        self.send_line("").await?;
+        self.send("  Press any key to continue.").await?;
+        self.flush().await?;
+        let idle_timeout = std::time::Duration::from_secs(
+            config::get_config().idle_timeout_secs,
+        );
+        if idle_timeout.is_zero() {
+            let _ = self.wait_for_key().await;
+        } else {
+            let _ = tokio::time::timeout(idle_timeout, self.wait_for_key()).await;
+        }
+        result
+    }
+
+    /// Inner pump loop for the Serial Gateway.  Reads bytes from the
+    /// telnet session and writes them to the serial bridge; reads
+    /// bytes from the bridge and writes them back to the session.
+    /// Exits cleanly on double-ESC or when either side closes.
+    async fn run_serial_console_loop(
+        &mut self,
+        bridge: tokio::io::DuplexStream,
+    ) -> Result<(), std::io::Error> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (mut bridge_read, mut bridge_write) = tokio::io::split(bridge);
+
+        let reader = &mut self.reader;
+        let writer = &self.writer;
+        let is_petscii = self.terminal_type == TerminalType::Petscii;
+        let erase_char = self.erase_char;
+        let mut last_was_esc = false;
+        let esc_byte: u8 = if is_petscii { 0x5F } else { 0x1B };
+
+        let mut bridge_buf = [0u8; 4096];
+
+        loop {
+            tokio::select! {
+                event = read_gateway_event(reader) => {
+                    match event {
+                        Ok(GatewayInboundEvent::Data(b)) if is_esc_key(b, is_petscii) => {
+                            if last_was_esc {
+                                break; // double-ESC — exit bridge
+                            }
+                            last_was_esc = true;
+                        }
+                        Ok(GatewayInboundEvent::Data(b)) => {
+                            if last_was_esc {
+                                last_was_esc = false;
+                                let e = if is_petscii {
+                                    petscii_to_ascii_byte(esc_byte)
+                                } else {
+                                    esc_byte
+                                };
+                                if bridge_write.write_all(&[e]).await.is_err() {
+                                    break;
+                                }
+                            }
+                            let b = if is_petscii { petscii_to_ascii_byte(b) } else { b };
+                            // Map an unusual erase byte (e.g. PETSCII
+                            // 0x14) back to ASCII DEL so editors that
+                            // expect 0x7F see what they expect.
+                            let b = if b == erase_char && erase_char != 0x7F { 0x7F } else { b };
+                            if bridge_write.write_all(&[b]).await.is_err() {
+                                break;
+                            }
+                            if bridge_write.flush().await.is_err() {
+                                break;
+                            }
+                        }
+                        Ok(GatewayInboundEvent::NawsResize(_, _)) => {
+                            // No way to tell the wire about a window
+                            // resize; ignore.
+                        }
+                        Ok(GatewayInboundEvent::Eof) => break,
+                        Err(_) => break,
+                    }
+                }
+                n = bridge_read.read(&mut bridge_buf) => {
+                    match n {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            let data = &bridge_buf[..n];
+                            let mut w = writer.lock().await;
+                            // Always IAC-escape on the wire to the
+                            // local user — they're a real telnet peer
+                            // and a literal 0xFF would be misread as
+                            // IAC.
+                            if write_telnet_data(&mut **w, data).await.is_err() {
+                                break;
+                            }
+                            if w.flush().await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
+
+        let _ = bridge_write.shutdown().await;
+        Ok(())
+    }
+
     // ─── AI CHAT ────────────────────────────────────────────
 
     /// Lines of answer content per page (screen minus header/footer).
@@ -6911,18 +7175,37 @@ impl TelnetSession {
             self.clear_screen().await?;
             let sep = self.separator();
             self.send_line(&sep).await?;
-            self.send_line(&format!("  {}", self.yellow("MODEM EMULATOR")))
+
+            let cfg = config::get_config();
+            let console_mode = cfg.serial_mode == "console";
+            let title = if console_mode {
+                "SERIAL CONSOLE"
+            } else {
+                "MODEM EMULATOR"
+            };
+            self.send_line(&format!("  {}", self.yellow(title)))
                 .await?;
             self.send_line(&sep).await?;
             self.send_line("").await?;
 
-            let cfg = config::get_config();
             let status = if cfg.serial_enabled {
                 self.green("ENABLED")
             } else {
                 self.red("Disabled")
             };
-            self.send_line(&format!("  Status: {}", status)).await?;
+            let mode_label = if console_mode {
+                self.green("Console")
+            } else {
+                self.amber("Modem")
+            };
+            // Status + Mode share one line to keep the menu under
+            // the 22-row PETSCII budget when ATD + Dialup + Ring
+            // are all visible.
+            self.send_line(&format!(
+                "  Status: {}  Mode: {}",
+                status, mode_label
+            ))
+            .await?;
             let port_display = if cfg.serial_port.is_empty() {
                 "(not set)".to_string()
             } else {
@@ -6953,7 +7236,7 @@ impl TelnetSession {
                 self.amber(&cfg.serial_flowcontrol)
             ))
             .await?;
-            if cfg.serial_enabled {
+            if cfg.serial_enabled && !console_mode {
                 self.send_line(&format!(
                     "  {}",
                     self.amber("ATD ETHERNET-GATEWAY")
@@ -6964,6 +7247,11 @@ impl TelnetSession {
             self.send_line(&format!(
                 "  {}  Toggle enabled/disabled",
                 self.cyan("E")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Toggle Modem/Console mode",
+                self.cyan("M")
             ))
             .await?;
             self.send_line(&format!(
@@ -6986,17 +7274,21 @@ impl TelnetSession {
                 self.cyan("F")
             ))
             .await?;
-            self.send_line(&format!(
-                "  {}  Dialup Mapping",
-                self.cyan("D")
-            ))
-            .await?;
-            if !self.is_serial {
+            // Dialup mapping and ring emulator are modem-emulator
+            // features only — they don't apply to a raw console bridge.
+            if !console_mode {
                 self.send_line(&format!(
-                    "  {}  Ring emulator",
-                    self.cyan("I")
+                    "  {}  Dialup Mapping",
+                    self.cyan("D")
                 ))
                 .await?;
+                if !self.is_serial {
+                    self.send_line(&format!(
+                        "  {}  Ring emulator",
+                        self.cyan("I")
+                    ))
+                    .await?;
+                }
             }
             self.send_line("").await?;
             self.send_line(&format!(
@@ -7006,7 +7298,12 @@ impl TelnetSession {
             ))
             .await?;
 
-            let prompt = format!("{}> ", self.cyan("ethernet/modem"));
+            let prompt_label = if console_mode {
+                "ethernet/console"
+            } else {
+                "ethernet/modem"
+            };
+            let prompt = format!("{}> ", self.cyan(prompt_label));
             self.send(&prompt).await?;
             self.flush().await?;
 
@@ -7028,6 +7325,24 @@ impl TelnetSession {
                     .await
                     .ok();
                 }
+                "m" => {
+                    let new_mode = if console_mode { "modem" } else { "console" };
+                    let v = new_mode.to_string();
+                    tokio::task::spawn_blocking(move || {
+                        config::update_config_value("serial_mode", &v);
+                    })
+                    .await
+                    .ok();
+                    // Do NOT restart the serial thread here.  The
+                    // serial-lockout protection in modem_apply_settings
+                    // (which fires on Q-back) gates restarts behind a
+                    // 60 s Y+Enter confirmation when the operator is
+                    // connected via the modem itself — calling
+                    // restart_serial directly here would sever a
+                    // serial-session caller mid-menu without that
+                    // protection.  Same convention as every other
+                    // setting on this menu (E, S, B, P, F).
+                }
                 "s" => {
                     self.modem_select_port().await?;
                 }
@@ -7040,10 +7355,10 @@ impl TelnetSession {
                 "f" => {
                     self.modem_set_flow().await?;
                 }
-                "d" => {
+                "d" if !console_mode => {
                     self.dialup_mapping().await?;
                 }
-                "i" if !self.is_serial => {
+                "i" if !console_mode && !self.is_serial => {
                     self.modem_ring_emulator().await?;
                 }
                 "h" => {
@@ -7054,10 +7369,10 @@ impl TelnetSession {
                     return Ok(());
                 }
                 _ => {
-                    let msg = if self.is_serial {
-                        "Press E, S, B, P, D, F, H, or Q."
-                    } else {
-                        "Press E, S, B, P, D, F, I, H, or Q."
+                    let msg = match (console_mode, self.is_serial) {
+                        (true, _) => "Press E, M, S, B, P, F, H, or Q.",
+                        (false, true) => "Press E, M, S, B, P, D, F, H, or Q.",
+                        (false, false) => "Press E, M, S, B, P, D, F, I, H, or Q.",
                     };
                     self.show_error(msg).await?;
                 }
@@ -7073,6 +7388,7 @@ impl TelnetSession {
     ) -> Result<(), std::io::Error> {
         let new_cfg = config::get_config();
         let changed = new_cfg.serial_enabled != original_cfg.serial_enabled
+            || new_cfg.serial_mode != original_cfg.serial_mode
             || new_cfg.serial_port != original_cfg.serial_port
             || new_cfg.serial_baud != original_cfg.serial_baud
             || new_cfg.serial_databits != original_cfg.serial_databits
@@ -7190,6 +7506,7 @@ impl TelnetSession {
         let _ = tokio::task::spawn_blocking(move || {
             config::update_config_values(&[
                 ("serial_enabled", if oc.serial_enabled { "true" } else { "false" }),
+                ("serial_mode", &oc.serial_mode),
                 ("serial_port", &oc.serial_port),
                 ("serial_baud", &oc.serial_baud.to_string()),
                 ("serial_databits", &oc.serial_databits.to_string()),
@@ -7928,8 +8245,9 @@ impl TelnetSession {
                             "  G  Gateway: configure outbound",
                             "     Telnet and SSH Gateway menus",
                             "",
-                            "  M  Modem: configure the serial",
-                            "     port for modem emulation",
+                            "  M  Modem/Console: configure the",
+                            "     serial port for modem emulation",
+                            "     or telnet-serial bridging",
                             "",
                             "  S  Server: enable/disable",
                             "     services, set ports, and",
@@ -7965,8 +8283,9 @@ impl TelnetSession {
                             "     Telnet and SSH Gateway menus",
                             "     (proxy to remote servers)",
                             "",
-                            "  M  Modem: configure the serial port",
-                            "     for modem emulation",
+                            "  M  Modem/Console: configure the serial",
+                            "     port for AT-command modem emulation",
+                            "     or telnet-serial console bridging",
                             "",
                             "  S  Server: enable/disable services,",
                             "     set ports, and restart the server",
@@ -12899,6 +13218,10 @@ mod tests {
             "Press N, I, F, M, R, H, or Q.",
             "Press T, P, S, O, R, H, or Q.",
             "Invalid port number.",
+            // Modem / console emulator menu
+            "Press E, M, S, B, P, F, H, or Q.",
+            "Press E, M, S, B, P, D, F, H, or Q.",
+            "Press E, M, S, B, P, D, F, I, H, or Q.",
         ];
         for msg in &messages {
             // Error messages are displayed as "  {msg}" — 2-char indent
@@ -12922,6 +13245,7 @@ mod tests {
             "  B  Simple Browser",
             "  C  Configuration",
             "  F  File Transfer",
+            "  G  Serial Gateway",
             "  R  Troubleshooting",
             "  S  SSH Gateway",
             "  T  Telnet Gateway",
@@ -12929,6 +13253,7 @@ mod tests {
             "  X  Exit",
             // Modem emulator menu
             "  E  Toggle enabled/disabled",
+            "  M  Toggle Modem/Console mode",
             "  S  Select serial port",
             "  B  Set baud rate",
             "  P  Set data/parity/stop",
@@ -13009,35 +13334,35 @@ mod tests {
     /// Main menu screen: header(3) + blank + 10 items + blank + help = 16 rows.
     #[test]
     fn test_main_menu_row_count() {
-        // sep, title, sep, blank, A, B, C, F, R, S, T, W, X, blank, H=Help = 15
-        let rows = 15;
+        // sep, title, sep, blank, A, B, C, F, G, R, S, T, W, X, blank, H=Help = 16
+        let rows = 16;
         assert!(rows <= 22, "main menu is {} rows, exceeds 22", rows);
     }
 
-    /// Main menu items must be exactly A, B, C, F, R, S, T, W, X (9 items).
+    /// Main menu items must be exactly A, B, C, F, G, R, S, T, W, X (10 items).
     #[test]
     fn test_main_menu_item_count() {
-        let items = ["A", "B", "C", "F", "R", "S", "T", "W", "X"];
-        assert_eq!(items.len(), 9, "main menu should have exactly 9 items");
+        let items = ["A", "B", "C", "F", "G", "R", "S", "T", "W", "X"];
+        assert_eq!(items.len(), 10, "main menu should have exactly 10 items");
     }
 
     /// Error hint must list exactly the valid main menu keys.
     #[test]
     fn test_main_menu_error_hint() {
-        let hint = "Press A-C, F, R, S, T, W, X, or H.";
+        let hint = "Press A-C, F, G, R, S, T, W, X, or H.";
         // Must not mention removed keys (D, E, M)
         assert!(!hint.contains(" D,"), "error hint must not mention D");
         assert!(!hint.contains(" E,"), "error hint must not mention E");
         assert!(!hint.contains(" E "), "error hint must not mention E");
         assert!(!hint.contains(" M,"), "error hint must not mention M");
         // Must mention all valid keys
-        for key in ["A", "C", "F", "R", "S", "T", "W", "X", "H"] {
+        for key in ["A", "C", "F", "G", "R", "S", "T", "W", "X", "H"] {
             assert!(hint.contains(key), "error hint must mention {}", key);
         }
         assert!(hint.len() <= PETSCII_WIDTH, "error hint exceeds PETSCII width");
     }
 
-    /// Main help screen content must have exactly 14 lines (matching row count test).
+    /// Main help screen content must have exactly 16 lines (matching row count test).
     #[test]
     fn test_main_help_content_line_count() {
         let lines = [
@@ -13047,6 +13372,8 @@ mod tests {
             "     and other options",
             "  F  File Transfer: upload/download",
             "     files using the XMODEM protocol",
+            "  G  Serial Gateway: bridge to the",
+            "     console-mode serial port",
             "  R  Troubleshooting: diagnose",
             "     terminal input issues",
             "  S  SSH Gateway: connect to a",
@@ -13056,7 +13383,7 @@ mod tests {
             "  W  Weather: check weather by zip",
             "  X  Exit: disconnect from server",
         ];
-        assert_eq!(lines.len(), 14, "main help should have exactly 14 content lines");
+        assert_eq!(lines.len(), 16, "main help should have exactly 16 content lines");
     }
 
     /// Shutdown broadcast message must be valid and end with CRLF.
@@ -13703,12 +14030,96 @@ mod tests {
         assert!(rows <= 22, "modem help screen is {} rows, exceeds 22", rows);
     }
 
-    /// Main help screen: header(3) + blank + 14 content lines +
-    /// blank + "Press any key" = 20 rows.
+    /// Main help screen: header(3) + blank + 16 content lines +
+    /// blank + "Press any key" = 22 rows.
     #[test]
     fn test_main_help_screen_row_count() {
-        let rows = 3 + 1 + 14 + 1 + 1; // 20
+        let rows = 3 + 1 + 16 + 1 + 1; // 22
         assert!(rows <= 22, "main help screen is {} rows, exceeds 22", rows);
+    }
+
+    /// Serial Gateway pre-bridge screen rows: sep(1) + title(1) +
+    /// sep(1) + blank(1) + Port + Baud + Data + blank(1) + Press +
+    /// Single + next + blank(1) + prompt(1) = 13.  Stays comfortably
+    /// within 22.
+    #[test]
+    fn test_serial_gateway_screen_row_count() {
+        let rows = 3 + 1 + 3 + 1 + 3 + 1 + 1; // 13
+        assert!(rows <= 22, "serial gateway screen is {} rows, exceeds 22", rows);
+    }
+
+    /// Every fixed line in the Serial Gateway screen must fit PETSCII
+    /// width.  The Port line varies with the configured device path
+    /// but the chrome around it does not — those are the lines we can
+    /// pin down.
+    #[test]
+    fn test_serial_gateway_lines_fit_petscii() {
+        let fixed = [
+            "  SERIAL GATEWAY",
+            "  Press ESC ESC to disconnect.",
+            "  Press <- <- to disconnect.",
+            "  Single ESC passes through on the",
+            "  next keystroke.",
+            "  Connect now? (Y/N): ",
+            "  Acquiring serial port...",
+            "  Connected.",
+            "  Serial bridge closed.",
+            "  Press any key to continue.",
+        ];
+        for line in &fixed {
+            assert!(
+                line.len() <= PETSCII_WIDTH,
+                "serial-gateway line '{}' is {} chars, exceeds {}",
+                line,
+                line.len(),
+                PETSCII_WIDTH,
+            );
+        }
+        // The Port line carries the full device path.  Confirm the
+        // template fits with a realistically long path.
+        let port = "  Port: /dev/ttyUSB10";
+        assert!(port.len() <= PETSCII_WIDTH, "port line {} chars", port.len());
+        // Highest baud anyone is realistically setting.
+        let baud = "  Baud: 115200";
+        assert!(baud.len() <= PETSCII_WIDTH, "baud line {} chars", baud.len());
+        // Worst-case data line: 8N1 flow=software.
+        let data = "  Data: 8N1 flow=software";
+        assert!(data.len() <= PETSCII_WIDTH, "data line {} chars", data.len());
+    }
+
+    /// Modem/Console settings menu in console mode loses Dialup +
+    /// Ring rows but keeps the Mode toggle.  Item count must still
+    /// fit the 22-row budget for every combination.  Status + Mode
+    /// share one line so the modem-mode-enabled-non-serial case
+    /// stays at exactly 22 rows.
+    #[test]
+    fn test_modem_console_menu_row_counts() {
+        // Status block: status_mode + Port + Baud + Data + Flow = 5.
+        let status_block = 5;
+        let chrome = 3 + 1 + 1 + 1 + 1; // sep+title+sep, blank, blank, footer, prompt = 7
+        let menu_console = 6; // E, M, S, B, P, F
+        let menu_modem_serial = 7; // + D
+        let menu_modem_full = 8; // + D + I
+
+        // Console mode: chrome + status_block + menu_console.
+        let console_rows = chrome + status_block + menu_console; // 18
+        assert!(console_rows <= 22, "console menu is {} rows", console_rows);
+
+        // Modem mode + serial session + enabled: + ATD + D, no I.
+        let modem_serial_rows = chrome + status_block + 1 + menu_modem_serial; // 21
+        assert!(
+            modem_serial_rows <= 22,
+            "modem-serial menu is {} rows",
+            modem_serial_rows
+        );
+
+        // Modem mode + non-serial + enabled (worst case): + ATD + D + I.
+        let modem_full_rows = chrome + status_block + 1 + menu_modem_full; // 22
+        assert!(
+            modem_full_rows <= 22,
+            "modem-full menu is {} rows",
+            modem_full_rows
+        );
     }
 
     /// All help page content lines must fit PETSCII width (40 cols).
@@ -13722,6 +14133,8 @@ mod tests {
             "     and other options",
             "  F  File Transfer: upload/download",
             "     files using the XMODEM protocol",
+            "  G  Serial Gateway: bridge to the",
+            "     console-mode serial port",
             "  R  Troubleshooting: diagnose",
             "     terminal input issues",
             "  S  SSH Gateway: connect to a",
@@ -13733,8 +14146,9 @@ mod tests {
             // Configuration submenu help
             "  E  Security: require login,",
             "     set usernames and passwords",
-            "  M  Modem: configure the serial",
-            "     port for modem emulation",
+            "  M  Modem/Console: configure the",
+            "     serial port for modem emulation",
+            "     or telnet-serial bridging",
             "  S  Server: enable/disable",
             "     services, set ports, and",
             "     restart the server",

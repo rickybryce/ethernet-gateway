@@ -245,7 +245,7 @@ struct App {
     dirty: bool,
     /// Whether the Server "More..." popup is open.
     server_popup_open: bool,
-    /// Whether the Serial Modem "More..." popup is open.
+    /// Whether the Console Mode "More..." popup is open.
     serial_popup_open: bool,
     /// Whether the File Transfer "More..." popup is open.
     file_transfer_popup_open: bool,
@@ -530,11 +530,11 @@ impl App {
         }
     }
 
-    /// Render the Serial Modem frame's primary field rows (port, baud,
+    /// Render the Console Mode frame's primary field rows (port, baud,
     /// line framing, flow control).  Shared between the main layout and
-    /// the Serial popup.  When `with_more_button` is true, a right-aligned
-    /// "More..." button is appended to the Bits/Par/Stop/Flow row; the
-    /// popup passes false since it's already the More view.
+    /// the Console Mode popup.  When `with_more_button` is true, a right-
+    /// aligned "More..." button is appended to the Bits/Par/Stop/Flow
+    /// row; the popup passes false since it's already the More view.
     fn draw_serial_controls(&mut self, ui: &mut egui::Ui, with_more_button: bool) {
         ui.horizontal(|ui| {
             ui.label("Port:");
@@ -609,9 +609,11 @@ impl App {
         });
     }
 
-    /// Render the Serial Modem frame's advanced options — Hayes AT saved
-    /// state, S-registers, and stored phone-number slots.  Shown only in
-    /// the popup.
+    /// Render the Console Mode frame's advanced options — Hayes AT
+    /// saved state, S-registers, and stored phone-number slots.  Shown
+    /// only in the popup.  The advanced state is only meaningful when
+    /// the port is in `modem` mode; in `console` mode the values are
+    /// still persisted but unused.
     fn draw_serial_advanced(&mut self, ui: &mut egui::Ui) {
         ui.label(egui::RichText::new("Hayes AT Saved State").strong().color(AMBER));
         ui.horizontal(|ui| {
@@ -1479,7 +1481,7 @@ impl eframe::App for App {
                 });
                 ui.add_space(4.0);
 
-                // ── Row 3: Serial Modem + General ─────────────
+                // ── Row 3: Console Mode + General ─────────────
                 ui.horizontal_top(|ui| {
                     ui.allocate_ui_with_layout(
                         egui::vec2(half, 0.0),
@@ -1489,9 +1491,34 @@ impl eframe::App for App {
                                 ui.set_min_height(row_h);
                                 ui.set_min_width(ui.available_width());
                                 ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new("Serial Modem").strong().color(AMBER));
+                                    ui.label(egui::RichText::new("Console Mode").strong().color(AMBER));
                                     ui.add_space(8.0);
                                     ui.checkbox(&mut self.cfg.serial_enabled, "Enabled");
+                                    ui.add_space(8.0);
+                                    let prev_mode = self.cfg.serial_mode.clone();
+                                    egui::ComboBox::from_id_salt("serial_mode")
+                                        .width(190.0)
+                                        .selected_text(if self.cfg.serial_mode == "console" {
+                                            "Telnet-Serial Mode"
+                                        } else {
+                                            "Modem (AT Command) Mode"
+                                        })
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(
+                                                &mut self.cfg.serial_mode,
+                                                "modem".into(),
+                                                "Modem (AT Command) Mode",
+                                            );
+                                            ui.selectable_value(
+                                                &mut self.cfg.serial_mode,
+                                                "console".into(),
+                                                "Telnet-Serial Mode",
+                                            );
+                                        });
+                                    if self.cfg.serial_mode != prev_mode {
+                                        // Mode change is persistent and immediate.
+                                        self.save_and_restart_serial();
+                                    }
                                     if right_aligned_small_button(ui, "Save") {
                                         self.save_and_restart_serial();
                                     }
@@ -1647,7 +1674,7 @@ impl eframe::App for App {
         self.server_popup_open = server_open;
 
         let mut serial_open = self.serial_popup_open;
-        egui::Window::new(egui::RichText::new("Serial Modem — More").strong().color(AMBER_BRIGHT))
+        egui::Window::new(egui::RichText::new("Console Mode — More").strong().color(AMBER_BRIGHT))
             .open(&mut serial_open)
             .resizable(true)
             .collapsible(false)

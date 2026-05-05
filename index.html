@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Ethernet Gateway v0.5.3 &mdash; User Manual</title>
-    <meta name="description" content="Complete user manual for Ethernet Gateway — a telnet/SSH gateway server with XMODEM file transfer, AI chat, web browser, weather, and serial modem emulation.">
+    <meta name="description" content="Complete user manual for Ethernet Gateway — a telnet/SSH gateway server with XMODEM file transfer, AI chat, web browser, weather, Hayes modem emulation, and a telnet-serial console bridge.">
     <style>
         :root {
             --green: #33ff33;
@@ -524,7 +524,7 @@
                 <span class="hdr-badge">Telnet</span>
                 <span class="hdr-badge">SSH</span>
                 <span class="hdr-badge">XMODEM</span>
-                <span class="hdr-badge">Serial Modem</span>
+                <span class="hdr-badge">Console Mode</span>
                 <span class="hdr-badge">Commodore 64</span>
                 <span class="hdr-badge">ANSI</span>
             </div>
@@ -596,6 +596,11 @@
                         <td class="key-col">[T]</td>
                         <td class="name-col">Telnet Gateway</td>
                         <td class="desc-col">Proxy connections to remote telnet servers.</td>
+                    </tr>
+                    <tr>
+                        <td class="key-col">[G]</td>
+                        <td class="name-col">Serial Gateway</td>
+                        <td class="desc-col">Bridge a telnet/SSH session directly to the configured serial port (when set to console mode). Press <strong>ESC</strong> twice to leave.</td>
                     </tr>
                     <tr>
                         <td class="key-col">[A]</td>
@@ -741,6 +746,7 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                     <div>&nbsp;&nbsp;<span class="key">B</span>&nbsp;&nbsp;<span class="label">Simple Browser</span></div>
                     <div>&nbsp;&nbsp;<span class="key">C</span>&nbsp;&nbsp;<span class="label">Configuration</span></div>
                     <div>&nbsp;&nbsp;<span class="key">F</span>&nbsp;&nbsp;<span class="label">File Transfer</span></div>
+                    <div>&nbsp;&nbsp;<span class="key">G</span>&nbsp;&nbsp;<span class="label">Serial Gateway</span></div>
                     <div>&nbsp;&nbsp;<span class="key">R</span>&nbsp;&nbsp;<span class="label">Troubleshooting</span></div>
                     <div>&nbsp;&nbsp;<span class="key">S</span>&nbsp;&nbsp;<span class="label">SSH Gateway</span></div>
                     <div>&nbsp;&nbsp;<span class="key">T</span>&nbsp;&nbsp;<span class="label">Telnet Gateway</span></div>
@@ -764,6 +770,7 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                         <li><strong>B</strong> &mdash; Browser: browse the web</li>
                         <li><strong>C</strong> &mdash; Configuration: server settings and other options</li>
                         <li><strong>F</strong> &mdash; File Transfer: upload/download files using XMODEM, XMODEM-1K, YMODEM, ZMODEM, or Kermit</li>
+                        <li><strong>G</strong> &mdash; Serial Gateway: bridge to the console-mode serial port</li>
                         <li><strong>R</strong> &mdash; Troubleshooting: diagnose terminal input issues</li>
                         <li><strong>S</strong> &mdash; SSH Gateway: connect to a remote server via SSH</li>
                         <li><strong>T</strong> &mdash; Telnet Gateway: connect to a remote server via telnet</li>
@@ -1204,9 +1211,10 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                     <tr><td>Max retries</td><td>10</td><td>1&ndash;100 (ZRQINIT / ZRPOS / ZDATA caps)</td></tr>
                 </table>
 
-                <div class="cat">Modem Emulator Settings</div>
+                <div class="cat">Serial Modem / Console Settings</div>
                 <table class="data-table">
                     <tr><th>Setting</th><th>Default</th><th>Description</th></tr>
+                    <tr><td>Mode (<code>serial_mode</code>)</td><td>modem</td><td><code>modem</code> = Hayes AT emulator; <code>console</code> = Telnet-Serial bridge via the <strong>G&nbsp;&nbsp;Serial Gateway</strong> menu</td></tr>
                     <tr><td>Serial port</td><td><em>(none)</em></td><td>Device path (e.g. <code>/dev/ttyUSB0</code>, <code>COM3</code>)</td></tr>
                     <tr><td>Baud rate</td><td>9600</td><td>Serial line speed</td></tr>
                     <tr><td>Data bits</td><td>8</td><td>5, 6, 7, or 8</td></tr>
@@ -1250,6 +1258,7 @@ weather_zip =
 verbose = false
 enable_console = true
 serial_enabled = false
+serial_mode = modem
 serial_port =
 serial_baud = 9600
 serial_databits = 8
@@ -1299,14 +1308,19 @@ zmodem_negotiation_retry_interval = 5</span></code></pre>
             <!-- SERIAL MODEM                                  -->
             <!-- ══════════════════════════════════════════════ -->
             <div class="section" id="serial-modem">
-                <div class="section-title">Serial Modem Emulator</div>
-                <p class="intro">Hayes AT-compatible modem emulation on a physical serial port.</p>
+                <div class="section-title">Serial Modem / Console</div>
+                <p class="intro">Hayes AT-compatible modem emulation, or a direct telnet-serial console bridge, on a physical serial port.</p>
 
                 <p class="dim-text">
                     Connect vintage computers with serial interfaces to Ethernet Gateway.
-                    The emulator accepts standard AT commands and "dials" TCP connections
-                    to remote hosts. Enable it in <strong>Configuration &gt; Modem
-                    Emulator Settings</strong>.
+                    The configured serial port runs in one of two modes:
+                </p>
+                <ul>
+                    <li><strong>Modem (AT Command) Mode</strong> &mdash; the default. Accepts standard AT commands and "dials" TCP connections to remote hosts. See the AT command reference below.</li>
+                    <li><strong>Telnet-Serial Mode</strong> &mdash; the Hayes emulator is disabled; the port is exposed via the <strong>G&nbsp;&nbsp;Serial Gateway</strong> main-menu option so a telnet/SSH user can talk directly to whatever's connected to the wire (microcontroller console, RS-232 device, etc.). See <a href="#console-mode">Console Mode</a> below.</li>
+                </ul>
+                <p class="dim-text">
+                    Switch modes from <strong>Configuration &gt; Modem/Console</strong> (press <strong>M</strong> to toggle), from the GUI's <strong>Console Mode</strong> frame (dropdown beside the Enabled checkbox), or by setting <code>serial_mode = modem</code> or <code>serial_mode = console</code> in <code>egateway.conf</code>.
                 </p>
 
                 <div class="cat" id="at-commands">AT Command Reference</div>
@@ -1386,6 +1400,32 @@ zmodem_negotiation_retry_interval = 5</span></code></pre>
 
                 <div class="callout">
                     <strong>Keep S3, S4, and S5 at distinct values.</strong> Command-mode line editing dispatches on the raw byte: the CR branch is checked before BS, so setting <code>S3 = 8</code> would cause backspace to terminate the line. Leaving S3/S4/S5 at their Hayes defaults (13/10/8) avoids this.
+                </div>
+
+                <div class="cat" id="console-mode">Console Mode (Telnet-Serial Bridge)</div>
+                <p class="dim-text">
+                    When the serial port is set to <strong>Telnet-Serial Mode</strong>, the Hayes emulator is disabled and the port is exposed via the <strong>G&nbsp;&nbsp;Serial Gateway</strong> option on the main menu. This is useful when the serial port is connected to a microcontroller, embedded console, or other RS-232 device that you want to drive directly from a remote shell.
+                </p>
+
+                <div class="instructions">
+                    <h3>Switching to Console Mode</h3>
+                    <ol>
+                        <li><strong>GUI:</strong> in the <strong>Console Mode</strong> frame, change the dropdown beside the <strong>Enabled</strong> checkbox from <em>Modem (AT Command) Mode</em> to <em>Telnet-Serial Mode</em>. The change saves immediately and reconfigures the running serial thread.</li>
+                        <li><strong>Telnet/SSH menu:</strong> <strong>Configuration &gt; Modem/Console</strong>, then press <strong>M</strong> to toggle. The header changes from <code>MODEM EMULATOR</code> to <code>SERIAL CONSOLE</code> and the Dialup Mapping / Ring Emulator items disappear (modem-only features).</li>
+                        <li><strong>Config file:</strong> set <code>serial_mode = console</code> in <code>egateway.conf</code> and restart.</li>
+                    </ol>
+
+                    <h3>Using the Bridge</h3>
+                    <ol>
+                        <li>From the main menu, press <strong>G</strong> (Serial Gateway).</li>
+                        <li>The gateway prints the active framing (port, baud, data/parity/stop, flow) and asks <code>Connect now? (Y/N):</code> &mdash; press <strong>Y</strong> to enter the bridge.</li>
+                        <li>Bytes flow in both directions with no AT processing or IAC injection on the wire side.</li>
+                        <li>Press <strong>ESC</strong> twice in a row (PETSCII <code>&larr;</code> twice on Commodore terminals) to leave the bridge. A single ESC is forwarded to the wire on the next keystroke, so editors that need ESC (vi, emacs) keep working.</li>
+                    </ol>
+                </div>
+
+                <div class="callout callout-info">
+                    <strong>Single-user:</strong> only one telnet/SSH session at a time can hold the port. Subsequent attempts get <em>Another session is already using the serial port</em> until the first session disconnects. The Serial Gateway item is also hidden from sessions that came in over the serial port itself.
                 </div>
             </div>
 
