@@ -50,6 +50,10 @@ const DEFAULT_BROWSER_HOMEPAGE: &str = "http://telnetbible.com";
 const DEFAULT_WEATHER_ZIP: &str = "";
 const DEFAULT_VERBOSE: bool = false;
 const DEFAULT_SERIAL_ENABLED: bool = false;
+/// Default serial console mode.  `"modem"` runs the Hayes AT emulator on the
+/// configured port; `"console"` keeps the port idle until a telnet/SSH user
+/// chooses Serial Gateway, which bridges their session to the port.
+const DEFAULT_SERIAL_MODE: &str = "modem";
 const DEFAULT_SERIAL_PORT: &str = "";
 const DEFAULT_SERIAL_BAUD: u32 = 9600;
 const DEFAULT_SERIAL_DATABITS: u8 = 8;
@@ -308,6 +312,10 @@ pub struct Config {
     pub kermit_server_port: u16,
     /// Enable serial modem emulation.
     pub serial_enabled: bool,
+    /// Serial console mode.  `"modem"` runs the Hayes AT emulator;
+    /// `"console"` exposes the port via the Serial Gateway menu so a
+    /// telnet/SSH user can talk directly to whatever is on the wire.
+    pub serial_mode: String,
     /// Serial port device (e.g. /dev/ttyUSB0, COM3). Empty = not configured.
     pub serial_port: String,
     /// Serial baud rate.
@@ -401,6 +409,7 @@ impl Default for Config {
             kermit_server_enabled: DEFAULT_KERMIT_SERVER_ENABLED,
             kermit_server_port: DEFAULT_KERMIT_SERVER_PORT,
             serial_enabled: DEFAULT_SERIAL_ENABLED,
+            serial_mode: DEFAULT_SERIAL_MODE.into(),
             serial_port: DEFAULT_SERIAL_PORT.into(),
             serial_baud: DEFAULT_SERIAL_BAUD,
             serial_databits: DEFAULT_SERIAL_DATABITS,
@@ -699,6 +708,11 @@ fn read_config_file(path: &str) -> Config {
             .get("serial_enabled")
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(DEFAULT_SERIAL_ENABLED),
+        serial_mode: map
+            .get("serial_mode")
+            .map(|v| v.trim().to_ascii_lowercase())
+            .filter(|v| matches!(v.as_str(), "modem" | "console"))
+            .unwrap_or_else(|| DEFAULT_SERIAL_MODE.into()),
         serial_port: map
             .get("serial_port")
             .cloned()
@@ -1056,10 +1070,15 @@ fn write_config_file(path: &str, cfg: &Config) {
     content.push('\n');
 
     content.push_str("\
-# Serial modem emulation (Hayes AT commands)
+# Serial console (modem emulator or direct telnet bridge).
 # Set serial_enabled = true and configure the port to activate.
+# serial_mode selects the role of the configured port:
+#   modem    — run the Hayes AT command emulator (default)
+#   console  — expose the port via the telnet menu's Serial Gateway,
+#              bridging the telnet client directly to the wire.
 ");
     write_kv(&mut content, "serial_enabled", cfg.serial_enabled);
+    write_kv_str(&mut content, "serial_mode", &cfg.serial_mode);
     content.push('\n');
 
     content.push_str("\
@@ -1356,6 +1375,12 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
             }
         }
         "serial_enabled" => cfg.serial_enabled = value.eq_ignore_ascii_case("true"),
+        "serial_mode" => {
+            let lower = value.trim().to_ascii_lowercase();
+            if matches!(lower.as_str(), "modem" | "console") {
+                cfg.serial_mode = lower;
+            }
+        }
         "serial_port" => cfg.serial_port = value.to_string(),
         "serial_baud" => {
             if let Ok(v) = value.parse::<u32>() && v >= 300 {
@@ -1609,6 +1634,7 @@ mod tests {
         assert!(!cfg.kermit_locking_shifts);
         assert!(!cfg.allow_atdt_kermit);
         assert!(!cfg.serial_enabled);
+        assert_eq!(cfg.serial_mode, "modem");
         assert_eq!(cfg.serial_port, "");
         assert_eq!(cfg.serial_baud, 9600);
         assert_eq!(cfg.serial_databits, 8);
@@ -1725,6 +1751,7 @@ mod tests {
         writeln!(f, "serial_baud = 0").unwrap();            // below min
         writeln!(f, "serial_databits = 42").unwrap();       // out of valid range
         writeln!(f, "serial_parity = quantum").unwrap();    // invalid enum
+        writeln!(f, "serial_mode = telegraph").unwrap();    // invalid enum
         writeln!(f, "###").unwrap();                        // comment-ish
         writeln!(f, "\x00\x01\x02binary junk").unwrap();
         writeln!(f).unwrap();                                // blank
@@ -1741,6 +1768,7 @@ mod tests {
         assert_eq!(cfg.serial_baud, defaults.serial_baud);
         assert_eq!(cfg.serial_databits, defaults.serial_databits);
         assert_eq!(cfg.serial_parity, defaults.serial_parity);
+        assert_eq!(cfg.serial_mode, defaults.serial_mode);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1804,6 +1832,7 @@ mod tests {
             kermit_server_enabled: true,
             kermit_server_port: 2525,
             serial_enabled: true,
+            serial_mode: "console".into(),
             serial_port: "/dev/ttyUSB0".into(),
             serial_baud: 115200,
             serial_databits: 7,
@@ -1911,6 +1940,7 @@ mod tests {
         assert_eq!(loaded.kermit_server_enabled, original.kermit_server_enabled);
         assert_eq!(loaded.kermit_server_port, original.kermit_server_port);
         assert_eq!(loaded.serial_enabled, original.serial_enabled);
+        assert_eq!(loaded.serial_mode, original.serial_mode);
         assert_eq!(loaded.serial_port, original.serial_port);
         assert_eq!(loaded.serial_baud, original.serial_baud);
         assert_eq!(loaded.serial_databits, original.serial_databits);
@@ -2025,6 +2055,7 @@ mod tests {
             "kermit_resume_max_age_hours",
             "kermit_locking_shifts",
             "serial_enabled",
+            "serial_mode",
             "serial_port",
             "serial_baud",
             "serial_databits",
@@ -2119,6 +2150,87 @@ mod tests {
         // Invalid flow should be ignored
         apply_config_key(&mut cfg, "serial_flowcontrol", "bogus");
         assert_eq!(cfg.serial_flowcontrol, "hardware");
+
+        // serial_mode accepts "modem" / "console" (case-insensitive),
+        // anything else is ignored.
+        apply_config_key(&mut cfg, "serial_mode", "console");
+        assert_eq!(cfg.serial_mode, "console");
+        apply_config_key(&mut cfg, "serial_mode", "MODEM");
+        assert_eq!(cfg.serial_mode, "modem");
+        apply_config_key(&mut cfg, "serial_mode", "bogus");
+        assert_eq!(cfg.serial_mode, "modem");
+        // Whitespace around the value is trimmed before validation.
+        apply_config_key(&mut cfg, "serial_mode", "  Console  ");
+        assert_eq!(cfg.serial_mode, "console");
+        // Empty value rejected — keep the existing setting.
+        apply_config_key(&mut cfg, "serial_mode", "");
+        assert_eq!(cfg.serial_mode, "console");
+    }
+
+    /// Reading a config file with `serial_mode = console` (case-
+    /// insensitive, with surrounding whitespace) loads to the
+    /// canonical lowercase value.  Reading without the key falls back
+    /// to the modem default.
+    #[test]
+    fn test_read_config_serial_mode_variants() {
+        let dir = std::env::temp_dir().join("xmodem_test_serial_mode");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("mode.conf");
+
+        for (raw, expected) in [
+            ("modem", "modem"),
+            ("console", "console"),
+            ("CONSOLE", "console"),
+            ("  Modem  ", "modem"),
+        ] {
+            std::fs::write(&path, format!("serial_mode = {}", raw)).unwrap();
+            let cfg = read_config_file(path.to_str().unwrap());
+            assert_eq!(
+                cfg.serial_mode, expected,
+                "input {:?} should normalize to {:?}",
+                raw, expected
+            );
+        }
+
+        // Missing key → default.
+        std::fs::write(&path, "serial_enabled = true").unwrap();
+        let cfg = read_config_file(path.to_str().unwrap());
+        assert_eq!(cfg.serial_mode, "modem");
+
+        // Invalid value → default, doesn't poison other fields.
+        std::fs::write(
+            &path,
+            "serial_enabled = true\nserial_mode = telegraph\nserial_baud = 19200",
+        )
+        .unwrap();
+        let cfg = read_config_file(path.to_str().unwrap());
+        assert_eq!(cfg.serial_mode, "modem");
+        assert!(cfg.serial_enabled);
+        assert_eq!(cfg.serial_baud, 19200);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `serial_mode` round-trips through write→read correctly for both
+    /// values.  Guards against the writer dropping the field for one
+    /// of the two enum values.
+    #[test]
+    fn test_serial_mode_round_trip_both_values() {
+        let dir = std::env::temp_dir().join("xmodem_test_serial_mode_rt");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("rt.conf");
+
+        for value in ["modem", "console"] {
+            let cfg = Config {
+                serial_mode: value.into(),
+                ..Config::default()
+            };
+            write_config_file(path.to_str().unwrap(), &cfg);
+            let loaded = read_config_file(path.to_str().unwrap());
+            assert_eq!(loaded.serial_mode, value);
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
