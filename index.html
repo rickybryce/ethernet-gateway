@@ -822,11 +822,12 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                         <li>Enter the filename when prompted (max 64 characters; letters, digits, dots, hyphens, underscores; cannot start with a dot; cannot contain <code>..</code>)</li>
                         <li>If the file already exists, confirm overwrite with <strong>Y</strong></li>
                         <li>On the <strong>SELECT UPLOAD PROTOCOL</strong> screen press
-                            <strong>X</strong> (XMODEM/YMODEM, block size + CRC mode + YMODEM block-0 header auto-detected) or
-                            <strong>Z</strong> (ZMODEM)</li>
-                        <li>The server waits up to 45 seconds for your terminal to begin sending &mdash; tunable per protocol via <code>xmodem_negotiation_timeout</code> (XMODEM / XMODEM-1K / YMODEM) or <code>zmodem_negotiation_timeout</code> (ZMODEM)</li>
-                        <li>In your terminal client, start the matching send &mdash; e.g. ExtraPutty's <em>File Transfer &rsaquo; Zmodem &rsaquo; Send</em>, SyncTerm's <em>Ctrl-PgUp</em>, or any XMODEM/YMODEM &ldquo;Send File&rdquo; dialog</li>
-                        <li>For a ZMODEM batch, the first file is saved under the name you entered; any additional files the sender transmits are saved under the sender's own filename (after path-safety validation &mdash; colliding names are auto-skipped via ZSKIP)</li>
+                            <strong>X</strong> (XMODEM/YMODEM, block size + CRC mode + YMODEM block-0 header auto-detected),
+                            <strong>Z</strong> (ZMODEM), or
+                            <strong>K</strong> (Kermit, any flavor &mdash; see the <a href="kermit.html">Kermit Reference</a>)</li>
+                        <li>The server waits up to 45 seconds for your terminal to begin sending &mdash; tunable per protocol via <code>xmodem_negotiation_timeout</code> (XMODEM / XMODEM-1K / YMODEM), <code>zmodem_negotiation_timeout</code> (ZMODEM), or <code>kermit_negotiation_timeout</code> (Kermit, default 300 s)</li>
+                        <li>In your terminal client, start the matching send &mdash; e.g. ExtraPutty's <em>File Transfer &rsaquo; Zmodem &rsaquo; Send</em>, SyncTerm's <em>Ctrl-PgUp</em>, any XMODEM/YMODEM &ldquo;Send File&rdquo; dialog, or for Kermit a client like <code>kermit -s file</code> (C-Kermit) / Kermit-95</li>
+                        <li>For a ZMODEM batch, the first file is saved under the name you entered; any additional files the sender transmits are saved under the sender's own filename (after path-safety validation &mdash; colliding names are auto-skipped via ZSKIP). Kermit batches use the same per-file save-as behavior</li>
                     </ol>
                 </div>
 
@@ -840,7 +841,8 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                             <strong>X</strong> (XMODEM, 128-byte blocks),
                             <strong>1</strong> (XMODEM-1K, 1024-byte blocks with SOH fallback),
                             <strong>Y</strong> (YMODEM, filename + size header),
-                            or <strong>Z</strong> (ZMODEM, auto-starts in most modern terminals)</li>
+                            <strong>Z</strong> (ZMODEM, auto-starts in most modern terminals),
+                            or <strong>K</strong> (Kermit, any flavor &mdash; see <a href="kermit.html">Kermit Reference</a>)</li>
                         <li>Start the matching receive in your terminal and choose where to save the file locally</li>
                         <li>The file is transmitted and the server reports bytes / blocks / elapsed time on completion</li>
                     </ol>
@@ -1170,9 +1172,14 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                 <p class="dim-text">
                     In the telnet menu, <strong>Configuration &rsaquo; F File Transfer</strong>
                     opens a submenu with the shared transfer directory plus per-protocol
-                    pages for <strong>X</strong> XMODEM, <strong>Y</strong> YMODEM, and
-                    <strong>Z</strong> ZMODEM. In the GUI, the same fields live under the
-                    File Transfer frame's <strong>More...</strong> popup.
+                    pages for <strong>X</strong> XMODEM, <strong>Y</strong> YMODEM,
+                    <strong>Z</strong> ZMODEM, and <strong>K</strong> Kermit (plus Kermit
+                    server toggles). In the GUI, the same fields live under the File
+                    Transfer frame's <strong>More...</strong> popup. The full Kermit-tuning
+                    surface (long packets, sliding windows, streaming, attribute packets,
+                    block-check type, resume, locking shifts, 8th-bit quoting, and the
+                    standalone-listener toggles) is covered on the
+                    <a href="kermit.html"><strong>Kermit Reference page</strong></a>.
                 </p>
 
                 <div class="cat" style="margin-top:12px;">Shared</div>
@@ -1211,6 +1218,28 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                     <tr><td>Max retries</td><td>10</td><td>1&ndash;100 (ZRQINIT / ZRPOS / ZDATA caps)</td></tr>
                 </table>
 
+                <div class="cat" style="margin-top:12px;">Kermit</div>
+                <p class="dim-text">
+                    The defaults below cover the everyday tunables on the Configuration menu
+                    and the GUI's File Transfer popup. The full <code>kermit_*</code>
+                    family &mdash; long packets, sliding windows, streaming, attribute
+                    packets, block-check type, RESEND, locking shifts, 8th-bit quoting,
+                    and the standalone-listener / ATDT-KERMIT toggles &mdash; is documented
+                    on the <a href="kermit.html"><strong>Kermit Reference</strong></a> page.
+                </p>
+                <table class="data-table">
+                    <tr><th>Setting</th><th>Default</th><th>Range</th></tr>
+                    <tr><td>Negotiation timeout</td><td>300s</td><td>1&ndash;3600 seconds (Send-Init handshake)</td></tr>
+                    <tr><td>Packet timeout</td><td>10s</td><td>1&ndash;120 seconds (per-packet read)</td></tr>
+                    <tr><td>Idle timeout (server)</td><td>300s</td><td>0 disables; otherwise seconds between client commands</td></tr>
+                    <tr><td>Max retries</td><td>5</td><td>1&ndash;100 (NAK / timeout retransmits)</td></tr>
+                    <tr><td>Max packet length</td><td>4096</td><td>10&ndash;9024 (advertised long-packet cap)</td></tr>
+                    <tr><td>Window size</td><td>4</td><td>1&ndash;31 (1 = stop-and-wait)</td></tr>
+                    <tr><td>Block check type</td><td>3</td><td>1 = checksum, 2 = 12-bit, 3 = CRC-16/KERMIT</td></tr>
+                    <tr><td>Server enabled</td><td>false</td><td>Bind a standalone TCP listener on <code>kermit_server_port</code> (default 2424)</td></tr>
+                    <tr><td>Allow ATDT KERMIT</td><td>false</td><td>Permit serial-modem dial target to drop into Kermit server (bypasses auth gate)</td></tr>
+                </table>
+
                 <div class="cat">Serial Modem / Console Settings</div>
                 <table class="data-table">
                     <tr><th>Setting</th><th>Default</th><th>Description</th></tr>
@@ -1229,7 +1258,7 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                     <tr><td>Groq API key</td><td><em>(empty)</em></td><td>API key for AI Chat (free at console.groq.com)</td></tr>
                     <tr><td>Browser homepage</td><td>http://telnetbible.com</td><td>Default URL for the Simple Browser</td></tr>
                     <tr><td>Weather zip code</td><td><em>(empty)</em></td><td>5-digit US zip code for weather</td></tr>
-                    <tr><td>Verbose logging</td><td>false</td><td>Enable detailed XMODEM protocol logging</td></tr>
+                    <tr><td>Verbose logging</td><td>false</td><td>Enable detailed per-block / per-subpacket protocol diagnostics across XMODEM, YMODEM, ZMODEM, and Kermit</td></tr>
                     <tr><td>GUI console</td><td>true</td><td>Show the GUI window on startup</td></tr>
                 </table>
 
@@ -1272,7 +1301,26 @@ xmodem_negotiation_retry_interval = 7
 zmodem_negotiation_timeout = 45
 zmodem_frame_timeout = 30
 zmodem_max_retries = 10
-zmodem_negotiation_retry_interval = 5</span></code></pre>
+zmodem_negotiation_retry_interval = 5
+kermit_negotiation_timeout = 300
+kermit_packet_timeout = 10
+kermit_idle_timeout = 300
+kermit_max_retries = 5
+kermit_max_packet_length = 4096
+kermit_window_size = 4
+kermit_server_enabled = false
+kermit_server_port = 2424
+allow_atdt_kermit = false
+disable_ip_safety = false
+ssh_gateway_auth = password</span></code></pre>
+                <p class="dim-text" style="margin-top:8px;">
+                    The <code>egateway.conf</code> auto-creation also writes the full
+                    <code>kermit_*</code> family (long packets, sliding windows, streaming,
+                    attribute packets, block-check type, 8th-bit quoting, resume, locking
+                    shifts) at their defaults &mdash; see the
+                    <a href="kermit.html"><strong>Kermit Reference</strong></a> for what each
+                    one does and when to change it.
+                </p>
             </div>
 
             <hr class="divider">
@@ -1347,7 +1395,7 @@ zmodem_negotiation_retry_interval = 5</span></code></pre>
                     <tr><td><code>ATDP host:port</code></td><td>Dial (pulse) &mdash; TCP connect to host</td></tr>
                     <tr><td><code>ATD host:port</code></td><td>Dial (generic) &mdash; TCP connect to host</td></tr>
                     <tr><td><code>ATDT ethernet-gateway</code></td><td>Built-in shortcut to this gateway's main menu</td></tr>
-                    <tr><td><code>ATDT KERMIT</code></td><td>Drop straight into Kermit server mode (requires <code>allow_atdt_kermit</code>; off by default)</td></tr>
+                    <tr><td><code>ATDT KERMIT</code></td><td>Drop straight into Kermit server mode (requires <code>allow_atdt_kermit</code>; off by default). Aliases: <code>ATDT kermit</code>, <code>ATDT kermit-server</code>, <code>ATDT kermit server</code>. See the <a href="kermit.html">Kermit Reference</a>.</td></tr>
                     <tr><td><code>ATDL</code></td><td>Redial last number</td></tr>
                     <tr><td><code>ATDS</code> / <code>ATDS<em>n</em></code></td><td>Dial stored number from slot <em>n</em> (0&ndash;3; default 0)</td></tr>
                     <tr><td><code>AT&amp;Z<em>n</em>=<em>s</em></code></td><td>Store phone number or host <em>s</em> in slot <em>n</em> (0&ndash;3). Persisted with <code>AT&amp;W</code>.</td></tr>
