@@ -350,7 +350,7 @@ Commodore, ANSI escape sequences on modern terminals, and plain text on ASCII.
 <h2>1.2 Feature Overview</h2>
 
 <ul>
-    <li><strong>File transfer</strong> — XMODEM (128-byte), XMODEM-1K, and YMODEM with auto-detection on upload and a selection prompt on download.</li>
+    <li><strong>File transfer</strong> — XMODEM (128-byte), XMODEM-1K, YMODEM, ZMODEM (with autostart), and Kermit (incl. standalone server mode), with auto-detection on upload and a selection prompt on download.</li>
     <li><strong>Hayes AT modem emulator</strong> — real serial port, full command set, S-registers S0–S26, stored phone-number slots, and <code>+++</code> escape.</li>
     <li><strong>Telnet-serial console bridge</strong> — the same serial port can be flipped to <em>console mode</em> so a telnet/SSH user can drive a microcontroller or RS-232 device directly through the <strong>G&nbsp;&nbsp;Serial Gateway</strong> menu (chapter 9.13).</li>
     <li><strong>SSH server</strong> — optional encrypted access with its own credentials and a persistent Ed25519 host key.</li>
@@ -564,9 +564,11 @@ phone-number slots are covered in chapter 9.
         <tr><td><code>ssh_username</code>, <code>ssh_password</code></td><td>string</td><td><code>admin</code>, <code>changeme</code></td><td>SSH credentials, independent of telnet.</td></tr>
         <tr><td><code>ssh_enabled</code></td><td>bool</td><td><code>false</code></td><td>Run the SSH server on <code>ssh_port</code>.</td></tr>
         <tr><td><code>ssh_port</code></td><td>u16</td><td><code>2222</code></td><td>SSH listen port.</td></tr>
+        <tr><td><code>ssh_gateway_auth</code></td><td>string</td><td><code>password</code></td><td>Outbound SSH-gateway auth mode: <code>password</code> prompts for the remote password each connect; <code>key</code> uses the gateway's auto-generated Ed25519 client key (which must be installed in the remote's <code>authorized_keys</code> first).</td></tr>
         <tr><td><code>transfer_dir</code></td><td>string</td><td><code>transfer</code></td><td>Base directory for file transfers, relative to the working dir.</td></tr>
         <tr><td><code>max_sessions</code></td><td>usize</td><td><code>50</code></td><td>Concurrent telnet session cap.</td></tr>
         <tr><td><code>idle_timeout_secs</code></td><td>u64</td><td><code>900</code></td><td>Session idle timeout. 0 disables.</td></tr>
+        <tr><td><code>disable_ip_safety</code></td><td>bool</td><td><code>false</code></td><td>When <code>true</code>, the gateway accepts inbound telnet/SSH from any address. Default <code>false</code> restricts to RFC-1918 private ranges and loopback. See §5.4.</td></tr>
         <tr><td><code>groq_api_key</code></td><td>string</td><td>empty</td><td>Key for AI chat. Empty disables the feature.</td></tr>
         <tr><td><code>browser_homepage</code></td><td>string</td><td><code>http://telnetbible.com</code></td><td>Page loaded when the browser opens.</td></tr>
         <tr><td><code>weather_zip</code></td><td>string</td><td>empty</td><td>Last-used US ZIP. Updated automatically.</td></tr>
@@ -579,6 +581,25 @@ phone-number slots are covered in chapter 9.
         <tr><td><code>zmodem_frame_timeout</code></td><td>u64</td><td><code>30</code></td><td>Per-frame read timeout once a transfer is live (headers / subpackets).</td></tr>
         <tr><td><code>zmodem_max_retries</code></td><td>u32</td><td><code>10</code></td><td>Retry cap for ZRQINIT, ZRPOS, and ZDATA frames.</td></tr>
         <tr><td><code>zmodem_negotiation_retry_interval</code></td><td>u64</td><td><code>5</code></td><td>Seconds between ZRINIT / ZRQINIT re-sends during the handshake. Analogous to <code>xmodem_negotiation_retry_interval</code> but for ZMODEM.</td></tr>
+        <tr><td><code>kermit_negotiation_timeout</code></td><td>u64</td><td><code>300</code></td><td>Send-Init handshake timeout in seconds.</td></tr>
+        <tr><td><code>kermit_packet_timeout</code></td><td>u64</td><td><code>10</code></td><td>Per-packet read timeout in seconds.</td></tr>
+        <tr><td><code>kermit_idle_timeout</code></td><td>u64</td><td><code>300</code></td><td>Server-mode idle timeout between commands. <code>0</code> disables.</td></tr>
+        <tr><td><code>kermit_max_retries</code></td><td>u32</td><td><code>5</code></td><td>NAK / timeout retransmits per packet.</td></tr>
+        <tr><td><code>kermit_max_packet_length</code></td><td>u16</td><td><code>4096</code></td><td>Advertised long-packet length (10–9024).</td></tr>
+        <tr><td><code>kermit_window_size</code></td><td>u8</td><td><code>4</code></td><td>Sliding-window size (1–31). 1 = stop-and-wait.</td></tr>
+        <tr><td><code>kermit_block_check_type</code></td><td>u8</td><td><code>3</code></td><td>1 = 6-bit checksum, 2 = 12-bit checksum, 3 = CRC-16/KERMIT.</td></tr>
+        <tr><td><code>kermit_long_packets</code></td><td>bool</td><td><code>true</code></td><td>Advertise long-packet capability.</td></tr>
+        <tr><td><code>kermit_sliding_windows</code></td><td>bool</td><td><code>true</code></td><td>Advertise sliding-window capability.</td></tr>
+        <tr><td><code>kermit_streaming</code></td><td>bool</td><td><code>true</code></td><td>Skip per-packet ACKs on reliable links (TCP/SSH).</td></tr>
+        <tr><td><code>kermit_attribute_packets</code></td><td>bool</td><td><code>true</code></td><td>Send/accept A-packets carrying size, mtime, mode, resume.</td></tr>
+        <tr><td><code>kermit_repeat_compression</code></td><td>bool</td><td><code>true</code></td><td>Encode runs of identical bytes with the repeat-prefix.</td></tr>
+        <tr><td><code>kermit_8bit_quote</code></td><td>string</td><td><code>auto</code></td><td>8th-bit quoting policy: <code>auto</code> (when peer asks), <code>on</code>, or <code>off</code>.</td></tr>
+        <tr><td><code>kermit_resume_partial</code></td><td>bool</td><td><code>false</code></td><td>Resume partial uploads using A-packet disposition='R'. Off by default — a peer that ignores disposition='R' would corrupt the result.</td></tr>
+        <tr><td><code>kermit_resume_max_age_hours</code></td><td>u32</td><td><code>168</code></td><td>Maximum age of a partial file we'll resume (default one week).</td></tr>
+        <tr><td><code>kermit_locking_shifts</code></td><td>bool</td><td><code>false</code></td><td>Use SO/SI region markers instead of per-byte 8th-bit prefix when the peer advertises CAPAS_LOCKING_SHIFT.</td></tr>
+        <tr><td><code>kermit_server_enabled</code></td><td>bool</td><td><code>false</code></td><td>Run the standalone Kermit-server TCP listener at startup.</td></tr>
+        <tr><td><code>kermit_server_port</code></td><td>u16</td><td><code>2424</code></td><td>Kermit-server listen port.</td></tr>
+        <tr><td><code>allow_atdt_kermit</code></td><td>bool</td><td><code>false</code></td><td>Allow the serial-modem dial target <code>ATDT KERMIT</code> (or <code>kermit-server</code>) to drop into the Kermit server. Off by default — bypasses the telnet auth gate.</td></tr>
         <tr><td><code>serial_enabled</code></td><td>bool</td><td><code>false</code></td><td>Activate the configured serial port. Pairs with <code>serial_mode</code> to choose its role.</td></tr>
         <tr><td><code>serial_mode</code></td><td>string</td><td><code>modem</code></td><td><code>modem</code> = run the Hayes AT command emulator (chapter 9). <code>console</code> = expose the port via the telnet menu's <strong>G&nbsp;&nbsp;Serial Gateway</strong> option as a direct telnet-serial bridge (chapter 9.13).</td></tr>
         <tr><td><code>serial_port</code></td><td>string</td><td>empty</td><td>Device path (e.g. <code>/dev/ttyUSB0</code>, <code>COM3</code>).</td></tr>
@@ -859,12 +880,61 @@ not a default.
 
 <p>
 <strong>G&nbsp;&nbsp;Serial Gateway</strong> is only useful when the
-configured serial port is set to <em>console</em> mode (see chapter 9.10).
+configured serial port is set to <em>console</em> mode (see chapter 9.13).
 It bridges the telnet/SSH session straight to the wire so you can drive a
 microcontroller, RS-232 device, or other serial console remotely. From a
 session that came in over the serial port itself the option is hidden.
 Press <span class="kbd">ESC</span> twice to leave the bridge.
 </p>
+
+<h2 id="ch5-config">5.6 The Configuration Menu</h2>
+
+<p>
+Pressing <span class="kbd">C</span> on the main menu opens a terminal-side
+configuration menu that mirrors most of what the GUI exposes. It is intended
+for headless systems and for the SSH-only path where the GUI is unreachable.
+Changes are written to <code>egateway.conf</code> on confirm and apply
+immediately to running services where possible.
+</p>
+
+<pre><code>  E  Security
+  G  Gateway Configuration
+  M  Modem Emulator      (label flips to "Serial Console" in console mode)
+  T  Toggle Modem/Console mode
+  S  Server Configuration
+  F  File Transfer
+  O  Other Settings
+  R  Reset Defaults
+
+  Q  Back   H  Help</code></pre>
+
+<dl>
+    <dt><span class="kbd">E</span> Security</dt>
+    <dd>Toggle <code>security_enabled</code> and edit telnet / SSH credentials.</dd>
+    <dt><span class="kbd">G</span> Gateway Configuration</dt>
+    <dd>Outbound gateway settings — telnet negotiation flags, SSH-gateway auth mode, browser homepage, weather ZIP, AI key.</dd>
+    <dt><span class="kbd">M</span> Modem Emulator / Serial Console</dt>
+    <dd>The label depends on <code>serial_mode</code>. In modem mode the submenu edits port, baud, framing, flow control, AT defaults, and stored numbers. In console mode the submenu edits the same wire-level settings minus the AT-state knobs.</dd>
+    <dt><span class="kbd">T</span> Toggle Modem/Console mode</dt>
+    <dd>Flip <code>serial_mode</code> between <code>modem</code> and <code>console</code>. The change is committed and the running serial thread reconfigures within a couple of seconds — no restart required.</dd>
+    <dt><span class="kbd">S</span> Server Configuration</dt>
+    <dd>Listen ports, telnet/SSH enable, max sessions, idle timeout, and the network-safety opt-out (<code>disable_ip_safety</code>).</dd>
+    <dt><span class="kbd">F</span> File Transfer</dt>
+    <dd>Per-protocol timeouts and retries for XMODEM, ZMODEM, and Kermit, plus the Kermit server toggle / port and <code>allow_atdt_kermit</code>.</dd>
+    <dt><span class="kbd">O</span> Other Settings</dt>
+    <dd>Verbose XMODEM logging and the Show-GUI-on-Startup flag.</dd>
+    <dt><span class="kbd">R</span> Reset Defaults</dt>
+    <dd>Restore every recognised key to its built-in default. Confirms with <em>Y/N</em> first; credentials are reset to <code>admin</code> / <code>changeme</code>, so you'll want to set new ones immediately afterward if security is enabled.</dd>
+</dl>
+
+<aside class="note">
+<span class="label">GUI vs terminal config</span>
+The GUI in chapter 4 is the friendlier interface for desktop systems. The
+terminal-side menu exists so that an SSH-only deployment, a serial-console
+session into the gateway, or any other no-display setup still has a way to
+edit settings without dropping out to a shell to hand-edit
+<code>egateway.conf</code>.
+</aside>
 
 <!-- ═══════════════════ 6. SSH ═══════════════════ -->
 <h1 id="ch6">6. SSH Access</h1>
@@ -1020,7 +1090,8 @@ headless mode):
 
 <p>
 File transfer is the original reason this project exists. The gateway
-implements three related protocols:
+implements five protocols, covering everything from a 1977 vintage
+client to a modern terminal that drag-and-drops files onto the window:
 </p>
 
 <dl>
@@ -1030,6 +1101,10 @@ implements three related protocols:
     <dd>A 1980s extension that uses an <code>STX</code> header and 1024 bytes of payload. Reduces protocol overhead by a factor of eight. Senders may mix 1K and 128-byte blocks freely within a single transfer; the gateway branches on the header byte per block.</dd>
     <dt>YMODEM (batch + metadata)</dt>
     <dd>XMODEM-1K plus a block-0 header. Block 0 has <code>SOH</code>, block number <code>0</code>, complement <code>0xFF</code>, and a 128-byte payload containing the filename, size, and (optionally) mtime. The receiver uses the size to truncate trailing <code>SUB</code> padding exactly.</dd>
+    <dt>ZMODEM (Forsberg 1988)</dt>
+    <dd>Streaming protocol with ZDLE escaping, hex / binary16 / binary32 headers, CRC-16 and CRC-32, batch send and receive, ZSKIP, and an autostart trigger so the user can drop a file onto the terminal from any menu without first navigating to the file-transfer screen. See §8.5.</dd>
+    <dt>Kermit (Columbia, multi-flavor)</dt>
+    <dd>The classic over-7-bit-line protocol with sliding windows, long packets, attribute packets, and resume. The gateway acts as both client (push/pull from the menu) and server (idle in <code>kermit-server</code> mode for incoming GET / SEND / FINISH commands), and accepts a standalone TCP listener as well. See §8.8.</dd>
 </dl>
 
 <h2>8.1 The Transfer Directory</h2>
@@ -1068,6 +1143,7 @@ From the main menu press <span class="kbd">F</span>:
   D  Download         (send file to your terminal)
   X  Delete           (remove a file from the transfer dir)
   C  Change directory (subdirectory within transfer_dir)
+  K  Kermit server mode (idle and wait for client commands)
   I  Toggle IAC escaping (for binary files with 0xFF bytes)</code></pre>
 
 <h2 id="ch8-upload">8.3 Uploads — Auto-Detection</h2>
@@ -1142,6 +1218,8 @@ The selection affects what the sender does:
     <li><strong>XMODEM</strong> — the sender transmits 128-byte <code>SOH</code> blocks exclusively.</li>
     <li><strong>XMODEM-1K</strong> — the sender transmits 1024-byte <code>STX</code> blocks, with an opportunistic 128-byte <code>SOH</code> fallback on the final short block.</li>
     <li><strong>YMODEM</strong> — the sender begins with a block-0 <code>SOH 0x00 0xFF</code> header containing the filename and size, waits for <code>'C'</code> acknowledgement, then transmits 1K data blocks just like XMODEM-1K.</li>
+    <li><strong>ZMODEM</strong> — the sender emits a <code>ZRQINIT</code> hex header, then negotiates flags via <code>ZRINIT</code>/<code>ZSINIT</code>, sends a <code>ZFILE</code> subpacket with filename + size + mtime + mode, streams <code>ZDATA</code> with CRC-16 or CRC-32 subpackets, and finishes with <code>ZEOF</code> + <code>ZFIN</code>. ZSKIP allows the receiver to decline individual files in a batch.</li>
+    <li><strong>Kermit</strong> — the sender first exchanges <code>S</code>/<code>I</code> negotiation packets (block-check type, packet length, window size, capabilities), then sends one or more <code>F</code>/<code>D</code>/<code>Z</code> file groups with optional <code>A</code> attribute packets for size/mtime/mode/resume, and ends the batch with <code>B</code>. Long packets and sliding windows are negotiated based on what the peer offers.</li>
 </ul>
 
 <h2 id="ch8-zmodem">8.5 ZMODEM Autostart Detection</h2>
@@ -1442,7 +1520,7 @@ From the GUI Console Mode frame:
 
 <ol>
     <li>Check <em>Enabled</em>.</li>
-    <li>Confirm the mode dropdown is set to <em>Modem (AT Command) Mode</em>. (To run a direct telnet-serial bridge instead, switch to <em>Telnet-Serial Mode</em> — see chapter 9.10.)</li>
+    <li>Confirm the mode dropdown is set to <em>Modem (AT Command) Mode</em>. (To run a direct telnet-serial bridge instead, switch to <em>Telnet-Serial Mode</em> — see chapter 9.13.)</li>
     <li>Pick a port from the dropdown. If your port does not appear, plug in the adapter and click the refresh (&#8634;) button.</li>
     <li>Set the baud rate, data bits, parity, stop bits, and wire-level flow control.</li>
     <li>Click <em>Save and Restart Server</em> so the serial thread restarts with the new settings.</li>
@@ -1485,7 +1563,7 @@ The emulator routes dial strings over TCP. There is no real phone line — the
     <tbody>
         <tr><td><code>ATDT host:port</code></td><td>Connect to a remote telnet server. <code>ATDT</code> and <code>ATDP</code> are equivalent (there is no audible difference over TCP).</td></tr>
         <tr><td><code>ATDT ethernet-gateway</code></td><td>Built-in shortcut — dials this gateway's own main menu, so the serial device can use all gateway features (file transfer, browser, AI chat, etc.) without a network detour.</td></tr>
-        <tr><td><code>ATDT KERMIT</code></td><td>Drop directly into Kermit server mode &mdash; no menu, no banner, indistinguishable on the wire from a real <code>kermit -j host</code> in <code>server</code> mode. Aliases: <code>ATDT kermit-server</code>, <code>ATDT kermit server</code>. Requires <code>allow_atdt_kermit&nbsp;=&nbsp;true</code>; off by default because it bypasses the telnet menu's auth gate. Idle timeout still honors <code>kermit_idle_timeout</code>; on session end the modem emits <code>NO CARRIER</code>.</td></tr>
+        <tr><td><code>ATDT KERMIT</code></td><td>Drop directly into Kermit server mode &mdash; no menu, no banner, indistinguishable on the wire from a real <code>kermit -j host</code> in <code>server</code> mode. Aliases: <code>ATDT kermit</code>, <code>ATDT kermit-server</code>, <code>ATDT kermit server</code>. Requires <code>allow_atdt_kermit&nbsp;=&nbsp;true</code>; off by default because it bypasses the telnet menu's auth gate. Idle timeout still honors <code>kermit_idle_timeout</code>; on session end the modem emits <code>NO CARRIER</code>.</td></tr>
         <tr><td><code>ATDP host:port</code></td><td>Same as <code>ATDT</code> — pulse selector, ignored.</td></tr>
         <tr><td><code>ATDSn</code> (n = 0–3)</td><td>Dial stored number in slot <em>n</em>. Bare <code>ATDS</code> dials slot 0.</td></tr>
         <tr><td><code>ATDL</code></td><td>Redial the last number.</td></tr>
@@ -1575,7 +1653,7 @@ hit the same entry.
     <thead><tr><th>Command</th><th>Action</th></tr></thead>
     <tbody>
         <tr><td><code>ATZ</code></td><td>Reset to the stored profile (read from <code>egateway.conf</code>). Drops any active connection.</td></tr>
-        <tr><td><code>AT&amp;F</code></td><td>Factory reset to gateway-friendly defaults. Does <em>not</em> overwrite the stored profile.</td></tr>
+        <tr><td><code>AT&amp;F</code></td><td>Factory reset to gateway-friendly defaults. Does <em>not</em> overwrite the stored profile, but does drop any active connection (same as <code>ATZ</code> in that respect).</td></tr>
         <tr><td><code>AT&amp;W</code></td><td>Save current settings to <code>egateway.conf</code>. Persists echo, verbose, quiet, all 27 S-registers, <code>X</code>, <code>&amp;C</code>, <code>&amp;D</code>, <code>&amp;K</code>, and the four stored-number slots.</td></tr>
         <tr><td><code>AT&amp;V</code></td><td>Display current configuration — one line of mode flags, a second line listing every S-register, and a third line listing stored numbers.</td></tr>
     </tbody>
@@ -1630,7 +1708,7 @@ baud rates report code 1.
         <tr><td><code>AT&amp;D2</code> (Hayes default)</td><td>Drop DTR &rarr; hang up.</td></tr>
         <tr><td><code>AT&amp;D3</code></td><td>Drop DTR &rarr; hang up and reset.</td></tr>
         <tr><td><code>AT&amp;K0</code> (<em>gateway default</em>)</td><td>No modem-layer flow control.</td></tr>
-        <tr><td><code>AT&amp;K1</code></td><td>Reserved.</td></tr>
+        <tr><td><code>AT&amp;K1</code></td><td>Auto-detect (Hayes convention). Accepted and stored; like every <code>&amp;K</code> mode, does not drive the wire (see warning below).</td></tr>
         <tr><td><code>AT&amp;K3</code></td><td>Bidirectional RTS/CTS hardware flow control.</td></tr>
         <tr><td><code>AT&amp;K4</code></td><td>Bidirectional XON/XOFF software flow control.</td></tr>
     </tbody>
@@ -2299,9 +2377,15 @@ automatically on timeout. Within 60 seconds your old settings come back.
 <h1 id="appA">Appendix A — Configuration Key Reference</h1>
 
 <p>
-Every key recognised by <code>egateway.conf</code>, sorted alphabetically. The
-parser is case-sensitive on keys but booleans (<code>true</code>/<code>false</code>)
-are compared case-insensitively. Unknown keys are silently ignored. Out-of-range
+Every key recognised by <code>egateway.conf</code>, sorted alphabetically, with
+two intentional deferrals: the <code>kermit_*</code> protocol-tuning family
+(everything <em>except</em> <code>kermit_server_enabled</code> and
+<code>kermit_server_port</code>, which are listed here because they affect the
+gateway's listening surface) is documented in the standalone
+<code>kermit.html</code> reference, and §3.2 of this manual carries one-line
+summaries of the entire family for at-a-glance scanning. The parser is
+case-sensitive on keys but booleans (<code>true</code>/<code>false</code>) are
+compared case-insensitively. Unknown keys are silently ignored. Out-of-range
 numeric values fall back to the default.
 </p>
 
@@ -2310,7 +2394,7 @@ numeric values fall back to the default.
         <tr><th>Key</th><th>Type</th><th>Default</th><th>Range / validation</th><th>Description</th></tr>
     </thead>
     <tbody>
-        <tr><td><code>allow_atdt_kermit</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Permit <code>ATDT KERMIT</code> (and the aliases <code>ATDT kermit-server</code> / <code>ATDT kermit server</code>) on the serial modem to drop the caller straight into Kermit server mode &mdash; no telnet menu, no auth gate. Off by default because it bypasses every <code>security_enabled</code> check.</td></tr>
+        <tr><td><code>allow_atdt_kermit</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Permit <code>ATDT KERMIT</code> (and the aliases <code>ATDT kermit</code> / <code>ATDT kermit-server</code> / <code>ATDT kermit server</code>) on the serial modem to drop the caller straight into Kermit server mode &mdash; no telnet menu, no auth gate. Off by default because it bypasses every <code>security_enabled</code> check.</td></tr>
         <tr><td><code>browser_homepage</code></td><td>string</td><td><code>http://telnetbible.com</code></td><td>any URL or empty</td><td>Page loaded when the browser opens. Empty starts with a blank prompt.</td></tr>
         <tr><td><code>disable_ip_safety</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Remove the private-IP allowlist that normally gates the telnet server when <code>security_enabled</code> is <code>false</code>. Lets any source address connect without auth. Use only on isolated networks &mdash; for any internet-exposed deployment, enable <code>security_enabled</code> instead.</td></tr>
         <tr><td><code>enable_console</code></td><td>bool</td><td><code>true</code></td><td>true/false</td><td>Show GUI window at startup. Set false for headless operation.</td></tr>
@@ -2439,6 +2523,7 @@ commands may be combined on a single <code>AT</code> line — see
         <tr><td><code>AT&amp;D2</code> (Hayes default)</td><td>DTR drop &rarr; hang up.</td></tr>
         <tr><td><code>AT&amp;D3</code></td><td>DTR drop &rarr; hang up + reset.</td></tr>
         <tr><td><code>AT&amp;K0</code> (<em>gateway default</em>)</td><td>No modem-layer flow control.</td></tr>
+        <tr><td><code>AT&amp;K1</code></td><td>Auto-detect (stored only; no wire-level effect).</td></tr>
         <tr><td><code>AT&amp;K3</code></td><td>Bidirectional RTS/CTS.</td></tr>
         <tr><td><code>AT&amp;K4</code></td><td>Bidirectional XON/XOFF.</td></tr>
     </tbody>
@@ -2453,7 +2538,7 @@ commands may be combined on a single <code>AT</code> line — see
         <tr><td><code>ATDT <em>host:port</em></code></td><td>Tone-dial. Default for all TCP dials.</td></tr>
         <tr><td><code>ATDP <em>host:port</em></code></td><td>Pulse-dial (identical to <code>ATDT</code> over TCP).</td></tr>
         <tr><td><code>ATDT ethernet-gateway</code></td><td>Built-in shortcut: connect to this gateway's main menu.</td></tr>
-        <tr><td><code>ATDT KERMIT</code></td><td>Drop into Kermit server mode (requires <code>allow_atdt_kermit&nbsp;=&nbsp;true</code>). Aliases: <code>kermit-server</code>, <code>kermit server</code>.</td></tr>
+        <tr><td><code>ATDT KERMIT</code></td><td>Drop into Kermit server mode (requires <code>allow_atdt_kermit&nbsp;=&nbsp;true</code>). Aliases: <code>kermit</code>, <code>kermit-server</code>, <code>kermit server</code>.</td></tr>
         <tr><td><code>ATDL</code></td><td>Redial last number.</td></tr>
         <tr><td><code>ATDS</code> / <code>ATDS0</code></td><td>Dial stored number in slot 0.</td></tr>
         <tr><td><code>ATDS1</code> … <code>ATDS3</code></td><td>Dial stored number in slots 1–3.</td></tr>
