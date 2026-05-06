@@ -351,13 +351,8 @@ pub async fn request_console_bridge() -> Result<tokio::io::DuplexStream, String>
         }
         Err(_) => {
             // The sender was dropped without sending.  Should be
-            // unreachable in normal flow because every code path that
-            // takes the slot calls send.  Defensive cleanup.
-            slot_guard.armed = false;
-            CONSOLE_REQUEST
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .take();
+            // unreachable in normal flow.  Leave `armed = true` so the
+            // guard's Drop clears the slot on our way out.
             Err("Serial bridge request was dropped".to_string())
         }
     }
@@ -475,6 +470,13 @@ fn console_manager_tick(
     );
     loop {
         if shutdown.load(Ordering::SeqCst) || SERIAL_RESTART.load(Ordering::SeqCst) {
+            // A request that arrived but wasn't yet claimed is otherwise
+            // orphaned: the requester awaits forever because nothing
+            // polls the slot after we leave console mode.  Fail it now
+            // so the requesting session unblocks.
+            if let Some(reply) = take_console_request() {
+                let _ = reply.send(Err("Serial mode changed".to_string()));
+            }
             return;
         }
         let Some(reply) = claim_console_request() else {
@@ -553,9 +555,14 @@ const CONSOLE_BRIDGE_BUFSIZE: usize = 1024;
 ///
 /// **Architecture:** the dedicated serial thread owns blocking I/O on
 /// the port; an async task runs on the tokio runtime and owns the
-/// duplex stream.  Two channels couple them:
-/// - `port_to_session` (tokio mpsc): port reads → duplex writes
-/// - `session_to_port` (std mpsc):   duplex reads → port writes
+/// duplex stream.  Two bounded tokio channels couple them:
+/// - `port_to_session`: port reads → duplex writes
+/// - `session_to_port`: duplex reads → port writes
+///
+/// Bounded both ways: the duplex side awaits when its outbound channel
+/// is full, which ultimately backpressures the telnet peer instead of
+/// growing memory unboundedly when the wire is choked by hardware
+/// flow control.
 ///
 /// Each side terminates the other by dropping its sender.  The serial
 /// thread additionally watches `SHUTDOWN` and `SERIAL_RESTART` so a
@@ -571,8 +578,8 @@ fn run_console_bridge(
     let (mut duplex_read, mut duplex_write) = tokio::io::split(duplex);
     let (port_to_session_tx, mut port_to_session_rx) =
         tokio::sync::mpsc::channel::<Vec<u8>>(64);
-    let (session_to_port_tx, session_to_port_rx) =
-        std::sync::mpsc::channel::<Vec<u8>>();
+    let (session_to_port_tx, mut session_to_port_rx) =
+        tokio::sync::mpsc::channel::<Vec<u8>>(64);
 
     let async_pump = handle.spawn(async move {
         let mut read_buf = [0u8; CONSOLE_BRIDGE_BUFSIZE];
@@ -581,9 +588,7 @@ fn run_console_bridge(
                 msg = port_to_session_rx.recv() => {
                     match msg {
                         Some(bytes) => {
-                            if duplex_write.write_all(&bytes).await.is_err()
-                                || duplex_write.flush().await.is_err()
-                            {
+                            if duplex_write.write_all(&bytes).await.is_err() {
                                 break;
                             }
                         }
@@ -596,12 +601,12 @@ fn run_console_bridge(
                     match read {
                         Ok(0) => break, // peer closed write half
                         Ok(n) => {
-                            // session_to_port_tx is std::mpsc, send
-                            // never blocks; only fails if the receiver
-                            // (sync thread) has dropped, in which case
-                            // the bridge is winding down anyway.
+                            // Bounded send — awaits if the sync side is
+                            // behind, which lets duplex_read backpressure
+                            // the telnet peer in turn.
                             if session_to_port_tx
                                 .send(read_buf[..n].to_vec())
+                                .await
                                 .is_err()
                             {
                                 break;
@@ -654,8 +659,8 @@ fn run_console_bridge(
                         break 'outer;
                     }
                 }
-                Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                     // Async pump terminated; nothing more will arrive.
                     break 'outer;
                 }
@@ -663,10 +668,17 @@ fn run_console_bridge(
         }
     }
 
-    // Dropping our senders signals the async pump to terminate; then
-    // wait for it to flush any in-flight duplex writes.
+    // Dropping our senders signals the async pump to terminate; give
+    // it a brief window to flush in-flight duplex writes, then abort
+    // unconditionally.  Awaiting unbounded would wedge the manager if
+    // the telnet peer's socket buffer is full (write_all would park
+    // forever waiting for a reader that may never come back).
     drop(port_to_session_tx);
-    let _ = handle.block_on(async_pump);
+    let abort = async_pump.abort_handle();
+    let _ = handle.block_on(async {
+        tokio::time::timeout(Duration::from_millis(200), async_pump).await
+    });
+    abort.abort();
 }
 
 // ─── Serial thread ─────────────────────────────────────────
