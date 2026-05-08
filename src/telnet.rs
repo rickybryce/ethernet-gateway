@@ -6179,29 +6179,50 @@ impl TelnetSession {
             let mut any_eligible = false;
             for id in SERIAL_PORT_IDS {
                 let port = cfg.port(id);
-                let eligibility = crate::serial::check_console_bridge_eligible(&cfg, id);
-                let ok = eligibility.is_ok();
+                let ok = crate::serial::check_console_bridge_eligible(&cfg, id).is_ok();
                 any_eligible |= ok;
+                // Two-line per-port entry so the device path + baud
+                // never overflow the 40-col PETSCII budget.  Line 1 is
+                // the role label; line 2 (when there is a device set)
+                // shows the path/baud indented to align under the
+                // role label.  ASCII-only — no em-dash so .len() and
+                // display width agree.
                 let label = format!("[{}] Port {}", id.label(), id.label());
-                let status = if !port.enabled {
-                    self.red("Disabled")
+                let role = if !port.enabled {
+                    "Disabled"
                 } else if port.mode != "console" {
-                    self.amber("Modem mode")
+                    "Modem mode"
                 } else if port.port.is_empty() {
-                    self.red("No device")
+                    "No device"
                 } else {
-                    self.green(&format!(
-                        "Console — {} {}",
-                        truncate_to_width(&port.port, 24),
-                        port.baud
-                    ))
+                    "Console mode"
+                };
+                let role_colored = if !port.enabled {
+                    self.red(role)
+                } else if port.mode != "console" {
+                    self.amber(role)
+                } else if port.port.is_empty() {
+                    self.red(role)
+                } else {
+                    self.green(role)
                 };
                 self.send_line(&format!(
-                    "  {}  {}",
+                    "  {} - {}",
                     if ok { self.cyan(&label) } else { self.dim(&label) },
-                    status
+                    role_colored
                 ))
                 .await?;
+                if !port.port.is_empty() {
+                    // Indent under "[A] " on line 1 (6 spaces).  Path
+                    // truncated so the worst-case line stays under
+                    // 40 cols: 6 indent + path(<=23) + " " + baud(<=6) = 36.
+                    self.send_line(&format!(
+                        "      {} {}",
+                        self.amber(&truncate_to_width(&port.port, 23)),
+                        port.baud
+                    ))
+                    .await?;
+                }
             }
             self.send_line("").await?;
             if !any_eligible {
@@ -6212,7 +6233,7 @@ impl TelnetSession {
                 .await?;
                 self.send_line(&format!(
                     "  {}",
-                    self.dim("Use Configuration → M to set up a port.")
+                    self.dim("Set one via Config > M.")
                 ))
                 .await?;
                 self.send_line("").await?;
@@ -6365,7 +6386,6 @@ impl TelnetSession {
         ))
         .await?;
         self.flush().await?;
-        let _ = id; // bind id for the bridge request below
         let bridge = match crate::serial::request_console_bridge(id).await {
             Ok(b) => b,
             Err(e) => {
@@ -7287,24 +7307,31 @@ impl TelnetSession {
             let cfg = config::get_config();
             for id in SERIAL_PORT_IDS {
                 let port = cfg.port(id);
-                let status = if !port.enabled {
+                // Two-line per-port entry so the role + device path +
+                // baud never overflow the 40-col PETSCII budget.  Line
+                // 1: role label; line 2 (when configured): path + baud.
+                let label = format!("[{}] Port {}", id.label(), id.label());
+                let role_colored = if !port.enabled {
                     self.red("Disabled")
                 } else if port.mode == "console" {
-                    self.green(&format!(
-                        "Console — {} {}",
-                        truncate_to_width(&port.port, 20),
-                        port.baud
-                    ))
+                    self.green("Console mode")
                 } else {
-                    self.amber(&format!(
-                        "Modem — {} {}",
-                        truncate_to_width(&port.port, 20),
+                    self.amber("Modem mode")
+                };
+                self.send_line(&format!(
+                    "  {} - {}",
+                    self.cyan(&label),
+                    role_colored
+                ))
+                .await?;
+                if !port.port.is_empty() {
+                    self.send_line(&format!(
+                        "      {} {}",
+                        self.amber(&truncate_to_width(&port.port, 23)),
                         port.baud
                     ))
-                };
-                let label = format!("[{}] Port {}", id.label(), id.label());
-                self.send_line(&format!("  {}  {}", self.cyan(&label), status))
                     .await?;
+                }
             }
             self.send_line("").await?;
             self.send_line(&format!(
@@ -7364,9 +7391,9 @@ impl TelnetSession {
             let port = cfg.port(id).clone();
             let console_mode = port.mode == "console";
             let title = if console_mode {
-                format!("PORT {} — SERIAL CONSOLE", id.label())
+                format!("PORT {} - SERIAL CONSOLE", id.label())
             } else {
-                format!("PORT {} — MODEM EMULATOR", id.label())
+                format!("PORT {} - MODEM EMULATOR", id.label())
             };
             self.send_line(&format!("  {}", self.yellow(&title)))
                 .await?;
@@ -7764,7 +7791,7 @@ impl TelnetSession {
         &mut self,
         id: crate::config::SerialPortId,
     ) -> Result<(), std::io::Error> {
-        let title = format!("PORT {} — DEVICE", id.label());
+        let title = format!("PORT {} - DEVICE", id.label());
         loop {
             self.clear_screen().await?;
             let sep = self.separator();
@@ -7930,7 +7957,7 @@ impl TelnetSession {
             "300", "1200", "2400", "4800", "9600", "19200", "38400",
             "57600", "115200",
         ];
-        let title = format!("PORT {} — BAUD RATE", id.label());
+        let title = format!("PORT {} - BAUD RATE", id.label());
         loop {
             self.clear_screen().await?;
             let sep = self.separator();
@@ -7982,7 +8009,7 @@ impl TelnetSession {
         &mut self,
         id: crate::config::SerialPortId,
     ) -> Result<(), std::io::Error> {
-        let title = format!("PORT {} — DATA BITS", id.label());
+        let title = format!("PORT {} - DATA BITS", id.label());
         // Data bits
         loop {
             self.clear_screen().await?;
@@ -8025,7 +8052,7 @@ impl TelnetSession {
         }
 
         // Parity
-        let parity_title = format!("PORT {} — PARITY", id.label());
+        let parity_title = format!("PORT {} - PARITY", id.label());
         loop {
             self.clear_screen().await?;
             let sep = self.separator();
@@ -8068,7 +8095,7 @@ impl TelnetSession {
         }
 
         // Stop bits
-        let stop_title = format!("PORT {} — STOP BITS", id.label());
+        let stop_title = format!("PORT {} - STOP BITS", id.label());
         loop {
             self.clear_screen().await?;
             let sep = self.separator();
@@ -8112,7 +8139,7 @@ impl TelnetSession {
         &mut self,
         id: crate::config::SerialPortId,
     ) -> Result<(), std::io::Error> {
-        let title = format!("PORT {} — FLOW CONTROL", id.label());
+        let title = format!("PORT {} - FLOW CONTROL", id.label());
         loop {
             self.clear_screen().await?;
             let sep = self.separator();
@@ -8167,7 +8194,7 @@ impl TelnetSession {
         self.send_line(&sep).await?;
         self.send_line(&format!(
             "  {}",
-            self.yellow(&format!("PORT {} — RING EMULATOR", id.label()))
+            self.yellow(&format!("PORT {} - RING EMULATOR", id.label()))
         ))
         .await?;
         self.send_line(&sep).await?;
@@ -14464,17 +14491,108 @@ mod tests {
         assert!(data.len() <= PETSCII_WIDTH, "data line {} chars", data.len());
     }
 
+    /// Per-port picker rows in `gateway_serial_picker` and
+    /// `serial_configuration_menu` use a two-line layout (role label
+    /// on line 1, device + baud on line 2 when configured).  ASCII
+    /// only — no em-dash — so .len() byte count matches display width
+    /// on PETSCII clients.  Worst-case lines must fit the 40-col
+    /// PETSCII budget.
+    #[test]
+    fn test_serial_picker_lines_fit_petscii() {
+        // Line 1 chrome: "  " + "[A] Port A" + " - " + role label.
+        // Worst-case role label is "Console mode" (12 chars).
+        let line1_max = "  [A] Port A - Console mode";
+        assert!(
+            line1_max.len() <= PETSCII_WIDTH,
+            "picker line 1 is {} chars",
+            line1_max.len()
+        );
+
+        // Line 2 chrome: 6 indent + path + " " + baud.  Path is
+        // truncated to 23 chars in the picker; baud is at most 6
+        // chars ("115200").  Compose the worst-case line and
+        // assert it fits the budget so a future edit that loosens
+        // truncation can't silently overflow.
+        let line2_max = format!(
+            "      {} {}",
+            "x".repeat(23), // worst-case truncated path
+            115200
+        );
+        assert!(
+            line2_max.len() <= PETSCII_WIDTH,
+            "picker line 2 is {} chars",
+            line2_max.len()
+        );
+
+        // No-eligible-port fallback lines.
+        for line in &[
+            "  No port is in console mode.",
+            "  Set one via Config > M.",
+        ] {
+            assert!(
+                line.len() <= PETSCII_WIDTH,
+                "fallback '{}' is {} chars",
+                line,
+                line.len()
+            );
+        }
+    }
+
+    /// Per-port menu titles (modem_settings, modem_select_port, baud,
+    /// data, parity, stop, flow, ring) all use the format
+    /// "PORT {A|B} - <NAME>".  ASCII hyphen, not em-dash, so .len()
+    /// matches display width.  Each title plus its "  " indent must
+    /// fit PETSCII width.
+    #[test]
+    fn test_per_port_titles_fit_petscii() {
+        let titles = [
+            "PORT A - MODEM EMULATOR",
+            "PORT A - SERIAL CONSOLE",
+            "PORT A - DEVICE",
+            "PORT A - BAUD RATE",
+            "PORT A - DATA BITS",
+            "PORT A - PARITY",
+            "PORT A - STOP BITS",
+            "PORT A - FLOW CONTROL",
+            "PORT A - RING EMULATOR",
+            "PORT B - MODEM EMULATOR",
+            "PORT B - SERIAL CONSOLE",
+            "SERIAL GATEWAY (PORT A)",
+            "SERIAL GATEWAY (PORT B)",
+            "SERIAL CONFIGURATION",
+        ];
+        for t in &titles {
+            let line = format!("  {}", t);
+            assert!(
+                line.len() <= PETSCII_WIDTH,
+                "title line '{}' is {} chars",
+                line,
+                line.len()
+            );
+            // No multi-byte characters that would render as garbage on
+            // a PETSCII client — every byte must be printable ASCII.
+            assert!(
+                t.is_ascii(),
+                "title '{}' contains non-ASCII characters",
+                t
+            );
+        }
+    }
+
     /// New Serial Gateway picker (always shown, even when only one
-    /// port is eligible): chrome + 2 port rows + 2 fallback lines for
-    /// the no-port-eligible case + footer + prompt.  Must fit the
-    /// 22-row PETSCII budget.
+    /// port is eligible).  Two lines per port (role + device/baud
+    /// when configured), so port_rows = 4 worst-case.  Must fit the
+    /// 22-row PETSCII budget even when both ports show device
+    /// detail and the eligibility fallback is showing.
     #[test]
     fn test_serial_gateway_picker_row_count() {
         let chrome = 3 + 1; // sep+title+sep, blank
-        let port_rows = 2; // [A] ... / [B] ...
+        // Worst case: both ports configured, so each takes 2 lines.
+        let port_rows = 2 * 2;
+        let blank_after = 1;
         let fallback = 1 + 1 + 1; // red error + dim hint + blank (only when no port eligible)
         let footer = 1 + 1; // Q footer + prompt
-        let worst_case = chrome + port_rows + fallback + footer;
+        let worst_case = chrome + port_rows + blank_after + fallback + footer;
         assert!(
             worst_case <= 22,
             "Serial Gateway picker is {} rows, exceeds 22",
@@ -14483,14 +14601,15 @@ mod tests {
     }
 
     /// New Serial Configuration picker (Configuration → M now lands
-    /// here): chrome + 2 port rows + footer + prompt.  Fits well under
-    /// the 22-row budget regardless of port status.
+    /// here): chrome + 4 port rows (worst case both configured) +
+    /// footer + prompt.  Fits well under the 22-row budget.
     #[test]
     fn test_serial_configuration_picker_row_count() {
         let chrome = 3 + 1; // sep+title+sep, blank
-        let port_rows = 2;
+        let port_rows = 2 * 2; // 2 lines per port at worst case
+        let blank_after = 1;
         let footer = 1 + 1; // footer line + prompt
-        let total = chrome + port_rows + footer;
+        let total = chrome + port_rows + blank_after + footer;
         assert!(
             total <= 22,
             "Serial Configuration picker is {} rows",
