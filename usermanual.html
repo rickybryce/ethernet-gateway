@@ -302,9 +302,10 @@ hr { border: 0; border-top: 1px solid #bbb; margin: 1em 0; }
 <strong>Ethernet Gateway</strong> is a standalone server written in Rust that bridges
 retro hardware and modern networks. It accepts telnet and SSH connections, speaks
 the XMODEM / XMODEM-1K / YMODEM file-transfer protocols, emulates a Hayes AT
-modem on a physical serial port, proxies outbound connections to remote telnet
-and SSH servers, renders web pages as plain text, looks up the weather, and
-provides a terminal AI-chat front end for the Groq API.
+modem on <strong>two physically independent serial ports</strong> (each port also
+flips to a telnet-serial console bridge on demand), proxies outbound connections
+to remote telnet and SSH servers, renders web pages as plain text, looks up the
+weather, and provides a terminal AI-chat front end for the Groq API.
 </p>
 
 <p>

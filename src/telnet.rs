@@ -3178,8 +3178,9 @@ impl TelnetSession {
                 lines.extend_from_slice(&[
                     "  F  File Transfer: upload/download",
                     "     files using the XMODEM protocol",
-                    "  G  Serial Gateway: bridge to the",
-                    "     console-mode serial port",
+                    "  G  Serial Gateway: pick Port A or B",
+                    "     and bridge to its wire (when",
+                    "     that port is in console mode)",
                     "  R  Troubleshooting: diagnose",
                     "     terminal input issues",
                     "  S  SSH Gateway: connect to a",
@@ -7160,7 +7161,10 @@ impl TelnetSession {
                 "h" => {
                     self.show_help_page("DIALUP MAPPING HELP", &[
                         "  Map phone numbers to host:port",
-                        "  targets for the modem emulator.",
+                        "  targets.  This table is shared",
+                        "  across both ports' modems - one",
+                        "  dialup.conf consulted by Port A",
+                        "  and Port B alike.",
                         "",
                         "  Dial a number with ATDT, ATDP,",
                         "  or ATD (all work the same) and",
@@ -8337,9 +8341,10 @@ impl TelnetSession {
         let lines: &[&str] = if self.terminal_type == TerminalType::Petscii {
             &[
                 "  This server emulates a Hayes-",
-                "  compatible modem on the serial",
+                "  compatible modem on this serial",
                 "  port. Connect retro hardware",
-                "  and use AT commands.",
+                "  and use AT commands.  The other",
+                "  port is configured separately.",
                 "",
                 "  Dialing:",
                 "  ATDT ethernet-gateway",
@@ -8446,8 +8451,9 @@ impl TelnetSession {
                 "             disconnects.",
                 "  &K0        No modem-level flow control",
                 "             (Hayes: &K3 RTS/CTS).  Port-level",
-                "             flow is still honored via",
-                "             serial_flowcontrol in egateway.conf.",
+                "             flow is still honored via this",
+                "             port's serial_<x>_flowcontrol key",
+                "             in egateway.conf.",
                 "",
                 "  Override any of these with the matching AT",
                 "  command and AT&W to persist.",
@@ -8496,7 +8502,7 @@ impl TelnetSession {
             ]
         } else {
             &[
-                "  This menu configures the serial port as a",
+                "  This menu configures this serial port as a",
                 "  raw telnet-serial bridge.  No AT commands,",
                 "  no dialing - just byte passthrough between",
                 "  the telnet session and the connected",
@@ -10974,7 +10980,7 @@ impl TelnetSession {
         .await?;
         self.send_line("").await?;
         self.send_line(
-            "  When enabled, anyone who can reach the serial port",
+            "  When enabled, anyone who can reach a serial port",
         )
         .await?;
         self.send_line(
@@ -11131,9 +11137,10 @@ impl TelnetSession {
                 "  E  Repeat-count compression",
                 "  I  Telnet IAC escape during transfer",
                 "  8  8-bit quote: auto / on / off",
-                "  K  Allow ATDT KERMIT from the serial modem",
-                "     (bypasses security_enabled auth gate;",
-                "     prompts for explicit Y/N before enabling)",
+                "  K  Allow ATDT KERMIT from either serial",
+                "     port's modem (bypasses security_enabled",
+                "     auth gate; prompts for explicit Y/N",
+                "     before enabling)",
                 "",
                 "  Streaming requires a reliable transport.",
                 "  Disable when bridging to flaky serial.",
@@ -13768,7 +13775,13 @@ mod tests {
         assert!(hint.len() <= PETSCII_WIDTH, "error hint exceeds PETSCII width");
     }
 
-    /// Main help screen content must have exactly 16 lines (matching row count test).
+    /// Main help screen content has 17 lines (the dual-port refactor
+    /// stretched the G entry to 3 lines so it can mention the A/B
+    /// picker and the per-port console-mode requirement).  The
+    /// `show_help_page` paginator handles overflow gracefully, so the
+    /// total still fits the 22-row PETSCII budget for everything
+    /// except the bottom prompt — which lands on its own page if
+    /// needed.
     #[test]
     fn test_main_help_content_line_count() {
         let lines = [
@@ -13778,8 +13791,9 @@ mod tests {
             "     and other options",
             "  F  File Transfer: upload/download",
             "     files using the XMODEM protocol",
-            "  G  Serial Gateway: bridge to the",
-            "     console-mode serial port",
+            "  G  Serial Gateway: pick Port A or B",
+            "     and bridge to its wire (when",
+            "     that port is in console mode)",
             "  R  Troubleshooting: diagnose",
             "     terminal input issues",
             "  S  SSH Gateway: connect to a",
@@ -13789,7 +13803,7 @@ mod tests {
             "  W  Weather: check weather by zip",
             "  X  Exit: disconnect from server",
         ];
-        assert_eq!(lines.len(), 16, "main help should have exactly 16 content lines");
+        assert_eq!(lines.len(), 17, "main help should have exactly 17 content lines");
     }
 
     /// Shutdown broadcast message must be valid and end with CRLF.
@@ -13811,20 +13825,25 @@ mod tests {
         assert!(rows <= 22, "dialup mapping menu is {} rows, exceeds 22", rows);
     }
 
-    /// Dialup mapping help screen row count.
+    /// Dialup mapping help screen row count.  Dual-port wording
+    /// added 3 lines (the "shared across both ports' modems"
+    /// clarification); paginator handles overflow gracefully.
     #[test]
     fn test_dialup_help_screen_row_count() {
-        // header(3) + blank + 12 content lines + blank + "press any key" = 18
-        let rows = 3 + 1 + 12 + 1 + 1; // 18
+        // header(3) + blank + 15 content lines + blank + "press any key" = 21
+        let rows = 3 + 1 + 15 + 1 + 1; // 21
         assert!(rows <= 22, "dialup help screen is {} rows, exceeds 22", rows);
     }
 
-    /// Dialup mapping help content must have exactly 12 lines and fit PETSCII.
+    /// Dialup mapping help content must have exactly 15 lines and fit PETSCII.
     #[test]
     fn test_dialup_help_content() {
         let lines = [
             "  Map phone numbers to host:port",
-            "  targets for the modem emulator.",
+            "  targets.  This table is shared",
+            "  across both ports' modems - one",
+            "  dialup.conf consulted by Port A",
+            "  and Port B alike.",
             "",
             "  Dial a number with ATDT, ATDP,",
             "  or ATD (all work the same) and",
@@ -13836,7 +13855,7 @@ mod tests {
             "",
             "  Mappings are saved in dialup.conf.",
         ];
-        assert_eq!(lines.len(), 12, "dialup help should have exactly 12 content lines");
+        assert_eq!(lines.len(), 15, "dialup help should have exactly 15 content lines");
         for line in &lines {
             assert!(
                 line.len() <= PETSCII_WIDTH,
@@ -14684,8 +14703,9 @@ mod tests {
             "     and other options",
             "  F  File Transfer: upload/download",
             "     files using the XMODEM protocol",
-            "  G  Serial Gateway: bridge to the",
-            "     console-mode serial port",
+            "  G  Serial Gateway: pick Port A or B",
+            "     and bridge to its wire (when",
+            "     that port is in console mode)",
             "  R  Troubleshooting: diagnose",
             "     terminal input issues",
             "  S  SSH Gateway: connect to a",
@@ -14825,14 +14845,17 @@ mod tests {
         }
     }
 
-    /// Modem help content lines must fit PETSCII width.
+    /// Modem help content lines must fit PETSCII width.  Mirrors the
+    /// live PETSCII help in `modem_show_help`; per-port wording came
+    /// in with the dual-port refactor.
     #[test]
     fn test_modem_help_lines_fit_petscii() {
         let lines = [
             "  This server emulates a Hayes-",
-            "  compatible modem on the serial",
-            "  port. Connect your retro",
-            "  hardware and use AT commands:",
+            "  compatible modem on this serial",
+            "  port. Connect retro hardware",
+            "  and use AT commands.  The other",
+            "  port is configured separately.",
             "  ATDT ethernet-gateway",
             "    Connect to this gateway",
             "  ATDT host:port",

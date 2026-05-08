@@ -1,11 +1,12 @@
 # Ethernet Gateway
 
 A telnet-based XMODEM/YMODEM/ZMODEM/Kermit file transfer server, SSH
-gateway, Hayes-compatible modem emulator (with optional telnet-serial
-console bridge) for serial-attached retro hardware, text-mode web
-browser, and AI chat client written in Rust. Supports PETSCII (Commodore
-64), ANSI, and ASCII terminals. Designed for local network use with
-retro and modern terminal clients.
+gateway, Hayes-compatible modem emulator on **two physically
+independent serial ports** (each with optional telnet-serial console
+bridge) for serial-attached retro hardware, text-mode web browser, and
+AI chat client written in Rust. Supports PETSCII (Commodore 64), ANSI,
+and ASCII terminals. Designed for local network use with retro and
+modern terminal clients.
 
 **[User Manual](http://ethernetgateway.com/index.html)**
 &nbsp;&middot;&nbsp;
@@ -1041,7 +1042,7 @@ and return `OK` so that legacy init strings run to completion.
 | Setting | Gateway default | Hayes default | Why we differ |
 |---------|-----------------|---------------|---------------|
 | `AT&D` | `&D0` (ignore DTR) | `&D2` (hang up on DTR drop) | Many retro clients don't drive DTR correctly. `&D2` would cause spurious disconnects. |
-| `AT&K` | `&K0` (no modem-level flow control) | `&K3` (RTS/CTS) | C64, CP/M, and similar clients rarely implement hardware flow control. The physical port flow control is still set by `serial_flowcontrol` in `egateway.conf`. |
+| `AT&K` | `&K0` (no modem-level flow control) | `&K3` (RTS/CTS) | C64, CP/M, and similar clients rarely implement hardware flow control. The physical port flow control is still set per-port by `serial_a_flowcontrol` / `serial_b_flowcontrol` in `egateway.conf`. |
 | `S7` | 15 seconds | 50 seconds | Keeps failed TCP dials responsive. Raising S7 is allowed up to an internal cap of 60 s. |
 
 All three deviations can be overridden interactively (e.g. `AT&D2`,
@@ -1134,9 +1135,9 @@ hardware signal pins that those commands nominally control:
   USB-to-serial adapter and platform). Use `ATH` or `+++` to hang up.
 - **CTS/RTS (Clear to Send / Request to Send, pins 8/7)** -- `AT&K3`/`AT&K4`
   is accepted and persisted. Actual hardware or software flow control on the
-  wire is controlled by the `serial_flowcontrol` setting in `egateway.conf`
-  (not by `AT&K`), so retro clients that can't do RTS/CTS keep working at
-  the default `serial_flowcontrol = none`.
+  wire is controlled per-port by `serial_a_flowcontrol` / `serial_b_flowcontrol`
+  in `egateway.conf` (not by `AT&K`), so retro clients that can't do RTS/CTS
+  keep working at the per-port default of `none`.
 
 Most retro terminal software works fine without these signals, especially
 when configured to ignore DCD (sometimes labeled "Force DTR" or "Ignore
