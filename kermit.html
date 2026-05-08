@@ -363,6 +363,12 @@
             padding: 20px 28px;
             margin: 14px 0 18px;
             line-height: 1.8;
+            /* Preserve the source-level newlines/indentation in the
+               KERMIT SERVER MODE block — without this, HTML collapses
+               every newline and run of spaces, leaving the whole
+               banner on one line.  pre-wrap (rather than pre) so long
+               lines still wrap on narrow viewports. */
+            white-space: pre-wrap;
         }
 
         .menu-block .sep { color: var(--dim); }
