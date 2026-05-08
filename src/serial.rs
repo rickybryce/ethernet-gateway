@@ -3122,6 +3122,60 @@ mod tests {
         }
     }
 
+    /// `restart_all_serial()` flips both ports' flags.  Used by the
+    /// GUI Save button when the operator might have changed either or
+    /// both ports.  Without this, a saved Port B change would be
+    /// silently ignored if the GUI happened to call `restart_serial(A)`
+    /// only.
+    #[test]
+    fn test_restart_all_serial_sets_both_flags() {
+        let _g = lock_global_state();
+        for id in SERIAL_PORT_IDS {
+            SERIAL_RESTART[id.index()].store(false, Ordering::SeqCst);
+        }
+        restart_all_serial();
+        for id in SERIAL_PORT_IDS {
+            assert!(
+                SERIAL_RESTART[id.index()].load(Ordering::SeqCst),
+                "restart_all_serial must flip Port {}'s flag",
+                id.label()
+            );
+            // Restore for siblings.
+            SERIAL_RESTART[id.index()].store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// `restart_all_serial()` is idempotent — calling it when both
+    /// flags are already set must not panic or otherwise misbehave.
+    /// This exercise is cheap, but the safety net catches a future
+    /// change that switches storage from `Atomic*` to a type without
+    /// idempotent stores.
+    #[test]
+    fn test_restart_all_serial_idempotent() {
+        let _g = lock_global_state();
+        for id in SERIAL_PORT_IDS {
+            SERIAL_RESTART[id.index()].store(true, Ordering::SeqCst);
+        }
+        restart_all_serial();
+        for id in SERIAL_PORT_IDS {
+            assert!(SERIAL_RESTART[id.index()].load(Ordering::SeqCst));
+            SERIAL_RESTART[id.index()].store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// `SerialPortId::label` and `SerialPortId::index` agree with the
+    /// concrete dispatch in the rest of the module.  These look
+    /// trivial but they're load-bearing for every per-port array
+    /// access; pin them so a future rename can't silently swap A↔B.
+    #[test]
+    fn test_serial_port_id_label_and_index() {
+        assert_eq!(SerialPortId::A.label(), "A");
+        assert_eq!(SerialPortId::B.label(), "B");
+        assert_eq!(SerialPortId::A.index(), 0);
+        assert_eq!(SerialPortId::B.index(), 1);
+        assert_eq!(SERIAL_PORT_IDS, [SerialPortId::A, SerialPortId::B]);
+    }
+
     /// Build a Config with a single port configured the way the caller
     /// wants and the other port left at defaults (which is `enabled =
     /// false`, so it never satisfies `check_console_bridge_eligible`).

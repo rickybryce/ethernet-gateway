@@ -3016,6 +3016,149 @@ mod tests {
         assert_eq!(serial_key(SerialPortId::B, "stored_3"), "serial_b_stored_3");
     }
 
+    /// Every `apply_serial_port_key` suffix that the AT&W path emits
+    /// must round-trip via `serial_key()` for both ports.  This is the
+    /// single integration point where a typo in either side (modem
+    /// emulator AT&W persistence keys vs. config schema) would cause
+    /// silent persistence failure.
+    #[test]
+    fn test_serial_key_round_trips_through_apply_for_both_ports() {
+        // Suffixes the AT&W path persists (matches the call list in
+        // serial.rs::process_at_command for AtResult::SaveConfig).
+        let suffixes: &[(&str, &str)] = &[
+            ("enabled", "true"),
+            ("mode", "console"),
+            ("port", "/dev/ttyTEST"),
+            ("baud", "57600"),
+            ("databits", "7"),
+            ("parity", "even"),
+            ("stopbits", "2"),
+            ("flowcontrol", "hardware"),
+            ("echo", "false"),
+            ("verbose", "false"),
+            ("quiet", "true"),
+            ("s_regs", "9,8,7,6,5,4,3,2,1"),
+            ("x_code", "2"),
+            ("dtr_mode", "3"),
+            ("flow_mode", "4"),
+            ("dcd_mode", "0"),
+            ("stored_0", "111"),
+            ("stored_1", "222"),
+            ("stored_2", "333"),
+            ("stored_3", "444"),
+        ];
+
+        for &id in &[SerialPortId::A, SerialPortId::B] {
+            let mut cfg = Config::default();
+            for (suffix, value) in suffixes {
+                let key = serial_key(id, suffix);
+                apply_config_key(&mut cfg, &key, value);
+            }
+            // Every field on the targeted port should now reflect the
+            // applied value.
+            let port = cfg.port(id);
+            assert!(port.enabled, "port {} enabled", id.label());
+            assert_eq!(port.mode, "console");
+            assert_eq!(port.port, "/dev/ttyTEST");
+            assert_eq!(port.baud, 57600);
+            assert_eq!(port.databits, 7);
+            assert_eq!(port.parity, "even");
+            assert_eq!(port.stopbits, 2);
+            assert_eq!(port.flowcontrol, "hardware");
+            assert!(!port.echo);
+            assert!(!port.verbose);
+            assert!(port.quiet);
+            assert_eq!(port.s_regs, "9,8,7,6,5,4,3,2,1");
+            assert_eq!(port.x_code, 2);
+            assert_eq!(port.dtr_mode, 3);
+            assert_eq!(port.flow_mode, 4);
+            assert_eq!(port.dcd_mode, 0);
+            assert_eq!(port.stored_numbers[0], "111");
+            assert_eq!(port.stored_numbers[1], "222");
+            assert_eq!(port.stored_numbers[2], "333");
+            assert_eq!(port.stored_numbers[3], "444");
+
+            // The OTHER port must still be at defaults — proves no
+            // cross-contamination.
+            let other = match id {
+                SerialPortId::A => &cfg.serial_b,
+                SerialPortId::B => &cfg.serial_a,
+            };
+            assert_eq!(*other, SerialPortConfig::default(), "port {} bled into other", id.label());
+        }
+    }
+
+    /// A full AT&W → file-write → file-read cycle preserves Port A's
+    /// values without ever touching Port B's keys, and vice versa.
+    /// This is the load-bearing invariant for the entire dual-port
+    /// design — if it ever broke, both ports' AT&W would
+    /// non-deterministically corrupt each other's persisted state.
+    #[test]
+    fn test_atw_persistence_cycle_is_isolated() {
+        let dir = std::env::temp_dir().join("xmodem_test_atw_isolation");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("isolated.conf");
+
+        // Start with both ports at non-default values so the test
+        // detects accidental defaulting as well as cross-pollution.
+        let original = Config {
+            serial_a: SerialPortConfig {
+                enabled: true,
+                mode: "modem".into(),
+                port: "/dev/ttyA".into(),
+                baud: 4800,
+                s_regs: "1,1,1".into(),
+                x_code: 1,
+                ..SerialPortConfig::default()
+            },
+            serial_b: SerialPortConfig {
+                enabled: true,
+                mode: "modem".into(),
+                port: "/dev/ttyB".into(),
+                baud: 19200,
+                s_regs: "2,2,2".into(),
+                x_code: 2,
+                ..SerialPortConfig::default()
+            },
+            ..Config::default()
+        };
+        write_config_file(path.to_str().unwrap(), &original);
+
+        // Simulate Port A's AT&W changing only Port A's saved fields.
+        // We bypass the global singleton by mutating a fresh in-memory
+        // Config — we want this test to be hermetic, not depend on the
+        // global mutex state.  (The full real path through
+        // `update_config_values` is exercised by the round-trip tests
+        // above; this test pins the *isolation* property.)
+        let mut after_a_atw = read_config_file(path.to_str().unwrap());
+        for (suffix, value) in &[
+            ("echo", "false"),
+            ("verbose", "false"),
+            ("quiet", "true"),
+            ("s_regs", "55,55,55"),
+            ("x_code", "4"),
+        ] {
+            apply_config_key(&mut after_a_atw, &serial_key(SerialPortId::A, suffix), value);
+        }
+        write_config_file(path.to_str().unwrap(), &after_a_atw);
+
+        let reloaded = read_config_file(path.to_str().unwrap());
+
+        // Port A's AT&W fields changed.
+        assert_eq!(reloaded.serial_a.s_regs, "55,55,55");
+        assert_eq!(reloaded.serial_a.x_code, 4);
+        assert!(!reloaded.serial_a.echo);
+        assert!(!reloaded.serial_a.verbose);
+        assert!(reloaded.serial_a.quiet);
+        // Port A's other fields untouched.
+        assert_eq!(reloaded.serial_a.port, "/dev/ttyA");
+        assert_eq!(reloaded.serial_a.baud, 4800);
+        // Port B is byte-identical to its pre-AT&W state.
+        assert_eq!(reloaded.serial_b, original.serial_b);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The `Config::port` / `port_mut` accessors return the right
     /// slice for each port id.  Trivial but worth pinning so a future
     /// rename can't silently swap A↔B.
