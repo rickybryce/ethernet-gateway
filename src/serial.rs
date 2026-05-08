@@ -352,14 +352,17 @@ fn check_bridge_request_admissible(
     Ok(())
 }
 
-/// Request a console bridge to the serial port.  The serial thread
-/// (running in `console` mode) will open the port and reply on the
-/// oneshot with one half of a duplex pair: bytes the caller writes go
-/// to the wire, bytes from the wire come back through the duplex.
+/// Request a console bridge to the named port.  That port's manager
+/// thread (running in `console` mode) will open the device and reply
+/// on the oneshot with one half of a duplex pair: bytes the caller
+/// writes go to the wire, bytes from the wire come back through the
+/// duplex.  Each port has its own independent slot, so a bridge in
+/// flight on Port A does not block a request on Port B.
 ///
-/// Returns `Err(_)` immediately if a bridge is already in flight, the
-/// caller should retry later.  Returns `Err(_)` from the oneshot if
-/// the port can't be opened (the message describes the failure).
+/// Returns `Err(_)` immediately if a bridge is already in flight on
+/// `id` — the caller should retry later.  Returns `Err(_)` from the
+/// oneshot if the port can't be opened (the message describes the
+/// failure).
 ///
 /// The bridge ends — and the port is released — as soon as the duplex
 /// stream returned to the caller is dropped.

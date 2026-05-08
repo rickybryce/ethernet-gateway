@@ -8389,10 +8389,10 @@ impl TelnetSession {
         } else {
             &[
                 "  This server emulates a Hayes-compatible",
-                "  modem on the configured serial port.",
-                "  Connect retro hardware (Commodore 64,",
-                "  CP/M, Altair, RC2014, etc.) and drive",
-                "  it with standard AT commands.",
+                "  modem on this serial port.  Connect",
+                "  retro hardware (Commodore 64, CP/M,",
+                "  Altair, RC2014, etc.) and drive it",
+                "  with standard AT commands.",
                 "",
                 "  Dialing:",
                 "  ATDT ethernet-gateway",
@@ -8490,8 +8490,9 @@ impl TelnetSession {
                 "  editors like vi keep working.",
                 "",
                 "  Switching modes:",
-                "  Press T at the Configuration",
-                "  menu to return to Modem mode.",
+                "  Press T in this menu to return",
+                "  to Modem Emulator mode.  Each",
+                "  port toggles independently.",
             ]
         } else {
             &[
@@ -8518,8 +8519,9 @@ impl TelnetSession {
                 "  the wire so editors like vi keep working).",
                 "",
                 "  Switching modes:",
-                "  Press T at the Configuration menu to",
-                "  return to Modem Emulator mode.",
+                "  Press T in this menu to return to Modem",
+                "  Emulator mode.  Each port (A, B) toggles",
+                "  independently.",
             ]
         };
         self.show_help_page("SERIAL CONSOLE HELP", lines).await
@@ -13664,11 +13666,12 @@ mod tests {
             "  R  Refresh port list",
             "  N  None (clear port)",
             "  Enter #, R, N, or type a path.",
-            // Configuration submenu
+            // Configuration submenu (post-dual-port refactor:
+            // M renamed to "Serial Configuration", T moved into the
+            // per-port settings menu).
             "  E  Security",
-            "  M  Modem Emulator",
-            "  M  Serial Console",
-            "  T  Toggle Modem/Console mode",
+            "  M  Serial Configuration",
+            "  T  Toggle Modem/Console mode", // now lives on the per-port menu
             "  S  Server Configuration",
             "  F  File Transfer",
             "  O  Other Settings",
@@ -13967,9 +13970,11 @@ mod tests {
     /// Typical machines have 1-3 addresses, fitting well within 22.
     #[test]
     fn test_config_menu_row_count() {
-        // Configuration submenu: header(3) + blank + serial-status(1) + blank
-        // + 8 items (E, G, M, T, S, F, O, R) + blank + Q/H + prompt = 17
-        let submenu_rows = 3 + 1 + 1 + 1 + 8 + 1 + 1 + 1; // 17
+        // Configuration submenu (post dual-port refactor):
+        // header(3) + blank + per-port status(2) + blank
+        // + 7 items (E, G, M, S, F, O, R; T moved to per-port menu)
+        // + blank + Q/H + prompt = 17
+        let submenu_rows = 3 + 1 + 2 + 1 + 7 + 1 + 1 + 1; // 17
         assert!(submenu_rows <= 22, "config submenu is {} rows, exceeds 22", submenu_rows);
         // Server configuration: header(3) + blank + 2 status + blank + 5 items + blank + Q/H + prompt = 15
         let static_rows = 3 + 1 + 2 + 1 + 5 + 1 + 1 + 1; // 15
@@ -14805,8 +14810,9 @@ mod tests {
             "  A single ESC is forwarded so",
             "  editors like vi keep working.",
             "  Switching modes:",
-            "  Press T at the Configuration",
-            "  menu to return to Modem mode.",
+            "  Press T in this menu to return",
+            "  to Modem Emulator mode.  Each",
+            "  port toggles independently.",
         ];
         for line in &help_lines {
             assert!(
