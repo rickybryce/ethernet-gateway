@@ -2934,6 +2934,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A hand-edited config file that mixes legacy and prefixed keys
+    /// for Port A — e.g. the user partially migrated the file or
+    /// re-introduced a legacy line by accident — must read each field
+    /// from whichever form is present, with prefixed winning.  Port A
+    /// fields with NO prefixed form fall back to legacy; Port A fields
+    /// WITH a prefixed form ignore the legacy duplicate; Port B is
+    /// unaffected throughout.
+    ///
+    /// This is the regression test for an issue that an earlier review
+    /// raised in the abstract: the per-field fallback design tolerates
+    /// partial migration gracefully but only because every field
+    /// independently re-runs the lookup.  A future "optimize the
+    /// migration" change that decides "all-or-nothing per port" would
+    /// silently regress every hand-edited config that hits this path.
+    #[test]
+    fn test_serial_partial_prefix_keys_with_legacy_fallback() {
+        let dir = std::env::temp_dir().join("xmodem_test_serial_partial_prefix");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("partial.conf");
+        let mut f = std::fs::File::create(&path).unwrap();
+        // Port A: baud + parity in NEW form, port + enabled in LEGACY
+        // form, mode missing entirely (should use default).
+        writeln!(f, "serial_a_baud = 9600").unwrap();
+        writeln!(f, "serial_a_parity = even").unwrap();
+        writeln!(f, "serial_port = /dev/ttyTEST").unwrap(); // legacy form
+        writeln!(f, "serial_enabled = true").unwrap();      // legacy form
+        // Both prefixed AND legacy parity present — prefixed must win.
+        writeln!(f, "serial_parity = odd").unwrap();        // legacy duplicate
+        // Port B has nothing — must stay at defaults regardless of
+        // legacy keys (Port B never migrates).
+        drop(f);
+
+        let cfg = read_config_file(path.to_str().unwrap());
+
+        // Port A: prefixed where present, legacy where absent.
+        assert_eq!(cfg.serial_a.baud, 9600, "prefixed baud");
+        assert_eq!(cfg.serial_a.parity, "even", "prefixed parity wins over legacy");
+        assert_eq!(cfg.serial_a.port, "/dev/ttyTEST", "legacy port falls back");
+        assert!(cfg.serial_a.enabled, "legacy enabled falls back");
+        // Field with neither prefixed nor legacy → default.
+        assert_eq!(cfg.serial_a.mode, DEFAULT_SERIAL_MODE);
+
+        // Port B is fully default — legacy keys must NOT bleed across.
+        assert_eq!(cfg.serial_b, SerialPortConfig::default());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Port B never falls back to legacy keys.  The legacy migration
     /// is Port-A-only by design — the legacy single-port file never
     /// described two ports.
