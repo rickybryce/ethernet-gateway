@@ -1418,6 +1418,14 @@ pub(crate) struct TelnetSession {
     web_forms: Vec<crate::webbrowser::WebForm>,
     weather_zip: String,
     is_serial: bool,
+    /// When `is_serial = true`, this records WHICH physical port the
+    /// caller dialed in on (Port A or Port B).  Used by
+    /// `modem_apply_settings` to scope the 60-s warn-+-revert flow to
+    /// the caller's own port: editing the OTHER port's settings from
+    /// inside a serial session can't tear down this session, so the
+    /// warn flow there would just be noise.  `None` for non-serial
+    /// sessions.
+    serial_port_id: Option<crate::config::SerialPortId>,
     is_ssh: bool,
     idle_timeout: std::time::Duration,
     // One-byte pushback used by drain_trailing_eol to safely return any
@@ -1462,6 +1470,7 @@ impl TelnetSession {
     /// parameter for API symmetry with `new_ssh` so future code can't
     /// accidentally diverge.
     pub(crate) fn new_serial(
+        port_id: crate::config::SerialPortId,
         reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>,
         writer: SharedWriter,
         shutdown: Arc<AtomicBool>,
@@ -1489,6 +1498,7 @@ impl TelnetSession {
             web_forms: Vec::new(),
             weather_zip: config::get_config().weather_zip,
             is_serial: true,
+            serial_port_id: Some(port_id),
             is_ssh: false,
             idle_timeout: std::time::Duration::from_secs(config::get_config().idle_timeout_secs),
             pushback: None,
@@ -1542,6 +1552,7 @@ impl TelnetSession {
             web_forms: Vec::new(),
             weather_zip: config::get_config().weather_zip,
             is_serial: false,
+            serial_port_id: None,
             is_ssh: true,
             idle_timeout: std::time::Duration::from_secs(config::get_config().idle_timeout_secs),
             pushback: None,
@@ -7467,10 +7478,13 @@ impl TelnetSession {
             .await?;
             // T moved here from the Configuration menu so each port's
             // mode toggle lives next to the rest of its settings.
-            // Hidden for serial-side sessions because flipping the
-            // caller's own port to Console mid-session would tear
-            // down their connection before they could confirm.
-            if !self.is_serial {
+            // Hidden only when the caller is dialed in on THIS port —
+            // flipping their own port to console mid-session would
+            // tear down their connection before they could confirm.
+            // Hiding T for the OTHER port would be over-conservative:
+            // restarting Port B from a Port A serial session is safe.
+            let toggling_own_port = self.is_serial && self.serial_port_id == Some(id);
+            if !toggling_own_port {
                 self.send_line(&format!(
                     "  {}  Toggle Modem/Console mode",
                     self.cyan("T")
@@ -7505,7 +7519,12 @@ impl TelnetSession {
                     self.cyan("D")
                 ))
                 .await?;
-                if !self.is_serial {
+                // Hide Ring on the port the caller is dialed in on
+                // (ringing yourself isn't useful) but allow it on the
+                // OTHER port — a Port-A serial session can ring Port B's
+                // wire if there's separate hardware listening over there.
+                let ringing_own_port = self.is_serial && self.serial_port_id == Some(id);
+                if !ringing_own_port {
                     self.send_line(&format!(
                         "  {}  Ring emulator",
                         self.cyan("I")
@@ -7549,7 +7568,7 @@ impl TelnetSession {
                     .await
                     .ok();
                 }
-                "t" if !self.is_serial => {
+                "t" if !(self.is_serial && self.serial_port_id == Some(id)) => {
                     self.toggle_serial_mode(id).await?;
                 }
                 "s" => {
@@ -7567,7 +7586,9 @@ impl TelnetSession {
                 "d" if !console_mode => {
                     self.dialup_mapping().await?;
                 }
-                "i" if !console_mode && !self.is_serial => {
+                "i" if !(console_mode
+                    || self.is_serial && self.serial_port_id == Some(id)) =>
+                {
                     self.modem_ring_emulator(id).await?;
                 }
                 "h" => {
@@ -7578,7 +7599,12 @@ impl TelnetSession {
                     return Ok(());
                 }
                 _ => {
-                    let msg = match (console_mode, self.is_serial) {
+                    // T and I are hidden only when the caller is
+                    // dialed in on THIS port (toggling/ringing your
+                    // own port isn't useful).  Any other combination
+                    // shows the full menu.
+                    let on_own_port = self.is_serial && self.serial_port_id == Some(id);
+                    let msg = match (console_mode, on_own_port) {
                         (true, true) => "Press E, S, B, P, F, H, or Q.",
                         (true, false) => "Press E, T, S, B, P, F, H, or Q.",
                         (false, true) => "Press E, S, B, P, D, F, H, or Q.",
@@ -7615,15 +7641,26 @@ impl TelnetSession {
             return Ok(());
         }
 
-        if !self.is_serial {
+        // The warn-+-revert flow is only meaningful when the caller's
+        // own modem session is the one being reconfigured: changing
+        // baud / framing / port-device underneath them would tear
+        // down their connection mid-edit, so we ask for explicit
+        // Y+Enter confirmation against a 60-s deadline.  When a
+        // serial-side caller is editing the OTHER port (e.g. dialed
+        // in on Port A, editing Port B), the restart only affects the
+        // other manager and the caller's connection is unaffected —
+        // skip the warn-+-revert and just apply.
+        let editing_own_port = self.is_serial && self.serial_port_id == Some(id);
+        if !editing_own_port {
             crate::serial::restart_serial(id);
             return Ok(());
         }
 
-        // Serial user: warn before applying new settings, then require
-        // Y+Enter acknowledgement.  Random bytes from a baud mismatch
-        // must not count as confirmation.  I/O errors during the prompt
-        // are non-fatal — we still need to reach the revert logic.
+        // Serial user editing their own port: warn before applying new
+        // settings, then require Y+Enter acknowledgement.  Random
+        // bytes from a baud mismatch must not count as confirmation.
+        // I/O errors during the prompt are non-fatal — we still need
+        // to reach the revert logic.
         let _ = self.send_line("").await;
         let _ = self.send_line(&format!(
             "  {}",
@@ -7716,22 +7753,24 @@ impl TelnetSession {
     }
 
     /// Toggle one port's mode between "modem" and "console".  Refuses
-    /// the toggle for a caller who came in over the modem itself —
-    /// switching to console mode would tear down their own connection
-    /// before they could acknowledge, and the 60 s Y+Enter recovery in
-    /// `modem_apply_settings` cannot be reached once the modem session
-    /// is gone.  Console-mode sessions are raw passthroughs that don't
-    /// run TelnetSession, so they never reach this code.
+    /// the toggle when the caller is dialed in over THIS PORT'S modem
+    /// — switching that port to console mode would tear down their
+    /// own connection before they could acknowledge, and the 60 s
+    /// Y+Enter recovery in `modem_apply_settings` cannot be reached
+    /// once the modem session is gone.  A serial-side caller toggling
+    /// the OTHER port's mode is fine — that restart doesn't affect
+    /// their connection.  Console-mode sessions are raw passthroughs
+    /// that don't run TelnetSession, so they never reach this code.
     async fn toggle_serial_mode(
         &mut self,
         id: crate::config::SerialPortId,
     ) -> Result<(), std::io::Error> {
-        if self.is_serial {
+        if self.is_serial && self.serial_port_id == Some(id) {
             self.show_error_lines(&[
-                "Cannot toggle mode from a",
-                "modem-side session.  Switching",
-                "to Console would drop this",
-                "connection before it could",
+                "Cannot toggle THIS port's mode",
+                "from a modem-side session on it.",
+                "Switching to Console would drop",
+                "this connection before it could",
                 "confirm.",
                 "",
                 "Connect via telnet, SSH, or the",
@@ -12425,6 +12464,7 @@ pub fn start_server(
                                     web_forms: Vec::new(),
                                     weather_zip: config::get_config().weather_zip,
                                     is_serial: false,
+                                    serial_port_id: None,
                                     is_ssh: false,
                                     idle_timeout: std::time::Duration::from_secs(cfg.idle_timeout_secs),
                                     pushback: None,
@@ -13024,6 +13064,7 @@ mod tests {
             web_forms: Vec::new(),
             weather_zip: String::new(),
             is_serial: false,
+            serial_port_id: None,
             is_ssh: false,
             idle_timeout: std::time::Duration::ZERO,
             pushback: None,
@@ -13072,6 +13113,7 @@ mod tests {
             web_forms: Vec::new(),
             weather_zip: String::new(),
             is_serial: false,
+            serial_port_id: None,
             is_ssh: false,
             idle_timeout: std::time::Duration::ZERO,
             pushback: None,
@@ -14603,6 +14645,53 @@ mod tests {
         }
     }
 
+    /// `TelnetSession::new_serial` stores the caller's port id so
+    /// `modem_apply_settings` can scope the warn-+-revert flow to
+    /// the OWN port only.  Pin the constructor's behavior so a future
+    /// edit can't silently drop the field initialization.
+    #[test]
+    fn test_telnet_session_new_serial_stores_port_id() {
+        use crate::config::SerialPortId;
+        use std::collections::HashMap;
+        use std::sync::Mutex as StdMutex;
+        // Build a minimal-viable serial session to inspect its fields.
+        // The reader/writer are only needed for the type signature —
+        // we never run any I/O against them in this test.
+        let (_w, reader) = tokio::io::duplex(1);
+        let (_, writer_inner) = tokio::io::duplex(1);
+        let writer: SharedWriter = std::sync::Arc::new(tokio::sync::Mutex::new(
+            Box::new(writer_inner),
+        ));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let restart = Arc::new(AtomicBool::new(false));
+        let lockouts: LockoutMap = std::sync::Arc::new(StdMutex::new(HashMap::new()));
+
+        let session_a = TelnetSession::new_serial(
+            SerialPortId::A,
+            Box::new(reader),
+            writer.clone(),
+            shutdown.clone(),
+            restart.clone(),
+            lockouts.clone(),
+        );
+        assert!(session_a.is_serial);
+        assert_eq!(session_a.serial_port_id, Some(SerialPortId::A));
+
+        // A second session on Port B records B, not A — proves the
+        // field tracks the constructor argument and isn't accidentally
+        // hardcoded.
+        let (_w2, reader2) = tokio::io::duplex(1);
+        let session_b = TelnetSession::new_serial(
+            SerialPortId::B,
+            Box::new(reader2),
+            writer,
+            shutdown,
+            restart,
+            lockouts,
+        );
+        assert_eq!(session_b.serial_port_id, Some(SerialPortId::B));
+    }
+
     /// New Serial Gateway picker (always shown, even when only one
     /// port is eligible).  Two lines per port (role + device/baud
     /// when configured), so port_rows = 4 worst-case.  Must fit the
@@ -14642,48 +14731,50 @@ mod tests {
     }
 
     /// Modem/Console settings menu in console mode loses Dialup +
-    /// Ring rows.  The dual-port refactor put the Modem/Console
-    /// toggle (T) inside this per-port menu, so non-serial flows have
-    /// one extra row vs. v0.5.x.  Item count must still fit the
-    /// 22-row budget for every combination.  Status + Mode share one
-    /// line so the modem-mode-enabled-non-serial case stays under 22
-    /// rows even with the new T item.
+    /// Ring rows.  T (and I, in modem mode) hide only when the caller
+    /// is dialed in on THIS port — a serial-side caller editing the
+    /// OTHER port still sees the full menu.  Item count must still
+    /// fit the 22-row budget in every combination.
     #[test]
     fn test_modem_console_menu_row_counts() {
         // Status block: status_mode + Port + Baud + Data + Flow = 5.
         let status_block = 5;
         let chrome = 3 + 1 + 1 + 1 + 1; // sep+title+sep, blank, blank, footer, prompt = 7
-        // Console mode menu items (serial-side hides T): E S B P F = 5
-        let menu_console_serial = 5;
-        let menu_console_non_serial = 6; // + T
-        let menu_modem_serial = 6; // E S B P D F (no T, no I)
+        // Console mode (own port hides T): E S B P F = 5; (other or
+        // non-serial: + T) = 6.
+        let menu_console_own_port = 5;
+        let menu_console_other_or_non_serial = 6; // + T
+        // Modem mode (own port hides T and I): E S B P D F = 6;
+        // (other or non-serial: + T + I) = 8.
+        let menu_modem_own_port = 6; // E S B P D F
         let menu_modem_full = 8; // E T S B P D F I
 
-        // Console mode + serial session: no T row.
-        let console_serial_rows = chrome + status_block + menu_console_serial; // 17
+        // Console mode + caller on this port: no T.
+        let console_own_rows = chrome + status_block + menu_console_own_port; // 17
         assert!(
-            console_serial_rows <= 22,
-            "console-serial menu is {} rows",
-            console_serial_rows
+            console_own_rows <= 22,
+            "console-own-port menu is {} rows",
+            console_own_rows
         );
 
-        // Console mode + non-serial: + T.
-        let console_full_rows = chrome + status_block + menu_console_non_serial; // 18
+        // Console mode + caller on the OTHER port (or not serial): + T.
+        let console_other_rows = chrome + status_block + menu_console_other_or_non_serial; // 18
         assert!(
-            console_full_rows <= 22,
-            "console-full menu is {} rows",
-            console_full_rows
+            console_other_rows <= 22,
+            "console-other-port menu is {} rows",
+            console_other_rows
         );
 
-        // Modem mode + serial session + enabled: + ATD + D, no T, no I.
-        let modem_serial_rows = chrome + status_block + 1 + menu_modem_serial; // 20
+        // Modem mode + caller on this port + enabled: + ATD + D, no T, no I.
+        let modem_own_rows = chrome + status_block + 1 + menu_modem_own_port; // 20
         assert!(
-            modem_serial_rows <= 22,
-            "modem-serial menu is {} rows",
-            modem_serial_rows
+            modem_own_rows <= 22,
+            "modem-own-port menu is {} rows",
+            modem_own_rows
         );
 
-        // Modem mode + non-serial + enabled (worst case): + ATD + T + D + I.
+        // Modem mode + caller on the OTHER port (or non-serial) +
+        // enabled (worst case): + ATD + T + D + I.
         let modem_full_rows = chrome + status_block + 1 + menu_modem_full; // 22
         assert!(
             modem_full_rows <= 22,

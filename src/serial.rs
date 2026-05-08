@@ -1899,6 +1899,7 @@ fn dial_ethernet_gateway(state: &mut ModemState) {
 
     let shutdown = state.shutdown.clone();
     let restart = state.restart.clone();
+    let port_id = state.port_id;
 
     // Spawn TelnetSession on the tokio runtime.
     let writer_for_task = writer_arc.clone();
@@ -1909,6 +1910,7 @@ fn dial_ethernet_gateway(state: &mut ModemState) {
             std::sync::Mutex::new(std::collections::HashMap::new()),
         );
         let mut session = crate::telnet::TelnetSession::new_serial(
+            port_id,
             Box::new(async_read),
             writer_for_task.clone(),
             shutdown,
