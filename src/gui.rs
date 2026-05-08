@@ -1588,39 +1588,53 @@ impl eframe::App for App {
                 });
                 ui.add_space(4.0);
 
-                // ── Row 3: Serial Ports (full-width) ─────────
-                // Three rows in this frame: a header with both ports'
-                // Enabled checkboxes plus the Save button on the right,
-                // then one row per port with its device dropdown,
-                // baud, and a "More..." button into the per-port popup.
-                egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("Serial Port A").strong().color(AMBER));
-                        ui.checkbox(&mut self.cfg.serial_a.enabled, "Enabled");
-                        ui.add_space(20.0);
-                        ui.label(egui::RichText::new("Serial Port B").strong().color(AMBER));
-                        ui.checkbox(&mut self.cfg.serial_b.enabled, "Enabled");
-                        if right_aligned_small_button(ui, "Save") {
-                            self.save_and_restart_serial();
-                        }
-                    });
-                    self.draw_serial_primary_row(ui, crate::config::SerialPortId::A);
-                    self.draw_serial_primary_row(ui, crate::config::SerialPortId::B);
-                });
-                ui.add_space(4.0);
+                // ── Row 3: Serial Ports (left) + General (right) ──
+                // Serial frame: header with both ports' Enabled
+                // checkboxes plus a Save button, then one row per port
+                // (device dropdown, baud, More button into per-port
+                // popup).  General frame on the right shares the row,
+                // matching the half-width layout of the other paired
+                // frames above.
+                ui.horizontal_top(|ui| {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(half, 0.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            egui::Frame::group(ui.style()).show(ui, |ui| {
+                                ui.set_min_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new("Serial Port A").strong().color(AMBER));
+                                    ui.checkbox(&mut self.cfg.serial_a.enabled, "Enabled");
+                                    ui.add_space(12.0);
+                                    ui.label(egui::RichText::new("Serial Port B").strong().color(AMBER));
+                                    ui.checkbox(&mut self.cfg.serial_b.enabled, "Enabled");
+                                    if right_aligned_small_button(ui, "Save") {
+                                        self.save_and_restart_serial();
+                                    }
+                                });
+                                self.draw_serial_primary_row(ui, crate::config::SerialPortId::A);
+                                self.draw_serial_primary_row(ui, crate::config::SerialPortId::B);
+                            });
+                        },
+                    );
 
-                // ── Row 4: General ───────────────────────────
-                egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("General").strong().color(AMBER));
-                        if right_aligned_small_button(ui, "Save") {
-                            self.save_config_now();
-                        }
-                    });
-                    ui.checkbox(&mut self.cfg.verbose, "Verbose Transfer Logging");
-                    ui.checkbox(&mut self.cfg.enable_console, "Show GUI on Startup");
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(half, 0.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            egui::Frame::group(ui.style()).show(ui, |ui| {
+                                ui.set_min_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new("General").strong().color(AMBER));
+                                    if right_aligned_small_button(ui, "Save") {
+                                        self.save_config_now();
+                                    }
+                                });
+                                ui.checkbox(&mut self.cfg.verbose, "Verbose Transfer Logging");
+                                ui.checkbox(&mut self.cfg.enable_console, "Show GUI on Startup");
+                            });
+                        },
+                    );
                 });
                 ui.add_space(6.0);
 
