@@ -601,7 +601,7 @@
                     <tr>
                         <td class="key-col">[G]</td>
                         <td class="name-col">Serial Gateway</td>
-                        <td class="desc-col">Bridge a telnet/SSH session directly to the configured serial port (when set to console mode). Press <strong>ESC</strong> twice to leave.</td>
+                        <td class="desc-col">Bridge a telnet/SSH session directly to one of the two serial ports (Port A or Port B), whichever you pick from the A/B picker. Available when at least one port is in console mode. Press <strong>ESC</strong> twice to leave.</td>
                     </tr>
                     <tr>
                         <td class="key-col">[A]</td>
@@ -771,7 +771,7 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                         <li><strong>B</strong> &mdash; Browser: browse the web</li>
                         <li><strong>C</strong> &mdash; Configuration: server settings and other options</li>
                         <li><strong>F</strong> &mdash; File Transfer: upload/download files using XMODEM, XMODEM-1K, YMODEM, ZMODEM, or Kermit</li>
-                        <li><strong>G</strong> &mdash; Serial Gateway: bridge to the console-mode serial port</li>
+                        <li><strong>G</strong> &mdash; Serial Gateway: pick Port A or Port B (whichever is in console mode) and bridge to its wire</li>
                         <li><strong>R</strong> &mdash; Troubleshooting: diagnose terminal input issues</li>
                         <li><strong>S</strong> &mdash; SSH Gateway: connect to a remote server via SSH</li>
                         <li><strong>T</strong> &mdash; Telnet Gateway: connect to a remote server via telnet</li>
@@ -1241,16 +1241,29 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                     <tr><td>Allow ATDT KERMIT</td><td>false</td><td>Permit serial-modem dial target to drop into Kermit server (bypasses auth gate)</td></tr>
                 </table>
 
-                <div class="cat">Serial Modem / Console Settings</div>
+                <div class="cat">Serial Modem / Console Settings (per port)</div>
+                <p class="dim-text">
+                    The gateway exposes <strong>two physically independent
+                    serial ports</strong>: <strong>Port&nbsp;A</strong> and
+                    <strong>Port&nbsp;B</strong>.  Each setting below has
+                    a per-port copy keyed under <code>serial_a_*</code> or
+                    <code>serial_b_*</code> in <code>egateway.conf</code>.
+                    The two ports run in separate threads, persist
+                    AT&amp;W state separately, and host independent console
+                    bridges, so you can mix-and-match modes (e.g. modem on
+                    Port&nbsp;A, telnet-serial on Port&nbsp;B).  Legacy
+                    single-port configs auto-migrate into Port&nbsp;A on
+                    first read.
+                </p>
                 <table class="data-table">
-                    <tr><th>Setting</th><th>Default</th><th>Description</th></tr>
-                    <tr><td>Mode (<code>serial_mode</code>)</td><td>modem</td><td><code>modem</code> = Hayes AT emulator; <code>console</code> = Telnet-Serial bridge via the <strong>G&nbsp;&nbsp;Serial Gateway</strong> menu</td></tr>
-                    <tr><td>Serial port</td><td><em>(none)</em></td><td>Device path (e.g. <code>/dev/ttyUSB0</code>, <code>COM3</code>)</td></tr>
-                    <tr><td>Baud rate</td><td>9600</td><td>Serial line speed</td></tr>
-                    <tr><td>Data bits</td><td>8</td><td>5, 6, 7, or 8</td></tr>
-                    <tr><td>Parity</td><td>None</td><td>None, Odd, or Even</td></tr>
-                    <tr><td>Stop bits</td><td>1</td><td>1 or 2</td></tr>
-                    <tr><td>Flow control</td><td>None</td><td>None, Software, or Hardware</td></tr>
+                    <tr><th>Setting (per-port suffix)</th><th>Default</th><th>Description</th></tr>
+                    <tr><td>Mode (<code>mode</code>)</td><td>modem</td><td><code>modem</code> = Hayes AT emulator on this port; <code>console</code> = Telnet-Serial bridge for this port via the <strong>G&nbsp;&nbsp;Serial Gateway</strong> A/B picker</td></tr>
+                    <tr><td>Serial port (<code>port</code>)</td><td><em>(none)</em></td><td>Device path (e.g. <code>/dev/ttyUSB0</code>, <code>COM3</code>)</td></tr>
+                    <tr><td>Baud rate (<code>baud</code>)</td><td>9600</td><td>Serial line speed</td></tr>
+                    <tr><td>Data bits (<code>databits</code>)</td><td>8</td><td>5, 6, 7, or 8</td></tr>
+                    <tr><td>Parity (<code>parity</code>)</td><td>None</td><td>None, Odd, or Even</td></tr>
+                    <tr><td>Stop bits (<code>stopbits</code>)</td><td>1</td><td>1 or 2</td></tr>
+                    <tr><td>Flow control (<code>flowcontrol</code>)</td><td>None</td><td>None, Software, or Hardware</td></tr>
                 </table>
 
                 <div class="cat">Other Settings</div>
@@ -1287,14 +1300,25 @@ browser_homepage = http://telnetbible.com
 weather_zip =
 verbose = false
 enable_console = true
-serial_enabled = false
-serial_mode = modem
-serial_port =
-serial_baud = 9600
-serial_databits = 8
-serial_parity = none
-serial_stopbits = 1
-serial_flowcontrol = none
+
+# Serial Port A
+serial_a_enabled = false
+serial_a_mode = modem
+serial_a_port =
+serial_a_baud = 9600
+serial_a_databits = 8
+serial_a_parity = none
+serial_a_stopbits = 1
+serial_a_flowcontrol = none
+# (plus serial_a_echo, serial_a_verbose, serial_a_quiet, serial_a_s_regs,
+#  serial_a_x_code, serial_a_dtr_mode, serial_a_flow_mode, serial_a_dcd_mode,
+#  serial_a_stored_0..3 — all written by AT&amp;W, restored by ATZ)
+
+# Serial Port B (mirrors Port A's keys with serial_b_ prefix)
+serial_b_enabled = false
+serial_b_mode = modem
+serial_b_port =
+serial_b_baud = 9600
 xmodem_negotiation_timeout = 45
 xmodem_block_timeout = 20
 xmodem_max_retries = 10
@@ -1357,19 +1381,37 @@ ssh_gateway_auth = password</span></code></pre>
             <!-- SERIAL MODEM                                  -->
             <!-- ══════════════════════════════════════════════ -->
             <div class="section" id="serial-modem">
-                <div class="section-title">Serial Modem / Console</div>
-                <p class="intro">Hayes AT-compatible modem emulation, or a direct telnet-serial console bridge, on a physical serial port.</p>
+                <div class="section-title">Serial Modem / Console (Two Independent Ports)</div>
+                <p class="intro">Hayes AT-compatible modem emulation, or a direct telnet-serial console bridge, on each of <strong>two</strong> physically independent serial ports.</p>
 
                 <p class="dim-text">
                     Connect vintage computers with serial interfaces to Ethernet Gateway.
-                    The configured serial port runs in one of two modes:
+                    The gateway exposes <strong>Port&nbsp;A</strong> and
+                    <strong>Port&nbsp;B</strong>, each fully independent — its own
+                    enabled flag, mode, device, baud, AT/S-register state, and
+                    stored phone-number slots.  Each port runs in one of two modes:
                 </p>
                 <ul>
                     <li><strong>Modem (AT Command) Mode</strong> &mdash; the default. Accepts standard AT commands and "dials" TCP connections to remote hosts. See the AT command reference below.</li>
-                    <li><strong>Telnet-Serial Mode</strong> &mdash; the Hayes emulator is disabled; the port is exposed via the <strong>G&nbsp;&nbsp;Serial Gateway</strong> main-menu option so a telnet/SSH user can talk directly to whatever's connected to the wire (microcontroller console, RS-232 device, etc.). See <a href="#console-mode">Console Mode</a> below.</li>
+                    <li><strong>Telnet-Serial Mode</strong> &mdash; the Hayes emulator is disabled on this port; the port is exposed via the <strong>G&nbsp;&nbsp;Serial Gateway</strong> A/B picker on the main menu so a telnet/SSH user can talk directly to whatever's connected to that wire (microcontroller console, RS-232 device, etc.). See <a href="#console-mode">Console Mode</a> below.</li>
                 </ul>
                 <p class="dim-text">
-                    Switch modes from the <strong>Configuration</strong> menu (press <strong>T</strong> for <em>Toggle Modem/Console mode</em>), from the GUI's <strong>Serial Port</strong> frame (dropdown beside the Enabled checkbox), or by setting <code>serial_mode = modem</code> or <code>serial_mode = console</code> in <code>egateway.conf</code>. All three paths hot-switch the running serial thread within one manager-poll interval &mdash; no restart required. The <strong>T</strong> menu entry is hidden from sessions connected over the modem itself, since switching to console mode would tear down the caller's own connection before they could acknowledge.
+                    The two ports mix and match freely: run a Hayes modem on
+                    Port&nbsp;A and a console bridge on Port&nbsp;B, two modems,
+                    two bridges, or any combination.  Switch a port's mode from
+                    the <strong>Configuration &rarr; M (Serial Configuration) &rarr;
+                    A or B &rarr; T</strong> menu, from the GUI's <strong>Serial
+                    Port</strong> frame (open that port's <em>More&hellip;</em>
+                    popup and use the Mode dropdown), or by setting
+                    <code>serial_a_mode</code> / <code>serial_b_mode</code> to
+                    <code>modem</code> or <code>console</code> in
+                    <code>egateway.conf</code>.  All three paths hot-switch the
+                    affected port's manager thread within one poll interval —
+                    no restart required, and the other port keeps running.
+                    The per-port <strong>T</strong> menu entry is hidden from
+                    sessions connected over a modem itself, since switching
+                    that port to console mode would tear down the caller's own
+                    connection before they could acknowledge.
                 </p>
 
                 <div class="cat" id="at-commands">AT Command Reference</div>
@@ -1453,28 +1495,28 @@ ssh_gateway_auth = password</span></code></pre>
 
                 <div class="cat" id="console-mode">Console Mode (Telnet-Serial Bridge)</div>
                 <p class="dim-text">
-                    When the serial port is set to <strong>Telnet-Serial Mode</strong>, the Hayes emulator is disabled and the port is exposed via the <strong>G&nbsp;&nbsp;Serial Gateway</strong> option on the main menu. This is useful when the serial port is connected to a microcontroller, embedded console, or other RS-232 device that you want to drive directly from a remote shell.
+                    When a port is set to <strong>Telnet-Serial Mode</strong>, that port's Hayes emulator is disabled and it becomes selectable in the <strong>G&nbsp;&nbsp;Serial Gateway</strong> A/B picker.  Each port toggles independently, so Port&nbsp;A can run the Hayes modem while Port&nbsp;B serves as a console bridge (or vice versa, or both as bridges).  This is useful when a serial port is connected to a microcontroller, embedded console, or other RS-232 device that you want to drive directly from a remote shell.
                 </p>
 
                 <div class="instructions">
-                    <h3>Switching to Console Mode</h3>
+                    <h3>Switching to Console Mode (per port)</h3>
                     <ol>
-                        <li><strong>GUI:</strong> in the <strong>Serial Port</strong> frame, change the dropdown beside the <strong>Enabled</strong> checkbox from <em>Modem (AT Command) Mode</em> to <em>Telnet-Serial Mode</em>. The change saves immediately and reconfigures the running serial thread.</li>
-                        <li><strong>Telnet/SSH menu:</strong> from the <strong>Configuration</strong> menu, press <strong>T</strong> (<em>Toggle Modem/Console mode</em>). The Modem/Console submenu's header changes from <code>MODEM EMULATOR</code> to <code>SERIAL CONSOLE</code> and the Dialup Mapping / Ring Emulator items disappear (modem-only features). The <strong>T</strong> entry is hidden when you're connected over the modem itself, since flipping to console mode would tear down your own session before you could acknowledge &mdash; flip the mode from a telnet, SSH, or system-console session instead.</li>
-                        <li><strong>Config file:</strong> set <code>serial_mode = console</code> in <code>egateway.conf</code>. The change is hot-applied within one manager-poll interval; no restart required.</li>
+                        <li><strong>GUI:</strong> open the chosen port's <em>More&hellip;</em> popup from the <strong>Serial Port</strong> frame and change the <strong>Mode</strong> dropdown from <em>Modem (AT Command) Mode</em> to <em>Telnet-Serial Mode</em>.  Saving reconfigures only the changed port; the other port keeps running.</li>
+                        <li><strong>Telnet/SSH menu:</strong> from <strong>Configuration &rarr; M (Serial Configuration) &rarr; A or B</strong>, press <strong>T</strong> (<em>Toggle Modem/Console mode</em>) inside the per-port menu. The banner flips between <code>PORT A - MODEM EMULATOR</code> and <code>PORT A - SERIAL CONSOLE</code> (or B), and the Dialup Mapping / Ring Emulator items hide in console mode (they're modem-only features). The <strong>T</strong> entry is hidden when you're connected over the modem itself, since flipping that port to console mode would tear down your own session before you could acknowledge &mdash; flip the mode from a telnet, SSH, or system-console session instead.</li>
+                        <li><strong>Config file:</strong> set <code>serial_a_mode = console</code> (or <code>serial_b_mode = console</code>) in <code>egateway.conf</code>. The change is hot-applied within one manager-poll interval; no restart required.</li>
                     </ol>
 
                     <h3>Using the Bridge</h3>
                     <ol>
-                        <li>From the main menu, press <strong>G</strong> (Serial Gateway).</li>
-                        <li>The gateway prints the active framing (port, baud, data/parity/stop, flow) and asks <code>Connect now? (Y/N):</code> &mdash; press <strong>Y</strong> to enter the bridge.</li>
+                        <li>From the main menu, press <strong>G</strong> (Serial Gateway).  An A/B picker appears showing both ports' status; ineligible ports (disabled, modem mode, no device) are dimmed.</li>
+                        <li>Press <strong>A</strong> or <strong>B</strong> to pick a port.  The gateway prints that port's active framing (port, baud, data/parity/stop, flow) and asks <code>Connect now? (Y/N):</code> &mdash; press <strong>Y</strong> to enter the bridge.</li>
                         <li>Bytes flow in both directions with no AT processing or IAC injection on the wire side.</li>
                         <li>Press <strong>ESC</strong> twice in a row (PETSCII <code>&larr;</code> twice on Commodore terminals) to leave the bridge. A single ESC is forwarded to the wire on the next keystroke, so editors that need ESC (vi, emacs) keep working.</li>
                     </ol>
                 </div>
 
                 <div class="callout callout-info">
-                    <strong>Single-user:</strong> only one telnet/SSH session at a time can hold the port. Subsequent attempts get <em>Another session is already using the serial port</em> until the first session disconnects. The Serial Gateway item is also hidden from sessions that came in over the serial port itself.
+                    <strong>Single-user per port:</strong> only one telnet/SSH session at a time can hold each port, but Port&nbsp;A and Port&nbsp;B can each host their own concurrent bridge.  A second request to the same port gets <em>Another session is already using Port&nbsp;X</em> until the first session disconnects.  The Serial Gateway item is also hidden from sessions that came in over a serial port itself, and hidden when neither port is in console mode (so the menu doesn't dead-end at an empty picker).
                 </div>
             </div>
 

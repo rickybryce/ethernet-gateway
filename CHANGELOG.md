@@ -7,7 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Added
+
+#### Dual serial-port support
+- **Two physically independent serial ports** — `Port A` and `Port B` —
+  each with its own enabled flag, mode (modem emulator or telnet-serial
+  console), device path, baud, AT/S-register state, and stored
+  phone-number slots. The two ports run in separate manager threads,
+  persist AT&W state separately, and host independent console-bridge
+  slots, so the operator can run a Hayes modem on one wire and a
+  telnet-serial bridge on the other (or any other mix) without
+  cross-talk.
+- **A/B picker submenus** — the `Configuration > M` entry is now
+  *Serial Configuration* and opens a picker listing both ports' status;
+  selecting a port drops into that port's settings. The main-menu
+  *Serial Gateway* (G) likewise opens an A/B picker before bridging,
+  showing both ports' status (ineligible ports are dimmed) so the user
+  can see *why* a port isn't available.
+- **Per-port mode toggle** moved from the Configuration menu to the
+  per-port settings menu (T item).  Hidden from sessions that arrived
+  over a serial port itself, since flipping that port to console mode
+  would tear down the caller's own connection before they could
+  acknowledge.
+- **GUI Serial Port frame** redesigned: header row carries both ports'
+  *Enabled* checkboxes and a shared *Save* button; one row per port
+  beneath with a device-path dropdown, baud field, and per-port
+  *More…* button into an advanced popup (mode, framing, flow, full
+  Hayes AT state). Both popups are independent so settings can be
+  compared side-by-side.
+
+### Changed
+
+- **Config schema split** into per-port keys: every former `serial_*`
+  key is now `serial_a_*` or `serial_b_*`. Legacy single-port configs
+  auto-migrate into Port A on first read; the next save rewrites the
+  file in dual-port form. Existing single-port deployments upgrade
+  transparently with Port B disabled by default.
+- **Serial Gateway main-menu visibility** — now requires at least one
+  port to be in console mode (so the menu can't dead-end at an empty
+  picker).
+- **Dialup mapping** stays a single shared `dialup.conf` consulted by
+  both ports' modems — phone-number lookups are global, not per-port.
+- **Documentation refreshed** end-to-end (`README.md`,
+  `usermanual.html`, `index.html`) for the dual-port architecture,
+  including config-key tables, GUI screenshots/descriptions, and the
+  Console Mode walkthrough.
+
+### Fixed
+
+- **PETSCII width compliance** in the new pickers and per-port menu
+  titles: replaced em-dashes with ASCII hyphens and switched the
+  picker layout to two lines per port (role label + device/baud) so
+  worst-case lines fit the 40-col PETSCII budget.
+- **Stale help text** in `console_show_help` that told users to
+  "Press T at the Configuration menu" — T moved into the per-port
+  settings menu.
 
 ## [0.5.4] - 2026-05-06
 
