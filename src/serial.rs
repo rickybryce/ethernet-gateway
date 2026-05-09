@@ -1208,7 +1208,7 @@ fn parse_one_at_subcommand(
         }
         "I" | "I0" => vec![
             AtResult::Info(format!(
-                "Ethernet Gateway Modem Emulator v{}",
+                "Hayes-compatible Ethernet Gateway Modem Emulator v{}",
                 env!("CARGO_PKG_VERSION")
             )),
             AtResult::Ok,
@@ -1217,7 +1217,7 @@ fn parse_one_at_subcommand(
         "I2" => vec![AtResult::Ok],
         "I3" => vec![
             AtResult::Info(format!(
-                "Ethernet Gateway {}",
+                "Ethernet Gateway v{} (Hayes-compatible)",
                 env!("CARGO_PKG_VERSION")
             )),
             AtResult::Ok,
