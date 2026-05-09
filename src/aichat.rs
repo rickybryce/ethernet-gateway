@@ -63,6 +63,22 @@ pub(crate) fn ask(api_key: &str, question: &str) -> Result<String, String> {
         })
 }
 
+/// Strip bytes that would corrupt a terminal session if a remote
+/// response (or a prompt-injected reply through the LLM) tried to
+/// smuggle them: ASCII control codes (< 0x20) except tab, plus DEL
+/// and IAC.  Non-ASCII Unicode is preserved so the model can return
+/// accented or extended characters.  Bare ESC is dropped — the
+/// trailing bytes of any CSI/OSC sequence then render as visible
+/// printable text rather than as cursor moves or color changes.
+pub(crate) fn sanitize_for_terminal(s: &str) -> String {
+    s.chars()
+        .filter(|&c| {
+            let b = c as u32;
+            c == '\t' || (b >= 0x20 && b != 0x7F && b != 0xFF)
+        })
+        .collect()
+}
+
 /// Word-wrap a single line to fit within `width` columns, breaking at spaces.
 pub(crate) fn wrap_line(line: &str, width: usize) -> Vec<String> {
     if line.is_empty() {
@@ -123,7 +139,7 @@ mod tests {
         let lines = wrap_line("the quick brown fox jumps over the lazy dog", 20);
         assert!(lines.len() > 1);
         for line in &lines {
-            assert!(line.len() <= 20, "line too long: '{}'", line);
+            assert!(line.chars().count() <= 20, "line too long: '{}'", line);
         }
     }
 
@@ -146,11 +162,36 @@ mod tests {
     }
 
     #[test]
+    fn test_sanitize_strips_ansi_escape() {
+        assert_eq!(sanitize_for_terminal("\x1b[31mred\x1b[0m"), "[31mred[0m");
+    }
+
+    #[test]
+    fn test_sanitize_strips_bare_cr_and_nul() {
+        assert_eq!(sanitize_for_terminal("a\rb\0c"), "abc");
+    }
+
+    #[test]
+    fn test_sanitize_strips_iac() {
+        assert_eq!(sanitize_for_terminal("ok\u{00ff}done"), "okdone");
+    }
+
+    #[test]
+    fn test_sanitize_keeps_tab_and_unicode() {
+        assert_eq!(sanitize_for_terminal("a\tb café"), "a\tb café");
+    }
+
+    #[test]
+    fn test_sanitize_strips_del() {
+        assert_eq!(sanitize_for_terminal("a\x7fb"), "ab");
+    }
+
+    #[test]
     fn test_wrap_line_petscii_width() {
         let text = "This is a test of the PETSCII word wrapping at 38 columns wide";
         let lines = wrap_line(text, 38);
         for line in &lines {
-            assert!(line.len() <= 38, "line '{}' exceeds 38 chars", line);
+            assert!(line.chars().count() <= 38, "line '{}' exceeds 38 chars", line);
         }
     }
 }

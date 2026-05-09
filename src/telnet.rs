@@ -225,13 +225,15 @@ pub(crate) fn is_locked_out(lockouts: &LockoutMap, ip: IpAddr) -> bool {
 
 pub(crate) fn record_auth_failure(lockouts: &LockoutMap, ip: IpAddr) -> u32 {
     let mut map = lockouts.lock().unwrap_or_else(|e| e.into_inner());
+    // Drop entries past the lockout window so the map doesn't grow one
+    // entry per distinct attacker IP forever on a long-running public
+    // instance.  After this sweep, every surviving entry is within the
+    // active window, so a fresh `or_insert` below either reuses a
+    // still-counting entry or starts a new one.
+    map.retain(|_, (_, when)| when.elapsed() < LOCKOUT_DURATION);
     let entry = map
         .entry(ip)
         .or_insert((0, std::time::Instant::now()));
-    // Reset counter if lockout period has expired
-    if entry.1.elapsed() >= LOCKOUT_DURATION {
-        *entry = (0, std::time::Instant::now());
-    }
     entry.0 += 1;
     entry.1 = std::time::Instant::now();
     entry.0
@@ -6592,9 +6594,18 @@ impl TelnetSession {
 
             match result {
                 Ok(answer) => {
-                    let lines: Vec<String> = answer
+                    // Normalize CR / CRLF to LF first — `.lines()` splits on
+                    // \n and \r\n but leaves a bare \r mid-string, where a
+                    // prompt-injected reply could use it to overwrite the
+                    // prompt on ANSI terminals.  Then strip control bytes,
+                    // ESC, and IAC per line so the LLM can't smuggle cursor
+                    // moves, screen wipes, or telnet commands through the
+                    // chat surface.
+                    let normalized = answer.replace("\r\n", "\n").replace('\r', "\n");
+                    let lines: Vec<String> = normalized
                         .lines()
-                        .flat_map(|line| crate::aichat::wrap_line(line, content_width))
+                        .map(crate::aichat::sanitize_for_terminal)
+                        .flat_map(|line| crate::aichat::wrap_line(&line, content_width))
                         .collect();
 
                     match self.ai_show_answer(&question, &lines).await? {
@@ -12857,6 +12868,41 @@ mod tests {
             1,
             "counter must reset after the lockout window expires"
         );
+    }
+
+    /// A new failure from any IP should sweep stale entries from
+    /// other IPs out of the map, so a long-running public instance
+    /// doesn't accumulate one entry per distinct attacker forever.
+    #[test]
+    fn test_lockout_prunes_stale_entries() {
+        let lockouts: LockoutMap = Arc::new(Mutex::new(HashMap::new()));
+        let stale_ip: IpAddr = "10.0.0.1".parse().unwrap();
+        let fresh_ip: IpAddr = "127.0.0.1".parse().unwrap();
+
+        record_auth_failure(&lockouts, stale_ip);
+
+        // Backdate the stale entry past the lockout window.
+        let now = std::time::Instant::now();
+        let backdate_target = LOCKOUT_DURATION + std::time::Duration::from_secs(1);
+        let Some(stale) = now.checked_sub(backdate_target) else {
+            eprintln!(
+                "test_lockout_prunes_stale_entries: skipping on a freshly-booted \
+                 host (Instant epoch < LOCKOUT_DURATION)"
+            );
+            return;
+        };
+        {
+            let mut map = lockouts.lock().unwrap();
+            map.entry(stale_ip).and_modify(|e| e.1 = stale);
+            assert_eq!(map.len(), 1);
+        }
+
+        // Activity from a different IP should evict the stale entry.
+        record_auth_failure(&lockouts, fresh_ip);
+        let map = lockouts.lock().unwrap();
+        assert!(!map.contains_key(&stale_ip), "stale entry should be pruned");
+        assert!(map.contains_key(&fresh_ip));
+        assert_eq!(map.len(), 1);
     }
 
     // ─── Known hosts ─────────────────────────────────────
