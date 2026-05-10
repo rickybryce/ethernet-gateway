@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes._
 
-## [0.5.5] - 2026-05-08
+## [0.5.5] - 2026-05-10
 
 ### Added
 
@@ -56,6 +56,9 @@ _No unreleased changes._
   `usermanual.html`, `index.html`) for the dual-port architecture,
   including config-key tables, GUI screenshots/descriptions, and the
   Console Mode walkthrough.
+- **`ATI0` / `ATI3` identification strings** now advertise the modem as
+  Hayes-compatible, matching the behavior callers (BBS dialers, vintage
+  terminal software) expect from a Hayes ID query.
 
 ### Fixed
 
@@ -66,6 +69,18 @@ _No unreleased changes._
 - **Stale help text** in `console_show_help` that told users to
   "Press T at the Configuration menu" — T moved into the per-port
   settings menu.
+
+### Security
+
+- **AI-chat output sanitization** — replies from the Groq API are now
+  normalized (`\r\n`/`\r` → `\n`) and passed through a
+  `sanitize_for_terminal` filter before display, stripping ANSI escape
+  sequences, control bytes, lone CRs, and telnet IAC so a prompt-injected
+  reply can't smuggle terminal-control payloads through the chat surface.
+- **Auth-lockout map bounded** — `record_auth_failure` now sweeps entries
+  past the lockout window on every call, so a long-running public-facing
+  instance can no longer accumulate one entry per distinct attacker IP
+  indefinitely.
 
 ## [0.5.4] - 2026-05-06
 
