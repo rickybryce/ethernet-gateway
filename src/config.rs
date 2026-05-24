@@ -187,8 +187,6 @@ const DEFAULT_SERIAL_FLOW_MODE: u8 = 0;
 const DEFAULT_SERIAL_DCD_MODE: u8 = 1;
 const DEFAULT_SSH_ENABLED: bool = false;
 const DEFAULT_SSH_PORT: u16 = 2222;
-const DEFAULT_SSH_USERNAME: &str = "admin";
-const DEFAULT_SSH_PASSWORD: &str = "changeme";
 /// Default SSH-gateway authentication mode: "key" uses the gateway's
 /// auto-generated Ed25519 client key; "password" prompts the operator
 /// for a remote password on each connect.  Password is the default
@@ -444,10 +442,6 @@ pub struct Config {
     pub ssh_enabled: bool,
     /// SSH server port.
     pub ssh_port: u16,
-    /// SSH login username (independent of telnet credentials).
-    pub ssh_username: String,
-    /// SSH login password (independent of telnet credentials).
-    pub ssh_password: String,
     /// Authentication mode used when the operator connects to a remote
     /// SSH server through the outbound SSH Gateway.  Accepted values:
     /// "key" (uses the gateway's auto-generated Ed25519 client key) or
@@ -507,8 +501,6 @@ impl Default for Config {
             serial_b: SerialPortConfig::default(),
             ssh_enabled: DEFAULT_SSH_ENABLED,
             ssh_port: DEFAULT_SSH_PORT,
-            ssh_username: DEFAULT_SSH_USERNAME.into(),
-            ssh_password: DEFAULT_SSH_PASSWORD.into(),
             ssh_gateway_auth: DEFAULT_SSH_GATEWAY_AUTH.into(),
         }
     }
@@ -595,7 +587,7 @@ fn read_config_file(path: &str) -> Config {
         }
     }
 
-    Config {
+    let mut cfg = Config {
         telnet_enabled: map
             .get("telnet_enabled")
             .map(|v| v.eq_ignore_ascii_case("true"))
@@ -817,22 +809,42 @@ fn read_config_file(path: &str) -> Config {
             .and_then(|v| v.parse().ok())
             .filter(|&v: &u16| v >= 1)
             .unwrap_or(DEFAULT_SSH_PORT),
-        ssh_username: map
-            .get("ssh_username")
-            .filter(|v| !v.is_empty())
-            .cloned()
-            .unwrap_or_else(|| DEFAULT_SSH_USERNAME.into()),
-        ssh_password: map
-            .get("ssh_password")
-            .filter(|v| !v.is_empty())
-            .cloned()
-            .unwrap_or_else(|| DEFAULT_SSH_PASSWORD.into()),
         ssh_gateway_auth: map
             .get("ssh_gateway_auth")
             .map(|v| v.trim().to_ascii_lowercase())
             .filter(|v| matches!(v.as_str(), "key" | "password"))
             .unwrap_or_else(|| DEFAULT_SSH_GATEWAY_AUTH.into()),
+    };
+
+    // ── Legacy ssh_username / ssh_password migration ───────────
+    // Older configs kept independent credentials for telnet and SSH
+    // under `ssh_username` / `ssh_password`.  Those are now merged
+    // into the unified `username` / `password` pair shared across
+    // telnet, SSH, and the web UI.  If an upgrading config still has
+    // the legacy keys with a non-default value AND the unified pair
+    // is still at the factory default, adopt the legacy SSH value so
+    // the operator's working SSH login keeps working until they
+    // explicitly change it.  This keeps a one-time silent path open
+    // while letting the unified pair fully replace the old keys on
+    // the next save.
+    if cfg.username == DEFAULT_USERNAME
+        && let Some(legacy) = map.get("ssh_username").filter(|v| !v.is_empty() && v.as_str() != DEFAULT_USERNAME)
+    {
+        glog!(
+            "Note: migrating legacy ssh_username={:?} to unified username (telnet+SSH+web share creds now).",
+            legacy,
+        );
+        cfg.username = legacy.clone();
     }
+    if cfg.password == DEFAULT_PASSWORD
+        && let Some(legacy) = map.get("ssh_password").filter(|v| !v.is_empty() && v.as_str() != DEFAULT_PASSWORD)
+    {
+        glog!(
+            "Note: migrating legacy ssh_password to unified password (telnet+SSH+web share creds now)."
+        );
+        cfg.password = legacy.clone();
+    }
+    cfg
 }
 
 /// Read one port's settings from `map` under `prefix` (e.g. `"serial_a"`).
@@ -1250,19 +1262,16 @@ fn write_config_file(path: &str, cfg: &Config) {
     write_serial_port_section(&mut content, "Serial Port B", "serial_b", &cfg.serial_b);
 
     content.push_str("\
-# SSH server interface (encrypted access to the gateway)
-# Set ssh_enabled = true to activate. Uses its own credentials.
+# SSH server interface (encrypted access to the gateway).  Set
+# ssh_enabled = true to activate.  Authenticates against the unified
+# `username` / `password` above — telnet, SSH, and the web UI share
+# one credential pair.
 ");
     write_kv(&mut content, "ssh_enabled", cfg.ssh_enabled);
     content.push('\n');
 
     content.push_str("# SSH server port\n");
     write_kv(&mut content, "ssh_port", cfg.ssh_port);
-    content.push('\n');
-
-    content.push_str("# SSH credentials (independent of telnet credentials)\n");
-    write_kv_str(&mut content, "ssh_username", &cfg.ssh_username);
-    write_kv_str(&mut content, "ssh_password", &cfg.ssh_password);
     content.push('\n');
 
     content.push_str("\
@@ -1608,8 +1617,6 @@ fn apply_config_key(cfg: &mut Config, key: &str, value: &str) {
                 cfg.ssh_port = v;
             }
         }
-        "ssh_username" => cfg.ssh_username = value.to_string(),
-        "ssh_password" => cfg.ssh_password = value.to_string(),
         "ssh_gateway_auth" => {
             let lower = value.trim().to_ascii_lowercase();
             if matches!(lower.as_str(), "key" | "password") {
@@ -1832,8 +1839,10 @@ mod tests {
         }
         assert!(!cfg.ssh_enabled);
         assert_eq!(cfg.ssh_port, 2222);
-        assert_eq!(cfg.ssh_username, "admin");
-        assert_eq!(cfg.ssh_password, "changeme");
+        // Unified credentials: telnet, SSH, and the web UI all
+        // authenticate against the same username/password now.
+        assert_eq!(cfg.username, "admin");
+        assert_eq!(cfg.password, "changeme");
         // Web config server defaults: opt-in, port 8080 (the canonical
         // "alternate HTTP" port — high enough to avoid `<1024 needs
         // root` and unlikely to collide with system services).
@@ -1887,8 +1896,8 @@ mod tests {
         // SSH fields should also get defaults when missing from file
         assert!(!cfg.ssh_enabled);
         assert_eq!(cfg.ssh_port, 2222);
-        assert_eq!(cfg.ssh_username, "admin");
-        assert_eq!(cfg.ssh_password, "changeme");
+        // SSH no longer has its own credential pair — the unified
+        // `username` / `password` covers it (asserted above).
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2062,8 +2071,6 @@ mod tests {
             },
             ssh_enabled: true,
             ssh_port: 2222,
-            ssh_username: "sshuser".into(),
-            ssh_password: "sshpass".into(),
             ssh_gateway_auth: "password".into(),
         };
         write_config_file(path.to_str().unwrap(), &original);
@@ -2150,8 +2157,6 @@ mod tests {
         assert_eq!(loaded.serial_b, original.serial_b);
         assert_eq!(loaded.ssh_enabled, original.ssh_enabled);
         assert_eq!(loaded.ssh_port, original.ssh_port);
-        assert_eq!(loaded.ssh_username, original.ssh_username);
-        assert_eq!(loaded.ssh_password, original.ssh_password);
         assert_eq!(loaded.ssh_gateway_auth, original.ssh_gateway_auth);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -2290,8 +2295,6 @@ mod tests {
             "serial_b_stored_3",
             "ssh_enabled",
             "ssh_port",
-            "ssh_username",
-            "ssh_password",
             "ssh_gateway_auth",
         ];
 
@@ -2497,11 +2500,86 @@ mod tests {
         apply_config_key(&mut cfg, "ssh_port", "notanumber");
         assert_eq!(cfg.ssh_port, 3333);
 
+        // Legacy ssh_username / ssh_password keys are no longer
+        // recognized by apply_config_key — they only get a one-time
+        // migration at file-load time (covered by the dedicated
+        // migration tests below).  Confirm that pushing them through
+        // apply_config_key is a silent no-op and does NOT alter the
+        // unified `username` / `password` field.
+        let before_user = cfg.username.clone();
+        let before_pass = cfg.password.clone();
         apply_config_key(&mut cfg, "ssh_username", "sshuser");
-        assert_eq!(cfg.ssh_username, "sshuser");
-
         apply_config_key(&mut cfg, "ssh_password", "sshpass");
-        assert_eq!(cfg.ssh_password, "sshpass");
+        assert_eq!(cfg.username, before_user);
+        assert_eq!(cfg.password, before_pass);
+    }
+
+    #[test]
+    fn test_legacy_ssh_credential_migration() {
+        // Upgrading from a pre-merge config: the file has the legacy
+        // ssh_username / ssh_password keys with non-default values
+        // and the unified pair is still at the factory default.  On
+        // load we should adopt the legacy SSH values into the
+        // unified pair so the operator's working SSH login keeps
+        // working until they change it deliberately.
+        let dir = std::env::temp_dir().join("xmodem_test_ssh_cred_migration");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("legacy.conf");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "ssh_username = oldsshuser").unwrap();
+        writeln!(f, "ssh_password = oldsshpass").unwrap();
+        drop(f);
+
+        let cfg = read_config_file(path.to_str().unwrap());
+        assert_eq!(cfg.username, "oldsshuser");
+        assert_eq!(cfg.password, "oldsshpass");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_legacy_ssh_migration_does_not_overwrite_custom_creds() {
+        // If the operator already customized the telnet (now unified)
+        // username/password, the legacy SSH migration must NOT
+        // clobber it — the unified pair wins because the operator
+        // explicitly set it.
+        let dir = std::env::temp_dir().join("xmodem_test_ssh_no_overwrite");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("both.conf");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "username = customuser").unwrap();
+        writeln!(f, "password = custompass").unwrap();
+        writeln!(f, "ssh_username = ignoreme").unwrap();
+        writeln!(f, "ssh_password = ignoremetoo").unwrap();
+        drop(f);
+
+        let cfg = read_config_file(path.to_str().unwrap());
+        assert_eq!(cfg.username, "customuser");
+        assert_eq!(cfg.password, "custompass");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_save_drops_legacy_ssh_credential_keys() {
+        // After a save the on-disk file must NOT contain
+        // ssh_username / ssh_password keys — the unified pair is the
+        // only credential surface going forward.
+        let dir = std::env::temp_dir().join("xmodem_test_ssh_drop_legacy");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("written.conf");
+        write_config_file(path.to_str().unwrap(), &Config::default());
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !written.contains("ssh_username"),
+            "writer still emits legacy ssh_username"
+        );
+        assert!(
+            !written.contains("ssh_password"),
+            "writer still emits legacy ssh_password"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

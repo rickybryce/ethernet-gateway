@@ -271,8 +271,15 @@ impl russh::server::Server for SshServer {
             restart: self.restart.clone(),
             session_count: self.session_count.clone(),
             max_sessions: self.max_sessions,
-            ssh_username: cfg.ssh_username.clone(),
-            ssh_password: cfg.ssh_password.clone(),
+            // SSH, telnet, and the web UI all authenticate against the
+            // same unified `username` / `password` pair.  The earlier
+            // ssh_username / ssh_password config fields were dropped
+            // — a single credential pair is simpler to manage and
+            // matches operator expectations.  Snapshot at connect
+            // time so a mid-session config save can't invalidate an
+            // already-authenticated connection.
+            username: cfg.username.clone(),
+            password: cfg.password.clone(),
             peer_addr: peer_addr.map(|a| a.ip()),
             duplex_writer: None,
             session_writers: self.session_writers.clone(),
@@ -288,8 +295,11 @@ struct SshHandler {
     restart: Arc<AtomicBool>,
     session_count: Arc<AtomicUsize>,
     max_sessions: usize,
-    ssh_username: String,
-    ssh_password: String,
+    /// Snapshot of `cfg.username` taken at connect time (telnet, SSH,
+    /// and the web UI share one credential pair).
+    username: String,
+    /// Snapshot of `cfg.password` taken at connect time.
+    password: String,
     peer_addr: Option<std::net::IpAddr>,
     /// Write half of the duplex bridge to the TelnetSession.
     /// Set once a shell is opened; prevents duplicate shell requests.
@@ -332,9 +342,9 @@ impl russh::server::Handler for SshHandler {
         }
         // Constant-time comparison to prevent timing attacks.
         let user_ok =
-            telnet::constant_time_eq(user.as_bytes(), self.ssh_username.as_bytes());
+            telnet::constant_time_eq(user.as_bytes(), self.username.as_bytes());
         let pass_ok =
-            telnet::constant_time_eq(password.as_bytes(), self.ssh_password.as_bytes());
+            telnet::constant_time_eq(password.as_bytes(), self.password.as_bytes());
         if user_ok && pass_ok {
             if let Some(ip) = self.peer_addr {
                 telnet::clear_lockout(&self.lockouts, ip);

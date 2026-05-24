@@ -7,7 +7,130 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Added
+
+#### Configuration web server
+- **Optional HTTP listener** that renders the same settings page the
+  desktop GUI does, in a browser.  Off by default; toggle in the GUI
+  Server frame (new "Web Server" row between Telnet and Kermit) or
+  the telnet `Configuration > Server Configuration` menu's
+  `W` / `B` keys.  Port defaults to 8080.
+- **Hand-rolled HTTP/1.1 on tokio** (no new dependencies) implementing
+  `GET /` (settings page), `GET /logo.png` (the same logo the GUI
+  uses), `GET /logs` (2-second polled log tail), `GET /serial-ports`
+  (live device enumeration for the dropdown refresh), and
+  `POST /save` (config persist + optional restart).
+- **Per-frame Save buttons** matching the GUI's three behaviors:
+  Server's *Save and Restart* (full server restart cycles through
+  `main.rs` exactly the way the GUI does), Serial's *Save* (just
+  reloads serial managers via `serial::restart_all_serial`), and the
+  plain *Save* on every other frame (persist only).  Unknown action
+  values fall back to plain Save so a hand-crafted POST with a typo
+  can't accidentally restart the server.
+- **POST → 303 See Other → GET** pattern: the save handler redirects
+  to `/?notice=Configuration%20saved.` so a browser reload after
+  submit doesn't resubmit the form.  Client-side
+  `history.replaceState` strips the `?notice=` query right after
+  render so the banner appears once per save instead of persisting
+  across refreshes.
+- **Serial-port dropdown + refresh button** populated server-side
+  from `serialport::available_ports()` (the same source the GUI
+  ComboBox uses); a small ↻ button next to each port re-scans via
+  `GET /serial-ports` and rewrites both selects' options in-place
+  without a full page reload.  Operator's selection is preserved
+  across refreshes, and a saved port that isn't currently detected
+  stays visible with a `(saved)` suffix.
+- **CSS Grid Server-frame layout** so the two `Port:` colons in each
+  column line up across rows; per-port inputs sized to 6 chars (any
+  valid TCP port fits) so the More button fits on row 1 alongside
+  Telnet + Web Server.
+- **JS modal popups for the More views**, plus inline confirmation
+  dialogs that warn before disabling the web server or changing the
+  web port — both actions break the operator's current connection.
+- **Connection-breaking notice** included in the post-save banner
+  when the operator's just-confirmed change will sever the browser
+  session (e.g. "Web server port changed to 9090. Reconnect at the
+  new port.").
+
+#### Web auth and lockout
+- **HTTP Basic Auth** gated on the same `security_enabled` flag that
+  guards telnet.  Uses the project's existing length-leak-resistant
+  `constant_time_eq` from `telnet.rs`.
+- **Shared brute-force lockout map** with telnet and SSH.  Three
+  failures across any of the three protocols trip a 5-minute IP ban
+  (the same `LockoutMap` the telnet listener uses); failed web
+  attempts respond with `429 Too Many Requests` + `Retry-After: 300`
+  once the threshold is crossed.  The 429 fires *before* the auth
+  check on every subsequent request, so a banned IP can't keep us
+  busy parsing malformed POSTs either.
+- **Same IP-safety allowlist as telnet**: when login is not required
+  and `disable_ip_safety` is off, only private / loopback /
+  link-local source IPs are accepted (and `*.*.*.1` gateway
+  addresses are rejected).
+
+#### Web defense-in-depth
+- 30-second read timeout on `read_request` to stop slow-loris clients
+  from parking a tokio task indefinitely.
+- `MAX_INFLIGHT = 16` concurrent connections with a `Drop`-guarded
+  slot release; excess connections get a `503 Service Unavailable` +
+  `Retry-After: 5` rather than being parked behind the read timeout.
+- 16 KB cap on request headers, 64 KB cap on POST body — bounded so
+  a hostile peer can't drive the per-connection buffer to OOM.
+- UTF-8 round-trip safe: `url_decode` accumulates percent-decoded
+  bytes into a `Vec<u8>` then runs `from_utf8_lossy`, so values like
+  `weather_zip = 日本語` survive the form → config-file → form
+  cycle without corruption.
+
+### Changed
+
+#### Unified telnet / SSH / web credentials
+- **One username / password pair** now covers the telnet menu, the
+  SSH server, and the web configuration UI.  The old per-protocol
+  `ssh_username` / `ssh_password` config keys are gone.  Defaults
+  unchanged at `admin` / `changeme`.
+- **One-time migration**: if the operator's `egateway.conf` still has
+  non-default `ssh_username` / `ssh_password` values *and* the
+  unified `username` / `password` are still at the factory defaults,
+  the legacy SSH values are adopted into the unified pair on load
+  (with a `Note: migrating legacy ssh_username=…` log line).  Once
+  the next save runs, the legacy keys disappear from the written
+  file.  If both pairs were already customized, the unified pair
+  wins (the legacy SSH values are silently dropped).
+- **GUI Security frame** collapses from two rows (separate Telnet /
+  SSH credential rows) to one `Login User / Pass` row + a spacer
+  that keeps the frame the same height as the adjacent Server frame.
+- **Telnet Security menu** drops the `S` (Set SSH username) /
+  `W` (Set SSH password) items; the remaining `U` / `P` items now
+  read `Set username` / `Set password` (no more "telnet"
+  qualifier).  Status shows a single `Username:` / `Password:`
+  pair instead of two.
+- **Help screens** under `Configuration > Security` and
+  `Configuration > Server Configuration` updated: the security
+  help notes "One username/password covers telnet, SSH, and the
+  web UI" and the server help describes the new `W` (Toggle Web) /
+  `B` (Set Web port) keys.
+
+#### GUI Server frame
+- Fixed-width listener column slots so the two `Port:` colons line
+  up between rows — the same colon-alignment the web frame gets
+  from CSS Grid.  The earlier hand-tuned `add_space(16.0)` left the
+  colons at different X positions because "Telnet" / "SSH" and
+  "Web Server" / "Kermit Server" have different intrinsic widths.
+- **More button moved up to row 1** (with Telnet + Web Server),
+  mirroring the web layout.
+
+#### GUI Serial Ports frame (web-side parity adjustments)
+- Web Serial frame's header now carries both ports' Enabled
+  checkboxes alongside per-port titles ("Serial Port A" / "Serial
+  Port B"), matching the GUI's layout exactly.  Per-port rows are
+  now `Port X: [select ▼] [↻] Baud: [...] [More...]` with the More
+  button kept on the same line via a no-wrap row class.
+
+#### Logger
+- Added a parallel non-draining `snapshot(max)` API alongside the
+  existing `drain()`.  The GUI keeps using `drain()` for its
+  per-frame console accumulator; the web `/logs` endpoint polls
+  `snapshot()` so the two views don't compete for log lines.
 
 ## [0.5.5] - 2026-05-10
 

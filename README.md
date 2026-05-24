@@ -422,7 +422,8 @@ return to the menu.
 Most settings can be changed from within a telnet or SSH session using the
 **C** (Configuration) menu, which provides submenus for:
 
-- **E** Security -- toggle login requirement, set telnet/SSH credentials
+- **E** Security -- toggle login requirement, set the unified username /
+  password used by telnet, SSH, and the configuration web UI
 - **G** Gateway Configuration -- outbound Telnet and SSH Gateway options
 - **M** Serial Configuration -- opens an A/B picker submenu listing both
   ports with their current status (Disabled / Modem mode / Console
@@ -600,9 +601,11 @@ ssh_enabled = false
 # SSH server port
 ssh_port = 2222
 
-# SSH credentials (independent of telnet credentials)
-ssh_username = admin
-ssh_password = changeme
+# SSH, telnet, and the web UI share the unified `username` / `password`
+# above — there are no separate SSH credentials anymore.  An upgrading
+# config with non-default legacy `ssh_username` / `ssh_password` keys
+# is migrated into the unified pair on first load (only when the
+# unified pair is still at the factory defaults).
 ```
 
 ### Setting Up Authentication
@@ -749,10 +752,12 @@ encryption is preferred over plaintext telnet.
 ### Enabling the SSH Server
 
 Use Configuration > Server Configuration to toggle SSH and set the port, and
-Configuration > Security to set SSH credentials. Or edit `egateway.conf` by hand:
+Configuration > Security to set the login credentials. Or edit `egateway.conf`
+by hand:
 
 1. Set `ssh_enabled = true`
-2. Change `ssh_username` and `ssh_password` to your desired credentials
+2. Change `username` and `password` to your desired credentials (the same pair
+   is used by telnet, SSH, and the web configuration UI)
 3. Optionally change `ssh_port` (default 2222)
 4. Restart the server
 
@@ -771,17 +776,27 @@ system as a telnet connection, using ANSI terminal mode. All features (file
 transfer, SSH/telnet gateway, browser, AI chat, modem emulator, weather) are
 available.
 
-### SSH vs Telnet Credentials
+### SSH, Telnet, and Web UI Credentials
 
-The SSH server has its own username and password (`ssh_username` /
-`ssh_password`), independent of the telnet credentials (`username` /
-`password`). When `egateway.conf` is first created, both sets default to the same
-values (`admin` / `changeme`). After that, each set can be changed
-independently.
+A single `username` / `password` pair in `egateway.conf` is used by **all
+three** authenticated interfaces — the telnet menu, the SSH server, and the
+configuration web UI.  The factory defaults are `admin` / `changeme`; change
+them via Configuration > Security in the telnet menu, the Security frame in the
+GUI / web UI, or by editing `egateway.conf` directly.
 
-**Note:** SSH credentials in `egateway.conf` are stored in plaintext. While the
-SSH connection itself is encrypted, the config file is not. Protect it with
-appropriate file permissions.
+If you're upgrading from a release that still had the separate
+`ssh_username` / `ssh_password` keys, the first time the new server reads your
+config those legacy values are migrated into the unified pair *only* when the
+unified pair is still at the factory defaults — so a setup that customised the
+SSH login keeps working without intervention.  Once the next save runs, the
+legacy keys are dropped from the file.
+
+Three failed logins from the same source IP — across any of telnet, SSH, or
+the web UI — trip a 5-minute lockout that affects all three protocols.
+
+**Note:** credentials in `egateway.conf` are stored in plaintext. While SSH
+and HTTPS-fronted access to the web UI would be encrypted on the wire, the
+config file is not. Protect it with appropriate file permissions.
 
 ## SSH Gateway
 

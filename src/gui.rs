@@ -195,7 +195,10 @@ fn spawn_folder_picker(
 }
 
 /// Enumerate available serial ports, returning their device paths.
-fn detect_serial_ports() -> Vec<String> {
+/// `pub(crate)` so the web server's serial-port dropdown can populate
+/// from the same source the desktop GUI uses — both surfaces show
+/// the same list and refresh through the same code path.
+pub(crate) fn detect_serial_ports() -> Vec<String> {
     match serialport::available_ports() {
         Ok(ports) => ports.into_iter().map(|p| p.port_name).collect(),
         Err(e) => {
@@ -427,28 +430,57 @@ impl App {
     /// security never needs a confirmation; the change persists
     /// immediately.
     fn draw_server_controls(&mut self, ui: &mut egui::Ui, with_more_button: bool) {
+        // Fixed-width checkbox columns so the two `Port:` labels line
+        // up between rows — the same colon-alignment the web frame
+        // gets from CSS Grid.  Sized just wider than the longest
+        // label in each column (Telnet in col 1, Kermit Server in
+        // col 2) so the row total + the right-floated More button
+        // fits inside the half-width frame.  An earlier pass set
+        // these too generously (110 / 170) and the More button
+        // overlapped the Web port input — there's a limit to how
+        // wide the cols can be before the More button collides
+        // with the input.
+        //
+        // Implementation note: `allocate_ui_with_layout(vec2(W, 0))`
+        // does NOT actually reserve W of horizontal space — it caps
+        // the *maximum* width but lets the cursor advance by the
+        // smaller of (desired, actual).  So a short label like "SSH"
+        // would shrink its slot back down, breaking the alignment.
+        // Render the checkbox, measure its rect, then pad up to the
+        // column width with `add_space` — that always advances by
+        // the exact requested amount.
+        const COL1_W: f32 = 100.0;
+        const COL2_W: f32 = 140.0;
+        const PORT_W: f32 = 50.0;
+        const GUTTER: f32 = 12.0;
+
+        // Row 1: Telnet + Web Server + right-aligned More button.
+        // More moved up to row 1 to mirror the web layout — the
+        // upper row carries the button, the lower row stays clean.
         ui.horizontal(|ui| {
-            ui.checkbox(&mut self.cfg.telnet_enabled, "Telnet");
-            labeled_field(ui, "Port:", &mut self.telnet_port_buf, 50.0);
-            // Web Server shares the Telnet row — paired with Kermit on
-            // the SSH row below it.  The wide gutter visually separates
-            // the two listeners so the row doesn't read as one cluster.
-            ui.add_space(24.0);
-            ui.checkbox(&mut self.cfg.web_enabled, "Web Server");
-            labeled_field(ui, "Port:", &mut self.web_port_buf, 50.0);
+            let resp = ui.checkbox(&mut self.cfg.telnet_enabled, "Telnet");
+            pad_to(ui, COL1_W, resp.rect.width());
+            labeled_field(ui, "Port:", &mut self.telnet_port_buf, PORT_W);
+            ui.add_space(GUTTER);
+            let resp = ui.checkbox(&mut self.cfg.web_enabled, "Web Server");
+            pad_to(ui, COL2_W, resp.rect.width());
+            labeled_field(ui, "Port:", &mut self.web_port_buf, PORT_W);
+            if with_more_button && right_aligned_small_button(ui, "More...") {
+                self.server_popup_open = true;
+            }
         });
+        // Row 2: SSH + Kermit Server.  Same column widths so the
+        // colons line up with row 1.  The Kermit checkbox keeps its
+        // off→on security-warning popup interlock.
         ui.horizontal(|ui| {
-            ui.checkbox(&mut self.cfg.ssh_enabled, "SSH");
-            ui.add_space(16.0);
-            labeled_field(ui, "Port:", &mut self.ssh_port_buf, 50.0);
-            // Kermit Server shares the SSH row.  The wide gutter makes
-            // the second listener visually distinct from the first
-            // pair so the row doesn't read as one four-field cluster.
-            ui.add_space(24.0);
+            let resp = ui.checkbox(&mut self.cfg.ssh_enabled, "SSH");
+            pad_to(ui, COL1_W, resp.rect.width());
+            labeled_field(ui, "Port:", &mut self.ssh_port_buf, PORT_W);
+            ui.add_space(GUTTER);
             let mut local = self.cfg.kermit_server_enabled;
             let prev = local;
             let resp = ui.checkbox(&mut local, "Kermit Server");
-            labeled_field(ui, "Port:", &mut self.kermit_server_port_buf, 50.0);
+            pad_to(ui, COL2_W, resp.rect.width());
             if resp.changed() && !self.kermit_server_warn_open {
                 if local && !prev {
                     // Off → on: revert visible state, open the
@@ -463,9 +495,7 @@ impl App {
                     logger::log("Kermit server disabled.".into());
                 }
             }
-            if with_more_button && right_aligned_small_button(ui, "More...") {
-                self.server_popup_open = true;
-            }
+            labeled_field(ui, "Port:", &mut self.kermit_server_port_buf, PORT_W);
         });
     }
 
@@ -1201,6 +1231,19 @@ fn labeled_field(ui: &mut egui::Ui, label: &str, buf: &mut String, width: f32) {
     singleline_with_menu(ui, buf, false, Some(width));
 }
 
+/// Helper: pad the horizontal cursor so the just-rendered widget
+/// occupies exactly `target_w` total width.  `used_w` is the widget's
+/// actual width from its Response.rect.  Used by the Server frame's
+/// listener rows to align the `Port:` labels between rows even when
+/// the preceding checkbox labels differ in length (Telnet vs. SSH,
+/// Web Server vs. Kermit Server).
+fn pad_to(ui: &mut egui::Ui, target_w: f32, used_w: f32) {
+    let remaining = target_w - used_w;
+    if remaining > 0.0 {
+        ui.add_space(remaining);
+    }
+}
+
 /// Helper: render a small button right-aligned in the current horizontal
 /// row.  Returns true if the button was clicked this frame.
 fn right_aligned_small_button(ui: &mut egui::Ui, label: &str) -> bool {
@@ -1530,16 +1573,24 @@ impl eframe::App for App {
                                     }
                                 });
                                 ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new("Telnet").color(AMBER_DIM));
+                                    // Telnet, SSH, and the web UI share the
+                                    // same credential pair now — one User
+                                    // and one Pass field cover all three.
+                                    // Earlier the frame rendered separate
+                                    // Telnet and SSH rows; the dimmed
+                                    // "Login" label preserves the visual
+                                    // weight of the leading row label.
+                                    ui.label(egui::RichText::new("Login").color(AMBER_DIM));
                                     labeled_field(ui, "User:", &mut self.cfg.username, 70.0);
                                     labeled_password(ui, "Pass:", &mut self.cfg.password);
                                 });
-                                ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new("SSH").color(AMBER_DIM));
-                                    ui.add_space(16.0);
-                                    labeled_field(ui, "User:", &mut self.cfg.ssh_username, 70.0);
-                                    labeled_password(ui, "Pass:", &mut self.cfg.ssh_password);
-                                });
+                                // Spacer row replaces the dropped SSH row
+                                // so the Security frame retains the same
+                                // height as the adjacent Server frame.
+                                // Without this the Security frame would
+                                // shrink and break the side-by-side
+                                // row-pair layout.
+                                ui.allocate_space(egui::vec2(0.0, line_h));
                             });
                         },
                     );
@@ -1742,7 +1793,13 @@ impl eframe::App for App {
             .open(&mut server_open)
             .resizable(true)
             .collapsible(false)
-            .default_width(440.0)
+            // 462 ≈ 440 × 1.05.  The previous 440-wide window clipped
+            // the trailing digit of 4-digit port values inside the
+            // listener-grid input boxes; widening by ~5 % gives the
+            // port inputs visible padding without bumping the popup
+            // big enough to look misplaced against the half-width
+            // frame underneath.
+            .default_width(462.0)
             .frame(popup_frame)
             .show(&ctx, |ui| {
                 // Lighter-green text-entry backgrounds scoped to this popup.

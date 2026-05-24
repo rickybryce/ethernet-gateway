@@ -9047,23 +9047,16 @@ impl TelnetSession {
                 .await?;
             self.send_line("").await?;
 
+            // One credential pair now covers telnet, SSH, and the web
+            // UI; the earlier per-protocol user/pass lines collapsed
+            // into a single Username / Password display.
             self.send_line(&format!(
-                "  Telnet user: {}",
+                "  Username: {}",
                 self.amber(&cfg.username)
             ))
             .await?;
             self.send_line(&format!(
-                "  Telnet pass: {}",
-                self.dim("(hidden)")
-            ))
-            .await?;
-            self.send_line(&format!(
-                "  SSH user:    {}",
-                self.amber(&cfg.ssh_username)
-            ))
-            .await?;
-            self.send_line(&format!(
-                "  SSH pass:    {}",
+                "  Password: {}",
                 self.dim("(hidden)")
             ))
             .await?;
@@ -9075,23 +9068,13 @@ impl TelnetSession {
             ))
             .await?;
             self.send_line(&format!(
-                "  {}  Set telnet username",
+                "  {}  Set username",
                 self.cyan("U")
             ))
             .await?;
             self.send_line(&format!(
-                "  {}  Set telnet password",
+                "  {}  Set password",
                 self.cyan("P")
-            ))
-            .await?;
-            self.send_line(&format!(
-                "  {}  Set SSH username",
-                self.cyan("S")
-            ))
-            .await?;
-            self.send_line(&format!(
-                "  {}  Set SSH password",
-                self.cyan("W")
             ))
             .await?;
             self.send_line(&format!(
@@ -9128,16 +9111,10 @@ impl TelnetSession {
                     self.config_restart_notice().await?;
                 }
                 "u" => {
-                    self.security_set_field("Telnet username", "username", &cfg.username, false).await?;
+                    self.security_set_field("Username", "username", &cfg.username, false).await?;
                 }
                 "p" => {
-                    self.security_set_field("Telnet password", "password", &cfg.password, true).await?;
-                }
-                "s" => {
-                    self.security_set_field("SSH username", "ssh_username", &cfg.ssh_username, false).await?;
-                }
-                "w" => {
-                    self.security_set_field("SSH password", "ssh_password", &cfg.ssh_password, true).await?;
+                    self.security_set_field("Password", "password", &cfg.password, true).await?;
                 }
                 "r" => {
                     self.config_restart_server().await?;
@@ -9147,7 +9124,7 @@ impl TelnetSession {
                 }
                 "q" => return Ok(()),
                 _ => {
-                    self.show_error("Press L, U, P, S, W, R, H, or Q.").await?;
+                    self.show_error("Press L, U, P, R, H, or Q.").await?;
                 }
             }
         }
@@ -9208,18 +9185,15 @@ impl TelnetSession {
                 "",
                 "  Menu items:",
                 "  L  Toggle login requirement",
-                "  U  Set the telnet username",
-                "  P  Set the telnet password",
-                "  S  Set the SSH username",
-                "  W  Set the SSH password",
+                "  U  Set the login username",
+                "  P  Set the login password",
                 "  R  Restart the server",
                 "",
                 "  Credentials:",
-                "  Telnet and SSH have separate",
-                "  usernames/passwords; changing",
-                "  one doesn't affect the other.",
-                "  Both are stored in plaintext",
-                "  in egateway.conf - don't reuse",
+                "  One username/password covers",
+                "  telnet, SSH, and the web UI.",
+                "  Stored in plaintext in",
+                "  egateway.conf - don't reuse",
                 "  sensitive passwords here.",
                 "",
                 "  When security is OFF:",
@@ -9249,17 +9223,14 @@ impl TelnetSession {
                 "",
                 "  Menu items:",
                 "  L  Toggle whether a login is required",
-                "  U  Set the telnet login username",
-                "  P  Set the telnet login password",
-                "  S  Set the SSH login username",
-                "  W  Set the SSH login password",
+                "  U  Set the login username",
+                "  P  Set the login password",
                 "  R  Restart the server",
                 "",
                 "  Credentials:",
-                "  Telnet and SSH have separate usernames",
-                "  and passwords; changing one doesn't",
-                "  affect the other. Both are stored in",
-                "  plaintext in egateway.conf - don't reuse",
+                "  One username/password pair covers telnet,",
+                "  SSH, and the web configuration UI.  Stored",
+                "  in plaintext in egateway.conf - don't reuse",
                 "  sensitive passwords on this server.",
                 "",
                 "  When security is OFF (default):",
@@ -10105,6 +10076,10 @@ impl TelnetSession {
                 "     server listener (bypasses",
                 "     auth and private-IP filter)",
                 "  J  Change the Kermit server port",
+                "  W  Toggle the configuration web",
+                "     server (HTTP/Basic auth on",
+                "     the same login as telnet)",
+                "  B  Change the web server port",
                 "  I  Toggle IP safety. When OFF,",
                 "     telnet accepts every source",
                 "     IP (no private-IP filter).",
@@ -10126,6 +10101,11 @@ impl TelnetSession {
                 "  K  Toggle the standalone Kermit server",
                 "     (bypasses auth and the private-IP filter)",
                 "  J  Change the Kermit server listening port",
+                "  W  Toggle the configuration web server.  Renders",
+                "     the same settings page the GUI does in a",
+                "     browser; uses the unified login credentials",
+                "     under Security when login is required.",
+                "  B  Change the web server listening port",
                 "  I  Toggle IP safety. When ON (default), and",
                 "     login is not required, the telnet listener",
                 "     only accepts private/loopback addresses",
@@ -13740,7 +13720,9 @@ mod tests {
             // Other settings
             "Press A, B, W, V, G, R, H, or Q.",
             // Security
-            "Press L, U, P, S, W, R, H, or Q.",
+            // Post unified-credentials merge: S (Set SSH user) and
+            // W (Set SSH pass) menu keys went away.
+            "Press L, U, P, R, H, or Q.",
             // File transfer submenu
             "Press D, X, Y, Z, R, H, or Q.",
             // XMODEM / YMODEM settings
@@ -13810,12 +13792,13 @@ mod tests {
             "  W  Set weather zip code",
             "  V  Toggle verbose transfer logging",
             "  G  Toggle GUI on startup",
-            // Security menu
+            // Security menu (post unified-credentials merge — the
+            // Telnet/SSH user+pass items collapsed into a single
+            // username/password pair shared across both protocols
+            // and the web UI).
             "  L  Toggle require login",
-            "  U  Set telnet username",
-            "  P  Set telnet password",
-            "  S  Set SSH username",
-            "  W  Set SSH password",
+            "  U  Set username",
+            "  P  Set password",
             // File transfer submenu
             "  D  Change transfer directory",
             "  X  XMODEM settings",
@@ -14169,6 +14152,12 @@ mod tests {
             "  S  Enable or disable the SSH",
             "     server listener",
             "  O  Change the SSH port",
+            // Web-server menu help lines added when the config web
+            // UI joined the listener set.
+            "  W  Toggle the configuration web",
+            "     server (HTTP/Basic auth on",
+            "     the same login as telnet)",
+            "  B  Change the web server port",
             "  R  Restart the server",
             "  Changes are saved immediately",
             "  but require a server restart.",
@@ -14184,11 +14173,14 @@ mod tests {
         }
     }
 
-    /// Security menu row count:
-    /// header(3) + blank + status + blank + 4 creds + blank + 6 items + blank + Q/H + prompt = 20
+    /// Security menu row count after the unified-credentials merge:
+    /// header(3) + blank + login-status + blank + 2 creds (Username,
+    /// Password) + blank + 4 items (L/U/P/R) + blank + Q/H + prompt
+    /// = 16.  Previously 20 with separate telnet/SSH user+pass rows
+    /// and S/W menu items.
     #[test]
     fn test_security_menu_row_count() {
-        let rows = 3 + 1 + 1 + 1 + 4 + 1 + 6 + 1 + 1 + 1; // 20
+        let rows = 3 + 1 + 1 + 1 + 2 + 1 + 4 + 1 + 1 + 1; // 16
         assert!(rows <= 22, "security menu is {} rows, exceeds 22", rows);
     }
 
@@ -14199,14 +14191,13 @@ mod tests {
             "  Configure login security.",
             "  L  Toggle whether a login is",
             "     required to access server",
-            "  U  Set the telnet username",
-            "  P  Set the telnet password",
-            "  S  Set the SSH username",
-            "  W  Set the SSH password",
+            "  U  Set the login username",
+            "  P  Set the login password",
             "  R  Restart the server",
-            "  Telnet and SSH have separate",
-            "  credentials. Changes require",
-            "  a server restart.",
+            "  One username/password covers",
+            "  telnet, SSH, and the web UI.",
+            "  Changes are saved immediately",
+            "  but require a server restart.",
         ];
         for line in &lines {
             assert!(
@@ -14957,6 +14948,12 @@ mod tests {
             "     and general settings",
             "  R  Reset all settings to their",
             "     default values",
+            // Server config help (Web server keys added when the
+            // configuration web UI joined the listener set).
+            "  W  Toggle the configuration web",
+            "     server (HTTP/Basic auth on",
+            "     the same login as telnet)",
+            "  B  Change the web server port",
             // Other settings help
             "  A  Groq API key for AI Chat",
             "     (get one free at groq.com)",
@@ -14968,18 +14965,19 @@ mod tests {
             "  G  Toggle GUI on startup",
             "     (requires restart)",
             "  R  Restart the server",
-            // Security help
+            // Security help (post unified-credentials merge — one
+            // username/password covers telnet, SSH, and the web UI;
+            // the legacy S/W menu items went away).
             "  Configure login security.",
             "  L  Toggle whether a login is",
             "     required to access server",
-            "  U  Set the telnet username",
-            "  P  Set the telnet password",
-            "  S  Set the SSH username",
-            "  W  Set the SSH password",
+            "  U  Set the login username",
+            "  P  Set the login password",
             "  R  Restart the server",
-            "  Telnet and SSH have separate",
-            "  credentials. Changes require",
-            "  a server restart.",
+            "  One username/password covers",
+            "  telnet, SSH, and the web UI.",
+            "  Changes are saved immediately",
+            "  but require a server restart.",
             // XMODEM settings help
             "  Configure XMODEM family transfer",
             "  settings. Shared with XMODEM-1K",

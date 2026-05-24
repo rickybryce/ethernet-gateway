@@ -344,6 +344,22 @@ async fn handle_connection(
             )
             .await?;
         }
+        ("GET", "/serial-ports") => {
+            // Live serial-port re-scan for the refresh button.  The
+            // JS picks up the result and rewrites the option list of
+            // both serial selects without a full page reload.
+            let ports = crate::gui::detect_serial_ports();
+            let body = serial_ports_json(&ports);
+            write_response(
+                &mut stream,
+                200,
+                "OK",
+                "application/json; charset=utf-8",
+                body.as_bytes(),
+                false,
+            )
+            .await?;
+        }
         ("POST", "/save") => {
             // Apply on a blocking thread — update_config_value reads,
             // mutates, and rewrites egateway.conf, which would otherwise
@@ -694,7 +710,6 @@ fn collect_form_updates(
     let plain_keys: &[&str] = &[
         "telnet_port", "ssh_port", "kermit_server_port", "web_port",
         "username", "password",
-        "ssh_username", "ssh_password",
         "transfer_dir", "max_sessions", "idle_timeout_secs",
         "groq_api_key", "browser_homepage", "weather_zip",
         "xmodem_negotiation_timeout", "xmodem_block_timeout",
@@ -820,6 +835,36 @@ fn hex_value(b: u8) -> Option<u8> {
     }
 }
 
+/// Hand-rolled JSON encoder for the `/serial-ports` response.  Serial
+/// device paths are ASCII and quote-free in practice on Linux/macOS/
+/// Windows, but escape defensively so a hostile or oddly-named device
+/// can't break the JSON parse on the client.
+fn serial_ports_json(ports: &[String]) -> String {
+    let mut out = String::from("{\"ports\":[");
+    for (i, p) in ports.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push('"');
+        for ch in p.chars() {
+            match ch {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                c if (c as u32) < 0x20 => {
+                    out.push_str(&format!("\\u{:04x}", c as u32));
+                }
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+    }
+    out.push_str("]}");
+    out
+}
+
 // ─── HTML rendering ─────────────────────────────────────────────────
 
 /// Build the full configuration page.  `notice` is an optional banner
@@ -899,76 +944,110 @@ fn save_button(action: &str, label: &str, class: &str) -> String {
 }
 
 fn frame_server(cfg: &Config) -> String {
+    // CSS Grid layout so the two `Port:` colons line up between
+    // rows (a port number is at most 5 digits, so 6-char inputs
+    // are plenty).  Row 1 pairs Telnet + Web Server + More button;
+    // Row 2 pairs SSH + Kermit Server.  Moving More up to row 1
+    // gets rid of the third visible line the button used to wrap
+    // onto on narrow viewports — the GUI's same-rationale layout
+    // floats More to the right edge of the upper content row.
+    //
+    // Cells in the grid (column index in parens):
+    //   (1) listener checkbox  (2) "Port:" label  (3) port input
+    //   (4) listener checkbox  (5) "Port:" label  (6) port input
+    //   (7) More button on row 1 / empty on row 2
     format!(
         "<section class=\"frame\"><div class=\"frame-head\">\
          <span class=\"title\">Server</span>\
          <span class=\"sub\">(Changes Require Restart)</span>\
          <span class=\"head-right\">{save}</span></div>\
-         <div class=\"row\">{telnet_chk} {telnet_port}</div>\
-         <div class=\"row\">{ssh_chk} {ssh_port}</div>\
-         <div class=\"row\">{web_chk} {web_port}</div>\
-         <div class=\"row\">{kermit_chk} {kermit_port}\
-         <button type=\"button\" class=\"more\" data-target=\"more-server\">More\u{2026}</button></div>\
-         </section>",
+         <div class=\"server-grid\">\
+         {telnet_chk}<span class=\"port-label\">Port:</span>{telnet_port}\
+         {web_chk}<span class=\"port-label\">Port:</span>{web_port}\
+         <button type=\"button\" class=\"more\" data-target=\"more-server\">More\u{2026}</button>\
+         {ssh_chk}<span class=\"port-label\">Port:</span>{ssh_port}\
+         {kermit_chk}<span class=\"port-label\">Port:</span>{kermit_port}\
+         <span class=\"grid-blank\"></span>\
+         </div></section>",
         save = save_button("save_and_restart", "Save and Restart", "primary"),
         telnet_chk = checkbox("telnet_enabled", "Telnet", cfg.telnet_enabled),
-        telnet_port = numfield("telnet_port", "Port", cfg.telnet_port),
+        telnet_port = port_input("telnet_port", cfg.telnet_port, None),
         ssh_chk = checkbox("ssh_enabled", "SSH", cfg.ssh_enabled),
-        ssh_port = numfield("ssh_port", "Port", cfg.ssh_port),
+        ssh_port = port_input("ssh_port", cfg.ssh_port, None),
         web_chk = checkbox_with_attr(
             "web_enabled",
             "Web Server",
             cfg.web_enabled,
             "onchange=\"warnIfDisablingWeb(this)\"",
         ),
-        web_port = numfield_with_attr(
+        web_port = port_input(
             "web_port",
-            "Port",
             cfg.web_port,
-            "onchange=\"warnIfChangingWebPort(this)\"",
-            cfg.web_port,
+            Some("onchange=\"warnIfChangingWebPort(this)\""),
         ),
         kermit_chk = checkbox("kermit_server_enabled", "Kermit Server", cfg.kermit_server_enabled),
-        kermit_port = numfield("kermit_server_port", "Port", cfg.kermit_server_port),
+        kermit_port = port_input("kermit_server_port", cfg.kermit_server_port, None),
+    )
+}
+
+/// Render a port-number `<input>` for the Server-frame grid.  Six
+/// characters is enough for any valid TCP port (65535 = 5 digits)
+/// plus a touch of breathing room.  When `extra_attr` is provided
+/// the attribute string is appended verbatim (used for the web-port
+/// onchange warning) and a `data-orig` carries the current value so
+/// the warning JS can detect changes.
+fn port_input(name: &str, value: u16, extra_attr: Option<&str>) -> String {
+    let attr = extra_attr.unwrap_or("");
+    format!(
+        "<input type=\"text\" inputmode=\"numeric\" name=\"{name}\" value=\"{value}\" size=\"6\" class=\"port-num\" data-orig=\"{value}\" {attr}>",
+        name = name,
+        value = value,
+        attr = attr,
     )
 }
 
 fn frame_security(cfg: &Config) -> String {
+    // Telnet, SSH, and the web UI now share one credential pair, so
+    // the Security frame renders a single Login row instead of the
+    // earlier separate Telnet / SSH rows.
     format!(
         "<section class=\"frame\"><div class=\"frame-head\">\
          <span class=\"title\">Security</span>\
          <span class=\"head-right\">{save}</span></div>\
          <div class=\"row\">{sec_chk} {ipsafe_chk}</div>\
-         <div class=\"row\"><span class=\"label-dim\">Telnet</span> {tuser} {tpass}</div>\
-         <div class=\"row\"><span class=\"label-dim\">SSH</span> {suser} {spass}</div>\
+         <div class=\"row\"><span class=\"label-dim\">Login</span> {user} {pass}</div>\
          </section>",
         save = save_button("save", "Save", "secondary"),
         sec_chk = checkbox("security_enabled", "Require Login", cfg.security_enabled),
         ipsafe_chk = checkbox("disable_ip_safety", "Disable IP Safety", cfg.disable_ip_safety),
-        tuser = textfield("username", "User", &cfg.username, false, 12),
-        tpass = textfield("password", "Pass", &cfg.password, true, 12),
-        suser = textfield("ssh_username", "User", &cfg.ssh_username, false, 12),
-        spass = textfield("ssh_password", "Pass", &cfg.ssh_password, true, 12),
+        user = textfield("username", "User", &cfg.username, false, 12),
+        pass = textfield("password", "Pass", &cfg.password, true, 12),
     )
 }
 
 fn frame_file_transfer(cfg: &Config) -> String {
+    // Matches the GUI: Dir on top, then a single tunables row with
+    // Negotiate / Block / Retries plus the right-aligned More button.
+    // The `xmodem_negotiation_retry_interval` ("Poke") field moves to
+    // the More popup (alongside the other rarely-tuned timeouts), just
+    // like the GUI's draw_file_transfer_advanced.  The desktop GUI
+    // also has a folder-browse button next to Dir — that opens a
+    // native picker on the operator's machine, which doesn't make
+    // sense for a remote browser, so the web variant omits it.
     format!(
         "<section class=\"frame\"><div class=\"frame-head\">\
          <span class=\"title\">File Transfer (XMODEM)</span>\
          <span class=\"sub\">(More for others)</span>\
          <span class=\"head-right\">{save}</span></div>\
-         <div class=\"row\">{neg} {blk}</div>\
-         <div class=\"row\">{retries} {interval}</div>\
-         <div class=\"row\"><span class=\"label\">Transfer dir:</span>\
-         <input type=\"text\" name=\"transfer_dir\" value=\"{td}\"></div>\
-         <div class=\"row\"><button type=\"button\" class=\"more\" data-target=\"more-xfer\">More\u{2026}</button></div>\
+         <div class=\"row\"><span class=\"label\">Dir:</span>\
+         <input type=\"text\" name=\"transfer_dir\" value=\"{td}\" class=\"transfer-dir\"></div>\
+         <div class=\"row tight-row\">{neg} {blk} {retries}\
+         <button type=\"button\" class=\"more\" data-target=\"more-xfer\">More\u{2026}</button></div>\
          </section>",
         save = save_button("save", "Save", "secondary"),
-        neg = numfield("xmodem_negotiation_timeout", "Neg (s)", cfg.xmodem_negotiation_timeout),
-        blk = numfield("xmodem_block_timeout", "Blk (s)", cfg.xmodem_block_timeout),
+        neg = numfield("xmodem_negotiation_timeout", "Negotiate", cfg.xmodem_negotiation_timeout),
+        blk = numfield("xmodem_block_timeout", "Block", cfg.xmodem_block_timeout),
         retries = numfield("xmodem_max_retries", "Retries", cfg.xmodem_max_retries),
-        interval = numfield("xmodem_negotiation_retry_interval", "Poke (s)", cfg.xmodem_negotiation_retry_interval),
         td = html_escape(&cfg.transfer_dir),
     )
 }
@@ -993,13 +1072,21 @@ fn frame_ai_browser(cfg: &Config) -> String {
 }
 
 fn frame_serial(cfg: &Config) -> String {
+    // Matches the GUI: both Enabled checkboxes ride in the frame
+    // header alongside per-port titles + the right-aligned Save
+    // button, so each per-port row below stays compact (label, port
+    // select, refresh, baud, More).  The two header titles use the
+    // same amber title style as the other frames' single title.
     format!(
-        "<section class=\"frame\"><div class=\"frame-head\">\
-         <span class=\"title\">Serial Ports</span>\
+        "<section class=\"frame\"><div class=\"frame-head serial-head\">\
+         <span class=\"title\">Serial Port A</span> {en_a}\
+         <span class=\"title\">Serial Port B</span> {en_b}\
          <span class=\"head-right\">{save}</span></div>\
          {a}\
          {b}\
          </section>",
+        en_a = checkbox("serial_a_enabled", "Enabled", cfg.serial_a.enabled),
+        en_b = checkbox("serial_b_enabled", "Enabled", cfg.serial_b.enabled),
         save = save_button("save_and_restart_serial", "Save", "secondary"),
         a = serial_row("serial_a", "Port A", &cfg.serial_a),
         b = serial_row("serial_b", "Port B", &cfg.serial_b),
@@ -1007,18 +1094,70 @@ fn frame_serial(cfg: &Config) -> String {
 }
 
 fn serial_row(prefix: &str, label: &str, port: &config::SerialPortConfig) -> String {
+    // Detect available ports server-side at render time (mirrors the
+    // GUI's ComboBox source).  The JS refresh button below re-fetches
+    // via /serial-ports without a full page reload.  The row uses
+    // `serial-row` instead of the default `.row` class so it keeps
+    // the More button on the same line as the rest of the controls
+    // — the default `.row` wraps when the contents overflow, which
+    // pushed More onto its own line once the dropdown + refresh
+    // button joined the row.
+    let detected = crate::gui::detect_serial_ports();
+    // The Enabled checkbox now lives in the frame header (matches the
+    // GUI), so each per-port row is: label + select + refresh + Baud
+    // + More.  Keeping the row this lean leaves room for the More
+    // button to sit on the right edge without wrapping even inside
+    // the half-width frame.
     format!(
-        "<div class=\"row\"><span class=\"label\">{label}:</span>\
-         {en}\
-         <input type=\"text\" name=\"{prefix}_port\" value=\"{dev}\" placeholder=\"(none)\" size=\"14\">\
+        "<div class=\"row serial-row\"><span class=\"label\">{label}:</span>\
+         <select name=\"{prefix}_port\" class=\"serial-port-select\" data-current=\"{dev}\">\
+         {options}\
+         </select>\
+         <button type=\"button\" class=\"refresh\" title=\"Refresh ports\" \
+         data-refresh-ports>\u{21bb}</button>\
          {baud}\
          <button type=\"button\" class=\"more\" data-target=\"more-{prefix}\">More\u{2026}</button></div>",
         label = label,
-        en = checkbox(&format!("{}_enabled", prefix), "Enabled", port.enabled),
         prefix = prefix,
         dev = html_escape(&port.port),
+        options = serial_port_options(&port.port, &detected),
         baud = numfield(&format!("{}_baud", prefix), "Baud", port.baud),
     )
+}
+
+/// Build the `<option>` list for a serial-port `<select>`.  Always
+/// includes a leading "(none)" option (the empty-string value, which
+/// disables the port).  Detected ports come next.  Finally, if the
+/// currently-saved port path is non-empty and isn't in the detected
+/// list (cable unplugged, device temporarily gone), it gets its own
+/// option with a "(saved)" suffix so the operator can still see and
+/// keep their pinned value.
+fn serial_port_options(current: &str, detected: &[String]) -> String {
+    let mut out = String::new();
+    let sel_none = if current.is_empty() { " selected" } else { "" };
+    out.push_str(&format!(
+        "<option value=\"\"{sel}>(none)</option>",
+        sel = sel_none,
+    ));
+    let mut current_in_detected = false;
+    for p in detected {
+        let sel = if p == current { " selected" } else { "" };
+        if p == current {
+            current_in_detected = true;
+        }
+        out.push_str(&format!(
+            "<option value=\"{v}\"{sel}>{v}</option>",
+            v = html_escape(p),
+            sel = sel,
+        ));
+    }
+    if !current.is_empty() && !current_in_detected {
+        out.push_str(&format!(
+            "<option value=\"{v}\" selected>{v} (saved)</option>",
+            v = html_escape(current),
+        ));
+    }
+    out
 }
 
 fn frame_general(cfg: &Config) -> String {
@@ -1073,11 +1212,15 @@ fn render_more_popups(cfg: &Config) -> String {
         save = save_button("save_and_restart", "Save and Restart", "primary"),
     ));
 
-    // File-transfer More — ZMODEM and Kermit settings.
+    // File-transfer More — XMODEM-family retry interval (moved off
+    // the primary frame to mirror the GUI's draw_file_transfer_-
+    // advanced section), plus ZMODEM and Kermit settings.
     out.push_str(&format!(
         "<div class=\"modal\" id=\"more-xfer\"><div class=\"modal-body\">\
          <div class=\"modal-head\"><span class=\"title\">File Transfer \u{2014} More</span>\
          <button type=\"button\" class=\"close\" data-close=\"more-xfer\">\u{00d7}</button></div>\
+         <h3>XMODEM / XMODEM-1K / YMODEM</h3>\
+         <div class=\"row\">{xint}</div>\
          <h3>ZMODEM</h3>\
          <div class=\"row\">{zneg} {zfrm}</div>\
          <div class=\"row\">{zret} {zint}</div>\
@@ -1100,6 +1243,7 @@ fn render_more_popups(cfg: &Config) -> String {
          <div class=\"modal-foot\">{save}</div>\
          </div></div>",
         save = save_button("save", "Save", "secondary"),
+        xint = numfield("xmodem_negotiation_retry_interval", "Retry interval (s)", cfg.xmodem_negotiation_retry_interval),
         zneg = numfield("zmodem_negotiation_timeout", "Neg (s)", cfg.zmodem_negotiation_timeout),
         zfrm = numfield("zmodem_frame_timeout", "Frame (s)", cfg.zmodem_frame_timeout),
         zret = numfield("zmodem_max_retries", "Retries", cfg.zmodem_max_retries),
@@ -1247,28 +1391,16 @@ fn checkbox_with_attr(name: &str, label: &str, checked: bool, attr: &str) -> Str
 }
 
 fn numfield<T: std::fmt::Display>(name: &str, label: &str, value: T) -> String {
+    // size=5 fits every numeric setting we currently expose (max
+    // observed is kermit_max_packet_length 4096, 4 digits) and
+    // tightens the visual footprint so frames don't waste width on
+    // empty input padding — matches the user's directive that text
+    // entry boxes shouldn't reserve more characters than needed.
     format!(
-        "<span class=\"label\">{label}:</span><input type=\"text\" inputmode=\"numeric\" name=\"{name}\" value=\"{value}\" size=\"7\">",
+        "<span class=\"label\">{label}:</span><input type=\"text\" inputmode=\"numeric\" name=\"{name}\" value=\"{value}\" size=\"5\" class=\"num-tight\">",
         name = name,
         label = html_escape(label),
         value = value,
-    )
-}
-
-fn numfield_with_attr<T: std::fmt::Display>(
-    name: &str,
-    label: &str,
-    value: T,
-    attr: &str,
-    original: u16,
-) -> String {
-    format!(
-        "<span class=\"label\">{label}:</span><input type=\"text\" inputmode=\"numeric\" name=\"{name}\" value=\"{value}\" data-orig=\"{orig}\" size=\"7\" {attr}>",
-        name = name,
-        label = html_escape(label),
-        value = value,
-        orig = original,
-        attr = attr,
     )
 }
 
@@ -1387,6 +1519,62 @@ button.more {
   font-size: 13px;
   padding: 2px 8px;
 }
+button.refresh {
+  font-size: 14px;
+  padding: 2px 6px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+/* Serial port row keeps all controls on one line, including the
+   right-floated More button.  The default `.row` flex-wrap rule
+   would otherwise push More onto a second line as soon as the
+   dropdown + refresh + Baud combination overflows the half-width
+   frame.  The select itself is the only flexible child: it gives up
+   width first, the labels and buttons keep their natural size. */
+.serial-row { flex-wrap: nowrap; }
+.serial-row .label,
+.serial-row .chk,
+.serial-row button { flex-shrink: 0; white-space: nowrap; }
+.serial-port-select {
+  min-width: 0;
+  flex: 1 1 160px;
+  max-width: 220px;
+}
+/* Dir field stretches to fill the row inside the File Transfer
+   frame, mirroring the GUI's expanding text edit. */
+.transfer-dir { flex: 1 1 auto; min-width: 0; }
+/* Server frame's listener block uses CSS Grid so the two Port:
+   colons in each column align between rows (and the 6-char port
+   inputs line up too).  Column 7 is the More button slot — it
+   sits on row 1 and an empty cell on row 2 keeps the grid square. */
+.server-grid {
+  display: grid;
+  grid-template-columns:
+    max-content max-content max-content
+    max-content max-content max-content
+    1fr;
+  column-gap: 10px;
+  row-gap: 6px;
+  align-items: center;
+  margin: 4px 0;
+}
+.server-grid .port-label { color: var(--text); }
+.server-grid .port-num { width: 6ch; }
+.server-grid button.more { justify-self: end; margin-left: 0; }
+/* Tight row: keeps the contents on a single line.  Used by the
+   File Transfer XMODEM tunables row so the right-floated More
+   button stays after the last numeric field instead of wrapping
+   onto its own line. */
+.tight-row { flex-wrap: nowrap; align-items: center; }
+.tight-row input,
+.tight-row .label,
+.tight-row button { flex-shrink: 0; white-space: nowrap; }
+/* Serial-frame header carries two title+checkbox pairs plus the Save
+   button.  Allow wrap (unlike the row above) since on narrow viewports
+   it makes more sense for the second title to drop to its own line
+   than to clip text. */
+.serial-head { flex-wrap: wrap; column-gap: 12px; }
+.serial-head .title { font-weight: bold; }
 .modal-foot {
   display: flex;
   justify-content: flex-end;
@@ -1476,6 +1664,47 @@ function refreshLogs() {
 }
 refreshLogs();
 setInterval(refreshLogs, 2000);
+// Refresh-ports button on each Serial Port row.  Fetches the live
+// device list and rewrites both selects' option children — matches
+// the GUI's single refresh that re-scans for both port pickers.
+function refreshSerialPorts() {
+  fetch('/serial-ports').then(function(r) { return r.json(); }).then(function(data) {
+    var detected = data.ports || [];
+    document.querySelectorAll('select.serial-port-select').forEach(function(sel) {
+      // Preserve the operator's current choice — they may have just
+      // picked a value, and a background refresh shouldn't reset it.
+      // Falls back to data-current (the on-page-render value) if the
+      // select hasn't been touched yet.
+      var keep = sel.value || sel.dataset.current || '';
+      var html = '<option value=\"\"' + (keep === '' ? ' selected' : '') + '>(none)</option>';
+      var inList = false;
+      detected.forEach(function(p) {
+        var esc = p.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                   .replace(/\"/g, '&quot;').replace(/'/g, '&#39;');
+        var sm = (p === keep) ? ' selected' : '';
+        if (p === keep) inList = true;
+        html += '<option value=\"' + esc + '\"' + sm + '>' + esc + '</option>';
+      });
+      if (keep && !inList) {
+        var esc = keep.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                      .replace(/\"/g, '&quot;').replace(/'/g, '&#39;');
+        html += '<option value=\"' + esc + '\" selected>' + esc + ' (saved)</option>';
+      }
+      sel.innerHTML = html;
+    });
+  }).catch(function() {});
+}
+document.querySelectorAll('button[data-refresh-ports]').forEach(function(b) {
+  b.addEventListener('click', refreshSerialPorts);
+});
+// The save-success banner rides into the page via the ?notice=...
+// query string set by our 303 redirect.  Strip it from the URL bar
+// after render so a refresh (or a bookmark) doesn't keep showing the
+// banner forever — the banner is meant to confirm one save, not act
+// as a permanent header.
+if (window.location.search.indexOf('notice=') !== -1) {
+  window.history.replaceState({}, document.title, window.location.pathname);
+}
 </script>";
 
 // ─── Tests ──────────────────────────────────────────────────────────
@@ -1905,6 +2134,341 @@ mod tests {
         assert!(
             html.contains("value=\"save\""),
             "Per-frame plain Save button missing"
+        );
+    }
+
+    #[test]
+    fn test_serial_ports_json_empty() {
+        assert_eq!(serial_ports_json(&[]), r#"{"ports":[]}"#);
+    }
+
+    #[test]
+    fn test_serial_ports_json_typical_paths() {
+        let ports = vec!["/dev/ttyS0".to_string(), "/dev/ttyUSB0".to_string()];
+        assert_eq!(
+            serial_ports_json(&ports),
+            r#"{"ports":["/dev/ttyS0","/dev/ttyUSB0"]}"#
+        );
+    }
+
+    #[test]
+    fn test_serial_ports_json_escapes_quotes_and_backslashes() {
+        // Defensive: if a hostile or oddly-named device shows up in
+        // the OS port table, the JSON we emit must still parse on
+        // the browser side.  Most real serial paths are ASCII and
+        // quote-free, but escaping per RFC 8259 §7 keeps a Windows
+        // COM-port-like path with backslashes safe too.
+        let weird = vec!["a\"b".to_string(), "c\\d".to_string(), "e\nf".to_string()];
+        let out = serial_ports_json(&weird);
+        assert!(out.contains(r#""a\"b""#));
+        assert!(out.contains(r#""c\\d""#));
+        assert!(out.contains(r#""e\nf""#));
+    }
+
+    #[test]
+    fn test_serial_port_options_none_selected_when_empty_current() {
+        let opts = serial_port_options("", &["/dev/ttyS0".into()]);
+        // First option is "(none)" with the selected attribute.
+        assert!(opts.starts_with(r#"<option value="" selected>(none)</option>"#));
+        // The detected port is present but not selected.
+        assert!(opts.contains(r#"<option value="/dev/ttyS0">"#));
+    }
+
+    #[test]
+    fn test_serial_port_options_marks_current_detected() {
+        let opts = serial_port_options("/dev/ttyUSB0", &[
+            "/dev/ttyS0".into(),
+            "/dev/ttyUSB0".into(),
+        ]);
+        assert!(opts.contains(r#"<option value="/dev/ttyUSB0" selected>"#));
+        // The (none) option is NOT selected when a real port is chosen.
+        assert!(opts.starts_with(r#"<option value="">(none)</option>"#));
+    }
+
+    #[test]
+    fn test_serial_port_options_preserves_saved_value_not_in_detected() {
+        // Saved port path that isn't currently plugged in: keep it
+        // visible with a "(saved)" suffix so the operator's choice
+        // is preserved across reboots / cable unplugs.
+        let opts = serial_port_options("/dev/ttyUSB99", &["/dev/ttyS0".into()]);
+        assert!(opts.contains(r#"<option value="/dev/ttyUSB99" selected>/dev/ttyUSB99 (saved)</option>"#));
+    }
+
+    #[test]
+    fn test_serial_port_options_html_escapes_path() {
+        // A path with HTML-active chars must come out escaped — the
+        // option text is rendered as HTML, not as a literal attribute
+        // value alone.
+        let opts = serial_port_options("/dev/<weird>", &[]);
+        assert!(opts.contains("&lt;weird&gt;"));
+        assert!(!opts.contains("<weird>"));
+    }
+
+    #[test]
+    fn test_file_transfer_frame_matches_gui_layout() {
+        // Mirrors the GUI: Dir on top, then a single tunables row
+        // with Negotiate / Block / Retries + the More button.  The
+        // retry-interval ("Poke") field moves to the More popup so
+        // the primary frame stays compact.  Lock that down — if the
+        // layout regresses, the primary frame grows back to 4 rows
+        // and unbalances the row pair with AI/Browser.
+        let html = render_main_page(&Config::default(), None);
+        // Dir input must come first in the frame.
+        let dir_idx = html
+            .find(r#"name="transfer_dir""#)
+            .expect("transfer_dir field");
+        let neg_idx = html
+            .find(r#"name="xmodem_negotiation_timeout""#)
+            .expect("xmodem_negotiation_timeout field");
+        let retries_idx = html
+            .find(r#"name="xmodem_max_retries""#)
+            .expect("xmodem_max_retries field");
+        let more_idx = html
+            .find(r#"data-target="more-xfer""#)
+            .expect("more-xfer button");
+        assert!(
+            dir_idx < neg_idx,
+            "Dir should render before the tunables row"
+        );
+        assert!(
+            neg_idx < retries_idx && retries_idx < more_idx,
+            "Negotiate / Retries / More must appear in that order on the second row"
+        );
+        // The retry-interval ("Poke") moved to the popup — verify
+        // it's NOT on the primary frame.  Search range up to the
+        // More button (everything before it is the primary frame).
+        let primary = &html[..more_idx];
+        assert!(
+            !primary.contains(r#"name="xmodem_negotiation_retry_interval""#),
+            "Poke / retry interval should live in the More popup, not the primary frame"
+        );
+    }
+
+    #[test]
+    fn test_server_frame_uses_grid_with_port_label_cells() {
+        // The Server frame switched from flex-rows to CSS Grid so the
+        // two `Port:` colons line up across rows.  The `port-label`
+        // cells are the colon-bearers; the `port-num` inputs are
+        // 6-char wide.  Lock the structure down so a future revert
+        // to flex `<div class="row">` would visibly mis-align the
+        // colons and trip this test.
+        let html = render_main_page(&Config::default(), None);
+        assert!(html.contains(r#"class="server-grid""#));
+        // Four port inputs, all with class="port-num" + size="6".
+        let port_num_count = html.matches(r#"class="port-num""#).count();
+        assert_eq!(port_num_count, 4, "expected 4 port-num inputs in Server frame, got {}", port_num_count);
+        let size6_in_server = html.matches(r#" size="6" class="port-num""#).count();
+        assert_eq!(size6_in_server, 4, "all 4 port inputs must be size=6");
+        // Six port-label cells (one per port column in each row).
+        let port_label_count = html.matches(r#"class="port-label""#).count();
+        assert_eq!(port_label_count, 4, "expected 4 port-label cells (one per port input)");
+    }
+
+    #[test]
+    fn test_server_frame_more_button_renders_on_row_one() {
+        // More button must appear in the grid BETWEEN the row 1
+        // listeners (Telnet/Web) and the row 2 listeners (SSH/Kermit).
+        // In CSS-Grid auto-flow that position puts the button as the
+        // last cell of row 1.  If a future refactor places More after
+        // kermit_server_enabled instead, this test catches the regress.
+        let html = render_main_page(&Config::default(), None);
+        let web_idx = html
+            .find(r#"name="web_port""#)
+            .expect("web_port field");
+        let more_idx = html
+            .find(r#"data-target="more-server""#)
+            .expect("more-server button");
+        let ssh_idx = html
+            .find(r#"name="ssh_enabled""#)
+            .expect("ssh_enabled field");
+        assert!(
+            web_idx < more_idx && more_idx < ssh_idx,
+            "More button must sit between Row 1 (Telnet/Web) and Row 2 (SSH/Kermit) — got web={}, more={}, ssh={}",
+            web_idx, more_idx, ssh_idx,
+        );
+    }
+
+    #[test]
+    fn test_xfer_tunables_row_keeps_more_inline() {
+        // File-transfer XMODEM tunables row must keep the More button
+        // on the same line as Negotiate/Block/Retries by carrying the
+        // `tight-row` class (nowrap).  Lock that down — previously the
+        // default `.row` flex-wrap pushed More onto its own line.
+        let html = render_main_page(&Config::default(), None);
+        assert!(
+            html.contains(r#"class="row tight-row""#),
+            "File-transfer tunables row missing tight-row class"
+        );
+    }
+
+    #[test]
+    fn test_server_frame_pairs_listeners_two_rows() {
+        // Matches the GUI: Row 1 pairs Telnet + Web Server (the
+        // unencrypted + the configuration listener); Row 2 pairs
+        // SSH + Kermit Server (encrypted + file-transfer listener)
+        // and floats the More button.  Compresses the older 4-row
+        // layout to 2 content rows.  This test guards against an
+        // accidental revert that would re-grow the frame and unbalance
+        // the side-by-side Server/Security row.
+        let html = render_main_page(&Config::default(), None);
+        // First content row must hold both telnet and web fields.
+        let telnet_idx = html
+            .find(r#"name="telnet_enabled""#)
+            .expect("telnet_enabled");
+        let web_idx = html
+            .find(r#"name="web_enabled""#)
+            .expect("web_enabled");
+        let ssh_idx = html.find(r#"name="ssh_enabled""#).expect("ssh_enabled");
+        let kermit_idx = html
+            .find(r#"name="kermit_server_enabled""#)
+            .expect("kermit_server_enabled");
+        // Telnet and Web both come before SSH and Kermit (Row 1
+        // before Row 2 in the rendered HTML).
+        assert!(
+            telnet_idx < ssh_idx && web_idx < ssh_idx,
+            "Row 1 should hold Telnet + Web (before SSH/Kermit)"
+        );
+        assert!(
+            kermit_idx > web_idx,
+            "Kermit should land on Row 2 (after Web)"
+        );
+    }
+
+    #[test]
+    fn test_serial_frame_header_carries_enabled_checkboxes() {
+        // Matches the GUI's layout: both Enabled checkboxes ride in
+        // the frame header, not on the per-port rows.  The header has
+        // two per-port titles ("Serial Port A" / "Serial Port B")
+        // plus the Save button.  Lock that down — if the header
+        // shape regresses, the per-port rows would need their Enabled
+        // checkbox back and the More-button-on-same-line property
+        // would break too.
+        let html = render_main_page(&Config::default(), None);
+        assert!(html.contains("Serial Port A"), "Port A header title missing");
+        assert!(html.contains("Serial Port B"), "Port B header title missing");
+        assert!(
+            html.contains(r#"name="serial_a_enabled""#),
+            "Port A Enabled checkbox missing"
+        );
+        assert!(
+            html.contains(r#"name="serial_b_enabled""#),
+            "Port B Enabled checkbox missing"
+        );
+        // The Enabled checkboxes should be inside the frame header,
+        // not the per-port row.  Locate the actual HTML elements
+        // (not the CSS-rule occurrences in <style>) by matching the
+        // full class attribute, then assert the checkbox appears
+        // between the header open and the first row open.
+        let head_idx = html
+            .find(r#"class="frame-head serial-head""#)
+            .expect("serial-head frame-head element");
+        let row_idx = html[head_idx..]
+            .find(r#"class="row serial-row""#)
+            .map(|i| head_idx + i)
+            .expect("serial-row element after header");
+        let a_chk_idx = html
+            .find(r#"name="serial_a_enabled""#)
+            .expect("serial_a_enabled");
+        assert!(
+            head_idx < a_chk_idx && a_chk_idx < row_idx,
+            "serial_a_enabled checkbox is not inside the frame header (head={}, chk={}, row={})",
+            head_idx, a_chk_idx, row_idx,
+        );
+    }
+
+    #[test]
+    fn test_rendered_serial_row_keeps_more_on_same_line() {
+        // The Serial Port rows use the `serial-row` class on top of
+        // the default `.row` so flex-wrap stays disabled and the
+        // More button doesn't get pushed onto a second line.  Lock
+        // that down — earlier the More button wrapped beneath the
+        // baud field once we added the dropdown + refresh button.
+        let html = render_main_page(&Config::default(), None);
+        assert!(
+            html.contains(r#"class="row serial-row""#),
+            "serial rows missing the serial-row class that suppresses wrap"
+        );
+        // CSS rule must declare nowrap on .serial-row so the class is
+        // not just a marker but actually changes layout.
+        assert!(
+            html.contains(".serial-row { flex-wrap: nowrap; }"),
+            "CSS is missing the .serial-row flex-wrap: nowrap rule"
+        );
+    }
+
+    #[test]
+    fn test_rendered_serial_row_uses_select_not_text_input() {
+        // The Serial Ports frame must render a <select> for each
+        // port, not the old free-text <input>.  This test guards
+        // against an accidental revert of the GUI-parity change.
+        let html = render_main_page(&Config::default(), None);
+        assert!(
+            html.contains(r#"name="serial_a_port""#),
+            "serial_a_port form field missing"
+        );
+        assert!(
+            html.contains(r#"name="serial_b_port""#),
+            "serial_b_port form field missing"
+        );
+        // The select tag carries the data-current attribute so the
+        // refresh JS knows the on-page-load value.
+        assert!(
+            html.contains(r#"data-current="""#),
+            "serial select missing data-current attr (default port is empty)"
+        );
+        // The refresh button is present and tagged for the JS
+        // handler.  Match a substring on both sides of the title
+        // attribute so the test isn't brittle to attribute ordering.
+        assert!(
+            html.contains("data-refresh-ports"),
+            "serial refresh button missing the data-refresh-ports tag"
+        );
+    }
+
+    #[test]
+    fn test_security_frame_renders_unified_credentials_only() {
+        // After the SSH-creds merge the Security frame should expose
+        // a single User/Pass pair, not separate Telnet/SSH rows.
+        // Lock that down — a future refactor that re-introduces
+        // ssh_username/ssh_password as form inputs would have to
+        // update this test alongside the field names.
+        let cfg = Config::default();
+        let html = render_main_page(&cfg, None);
+        assert!(
+            html.contains("name=\"username\""),
+            "Security frame missing unified username input"
+        );
+        assert!(
+            html.contains("name=\"password\""),
+            "Security frame missing unified password input"
+        );
+        assert!(
+            !html.contains("name=\"ssh_username\""),
+            "Security frame still rendering legacy ssh_username input"
+        );
+        assert!(
+            !html.contains("name=\"ssh_password\""),
+            "Security frame still rendering legacy ssh_password input"
+        );
+    }
+
+    #[test]
+    fn test_rendered_page_strips_notice_query_on_load() {
+        // The "Configuration saved." banner rides in via ?notice=... on
+        // the 303 redirect after a save.  Reloading or bookmarking that
+        // URL would otherwise keep showing the banner forever — the
+        // script clears it after render via history.replaceState.  This
+        // test locks down the presence of the strip so a future refactor
+        // can't silently regress the banner back to "permanent header"
+        // behavior.
+        let html = render_main_page(&Config::default(), Some("Configuration saved.".into()));
+        assert!(
+            html.contains("history.replaceState"),
+            "page does not strip the ?notice= query string on load"
+        );
+        assert!(
+            html.contains("notice="),
+            "URL-strip guard should still mention notice= in the check"
         );
     }
 
