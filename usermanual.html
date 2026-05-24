@@ -226,7 +226,7 @@ hr { border: 0; border-top: 1px solid #bbb; margin: 1em 0; }
 <div class="cover">
     <div class="title">Ethernet Gateway</div>
     <div class="subtitle">User Manual</div>
-    <div class="version">Version 0.5.5</div>
+    <div class="version">Version 0.6.0</div>
     <div class="author">Ricky Bryce</div>
     <div class="tag">
         A telnet/SSH file-transfer gateway, SSH proxy, Hayes-compatible
@@ -395,7 +395,7 @@ distribution without installation. On first run the AppImage creates
 Each release publishes a SHA-256 checksum, an optional GPG signature, and a
 Sigstore keyless signature bound to the publisher's GitHub identity. Verify
 at least the SHA-256 before running any binary from the internet:
-<code>sha256sum -c ethernet-gateway-v0.5.5-…tar.gz.sha256</code>.
+<code>sha256sum -c ethernet-gateway-v0.6.0-…tar.gz.sha256</code>.
 </aside>
 
 <h2 id="ch2-source">2.2 Building from Source</h2>
@@ -520,10 +520,10 @@ is rewritten so that future editors see the full set of keys and comments.
 
 <aside class="note">
 <span class="label">Unix permissions</span>
-<code>egateway.conf</code> holds plaintext credentials (telnet password, SSH
-password, Groq API key). On Unix the file is set to mode <code>0600</code>
-(owner-only read/write) on every write. The same applies to
-<code>dialup.conf</code>, <code>gateway_hosts</code>,
+<code>egateway.conf</code> holds the plaintext login password (shared by
+telnet, SSH, and the web UI) and the Groq API key. On Unix the file is set
+to mode <code>0600</code> (owner-only read/write) on every write. The same
+applies to <code>dialup.conf</code>, <code>gateway_hosts</code>,
 <code>ethernet_ssh_host_key</code>, and <code>ethernet_gateway_ssh_key</code>.
 </aside>
 
@@ -560,11 +560,12 @@ phone-number slots are covered in chapter 9.
         <tr><td><code>telnet_gateway_negotiate</code></td><td>bool</td><td><code>false</code></td><td>Outbound gateway sends proactive <code>WILL TTYPE</code> / <code>WILL NAWS</code> / <code>DO ECHO</code>.</td></tr>
         <tr><td><code>telnet_gateway_raw</code></td><td>bool</td><td><code>false</code></td><td>Outbound gateway bypasses all IAC parsing. Supersedes negotiate.</td></tr>
         <tr><td><code>enable_console</code></td><td>bool</td><td><code>true</code></td><td>Open the GUI at startup. Set <code>false</code> for headless systemd operation.</td></tr>
-        <tr><td><code>security_enabled</code></td><td>bool</td><td><code>false</code></td><td>Require username/password login on telnet and SSH.</td></tr>
-        <tr><td><code>username</code>, <code>password</code></td><td>string</td><td><code>admin</code>, <code>changeme</code></td><td>Telnet credentials.</td></tr>
-        <tr><td><code>ssh_username</code>, <code>ssh_password</code></td><td>string</td><td><code>admin</code>, <code>changeme</code></td><td>SSH credentials, independent of telnet.</td></tr>
+        <tr><td><code>security_enabled</code></td><td>bool</td><td><code>false</code></td><td>Require username/password login on telnet, SSH, and the web UI.</td></tr>
+        <tr><td><code>username</code>, <code>password</code></td><td>string</td><td><code>admin</code>, <code>changeme</code></td><td>Unified login credentials — shared by telnet, SSH, and the configuration web UI.  (The legacy per-protocol <code>ssh_username</code> / <code>ssh_password</code> keys were removed in v0.6.0; configs that still have them auto-migrate into this pair on first load when the unified pair is still at the factory defaults.)</td></tr>
         <tr><td><code>ssh_enabled</code></td><td>bool</td><td><code>false</code></td><td>Run the SSH server on <code>ssh_port</code>.</td></tr>
         <tr><td><code>ssh_port</code></td><td>u16</td><td><code>2222</code></td><td>SSH listen port.</td></tr>
+        <tr><td><code>web_enabled</code></td><td>bool</td><td><code>false</code></td><td>Run the configuration web server on <code>web_port</code>.  Off by default; mirrors the GUI settings page in a browser.  See §5.6.</td></tr>
+        <tr><td><code>web_port</code></td><td>u16</td><td><code>8080</code></td><td>Web-server listen port.</td></tr>
         <tr><td><code>ssh_gateway_auth</code></td><td>string</td><td><code>password</code></td><td>Outbound SSH-gateway auth mode: <code>password</code> prompts for the remote password each connect; <code>key</code> uses the gateway's auto-generated Ed25519 client key (which must be installed in the remote's <code>authorized_keys</code> first).</td></tr>
         <tr><td><code>transfer_dir</code></td><td>string</td><td><code>transfer</code></td><td>Base directory for file transfers, relative to the working dir.</td></tr>
         <tr><td><code>max_sessions</code></td><td>usize</td><td><code>50</code></td><td>Concurrent telnet session cap.</td></tr>
@@ -947,13 +948,13 @@ immediately to running services where possible.
 
 <dl>
     <dt><span class="kbd">E</span> Security</dt>
-    <dd>Toggle <code>security_enabled</code> and edit telnet / SSH credentials.</dd>
+    <dd>Toggle <code>security_enabled</code> and edit the unified <code>username</code> / <code>password</code> pair shared by telnet, SSH, and the configuration web UI.</dd>
     <dt><span class="kbd">G</span> Gateway Configuration</dt>
     <dd>Outbound gateway settings — telnet negotiation flags, SSH-gateway auth mode, browser homepage, weather ZIP, AI key.</dd>
     <dt><span class="kbd">M</span> Serial Configuration</dt>
     <dd>Opens an A/B picker submenu listing both ports with their current status.  Pick a port to enter that port's settings menu, where you can toggle its mode (per-port <span class="kbd">T</span>: <em>Toggle Modem/Console mode</em>), set its device, baud, framing, flow control, AT-state, dialup mapping, and ring emulator.  Each port's settings are fully independent and persist under separate <code>serial_a_*</code> / <code>serial_b_*</code> keys.  The per-port <span class="kbd">T</span> item is hidden from sessions that arrived over a serial port (flipping that port to console would tear down the caller's own connection before it could confirm).</dd>
     <dt><span class="kbd">S</span> Server Configuration</dt>
-    <dd>Listen ports, telnet/SSH enable, max sessions, idle timeout, and the network-safety opt-out (<code>disable_ip_safety</code>).</dd>
+    <dd>Listen ports and enable flags for telnet, SSH, the standalone Kermit server, and the configuration web UI; max sessions, idle timeout, and the network-safety opt-out (<code>disable_ip_safety</code>).</dd>
     <dt><span class="kbd">F</span> File Transfer</dt>
     <dd>Per-protocol timeouts and retries for XMODEM, ZMODEM, and Kermit, plus the Kermit server toggle / port and <code>allow_atdt_kermit</code>.</dd>
     <dt><span class="kbd">O</span> Other Settings</dt>
@@ -977,8 +978,9 @@ edit settings without dropping out to a shell to hand-edit
 <p>
 The SSH interface is the recommended way to connect to the gateway from
 outside your trusted LAN. It is <em>not</em> enabled by default — it runs on
-port <strong>2222</strong>, uses its own username and password separate from
-the telnet credentials, and exposes the same menu system as telnet.
+port <strong>2222</strong>, authenticates against the unified
+<code>username</code> / <code>password</code> pair shared with telnet and
+the web UI, and exposes the same menu system as telnet.
 </p>
 
 <h2>6.1 Enabling the SSH Server</h2>
@@ -988,10 +990,22 @@ Toggle the <em>SSH</em> checkbox in the GUI Server frame, or edit
 <code>egateway.conf</code>:
 </p>
 
-<pre><code>ssh_enabled  = true
-ssh_port     = 2222
-ssh_username = admin
-ssh_password = <em>pick-something-strong</em></code></pre>
+<pre><code>ssh_enabled = true
+ssh_port    = 2222
+username    = admin
+password    = <em>pick-something-strong</em></code></pre>
+
+<p>
+The same <code>username</code> / <code>password</code> pair is used by
+telnet, SSH, and the web configuration UI — changing them here changes
+authentication for all three. Versions prior to v0.6.0 had separate
+<code>ssh_username</code> / <code>ssh_password</code> keys; those keys are
+no longer recognized, but an upgrading config gets a one-time migration:
+non-default legacy SSH credentials are adopted into the unified pair on the
+first load when the unified pair is still at the factory defaults (a
+<code>Note: migrating legacy ssh_username=…</code> line lands in the log).
+After the next save the legacy keys disappear from the file.
+</p>
 
 <p>
 Then click <em>Save and Restart Server</em>, or restart manually. On first
@@ -1028,10 +1042,104 @@ remote hosts — a separate concept.
 
 <aside class="warn">
 <span class="label">Plaintext credentials</span>
-SSH credentials in <code>egateway.conf</code> are stored in plaintext. The SSH
-connection itself is encrypted, but the file is not. Protect it with the
-<code>0600</code> permissions the gateway sets automatically, and do not
-reuse passwords from other services.
+The unified <code>username</code> / <code>password</code> pair in
+<code>egateway.conf</code> is stored in plaintext (used by telnet, SSH,
+and the web UI). The SSH connection itself is encrypted, but the file is
+not. Protect it with the <code>0600</code> permissions the gateway sets
+automatically, and do not reuse passwords from other services.
+</aside>
+
+<h2>6.4 Web Configuration Interface</h2>
+
+<p>
+The <em>configuration web server</em> renders the same settings page the
+desktop GUI does, in a browser.  It is off by default; toggle it on in the
+GUI's Server frame (the <em>Web Server</em> checkbox between Telnet and
+Kermit Server) or via the telnet menu's
+<strong>Configuration &gt; Server Configuration &gt; W</strong> key.
+The default port is <strong>8080</strong>.
+</p>
+
+<pre><code>web_enabled = true
+web_port    = 8080</code></pre>
+
+<p>
+Once enabled and the server is restarted, browse to
+<code>http://&lt;server-ip&gt;:8080/</code>.  The page mirrors every GUI
+frame — Server, Security, File Transfer, AI/Browser/Weather, Serial Ports,
+General — and each frame has its own Save button matching the GUI's
+semantics:
+</p>
+
+<ul>
+    <li><strong>Server: Save and Restart</strong> — persists every field
+        and cycles the gateway through a full restart so new listener
+        ports and enable-flags take effect (same flow as the GUI's
+        <em>Save and Restart</em> button).</li>
+    <li><strong>Serial Ports: Save</strong> — persists every field and
+        reopens the serial port managers only; telnet, SSH, and the web
+        UI itself stay running.</li>
+    <li><strong>Security / File Transfer / AI/Browser / General: Save</strong>
+        — persists only.  The relevant code paths read these settings
+        live, so no restart is needed.</li>
+</ul>
+
+<p>
+The page also includes a live <code>Console Output</code> tail (polled
+every two seconds), a serial-port dropdown populated from the same
+device enumeration the GUI uses (with a refresh button that re-scans
+without a page reload), and inline confirmation dialogs that warn the
+operator before disabling the web server or changing its port — either
+action breaks the currently-open browser session, so the page nudges
+the operator to reconnect at the new address after saving.
+</p>
+
+<h3>6.4.1 Authentication and Network Gating</h3>
+
+<p>
+The web server respects the same <code>security_enabled</code> /
+<code>disable_ip_safety</code> flags telnet does:
+</p>
+
+<ul>
+    <li>When <code>security_enabled</code> is <strong>off</strong> (the
+        default), access is gated on source IP — only private /
+        loopback / link-local addresses are accepted, and
+        gateway-style <code>*.*.*.1</code> addresses are rejected.  No
+        password is required.</li>
+    <li>When <code>security_enabled</code> is <strong>on</strong>, the
+        web server prompts via HTTP Basic Auth against the unified
+        <code>username</code> / <code>password</code> pair (the same
+        one telnet and SSH use).  The IP-safety allowlist is bypassed
+        because the password is now the gate.</li>
+    <li>Three failed Basic-Auth attempts from the same source IP trip
+        the shared 5-minute lockout used by telnet and SSH.  Subsequent
+        requests get <code>HTTP 429 Too Many Requests</code> with a
+        <code>Retry-After: 300</code> header until the window expires.
+        The lock fires <em>before</em> request parsing, so a flood of
+        malformed POSTs from a banned IP can't keep the server busy
+        either.</li>
+</ul>
+
+<h3>6.4.2 Defense-in-Depth Caps</h3>
+
+<ul>
+    <li><strong>30-second read timeout</strong> per request — a
+        slow-loris client can't park a worker indefinitely.</li>
+    <li><strong>16 concurrent connections max</strong>; excess receive
+        <code>HTTP 503 Service Unavailable</code> with a short
+        <code>Retry-After</code>.</li>
+    <li>16 KB cap on request headers, 64 KB cap on POST bodies — the
+        save form is far smaller; this just bounds the worst case from
+        a hostile peer.</li>
+</ul>
+
+<aside class="note">
+<span class="label">Encryption</span>
+The configuration web server speaks plain HTTP, not HTTPS.  Don't
+expose it directly to the public Internet — use it on a trusted LAN,
+or tunnel via SSH (<code>ssh -L 8080:127.0.0.1:8080 …</code>) when
+configuring the gateway from elsewhere.
 </aside>
 
 <!-- ═══════════════════ 7. Security ═══════════════════ -->
@@ -1052,13 +1160,13 @@ Check the <em>Require Login</em> box in the GUI Security frame, or set:
 
 <pre><code>security_enabled = true
 username = admin
-password = <em>your-password</em>
-ssh_username = admin
-ssh_password = <em>your-password</em></code></pre>
+password = <em>your-password</em></code></pre>
 
 <p>
-Telnet and SSH credentials are independent. Use different values if you want
-different access levels, or identical values for simplicity.
+A single <code>username</code> / <code>password</code> pair gates all three
+authenticated interfaces — telnet, SSH, and the configuration web UI. Three
+failed logins from the same source IP — across any of the three — trip a
+5-minute lockout that blocks every protocol on that IP.
 </p>
 
 <h2>7.2 Credential Comparison</h2>
@@ -1074,16 +1182,20 @@ but it is a genuine defence for SSH logins.
 <h2>7.3 Per-IP Lockout</h2>
 
 <p>
-The telnet and SSH servers share a single in-memory lockout table keyed on the
-remote IP address. After <strong>3</strong> failed authentication attempts
-within 5 minutes the IP is blocked across <em>both</em> protocols for 5
-minutes. An attacker cannot bounce between protocols to reset the counter.
+The telnet, SSH, and web servers share a single in-memory lockout table
+keyed on the remote IP address. After <strong>3</strong> failed
+authentication attempts within 5 minutes the IP is blocked across
+<em>all three</em> protocols for 5 minutes. An attacker cannot bounce
+between protocols to reset the counter. The web server responds to a
+locked-out client with <code>429 Too Many Requests</code> and a
+<code>Retry-After: 300</code> header; telnet and SSH simply refuse the
+session.
 </p>
 
 <p>
 Once the block expires the counter resets on the next successful login.
-Lockout events are logged to the console panel so a legitimate user who locked
-themselves out can see what happened.
+Lockout events are logged to the console panel so a legitimate user who
+locked themselves out can see what happened.
 </p>
 
 <h2>7.4 File Permissions</h2>
@@ -1094,7 +1206,7 @@ On Unix, every file the gateway writes that may contain secrets is set to mode
 </p>
 
 <ul>
-    <li><code>egateway.conf</code> — telnet password, SSH password, Groq API key.</li>
+    <li><code>egateway.conf</code> — the unified login password (used by telnet, SSH, and the web UI), Groq API key.</li>
     <li><code>dialup.conf</code> — no secrets, but dial-up mappings.</li>
     <li><code>gateway_hosts</code> — known host fingerprints for outbound SSH dials.</li>
     <li><code>ethernet_ssh_host_key</code> — the SSH server's private host key.</li>
@@ -1462,7 +1574,7 @@ received files.
         <tr><td><code>remote dir</code></td><td>G D</td><td>List files in the current effective directory.</td></tr>
         <tr><td><code>remote cd &lt;subdir&gt;</code></td><td>G C</td><td>Change the gateway's working sub-directory for subsequent commands. Field-encoded path argument per spec &sect;6.7. Bare <code>remote cd</code> (no argument) resets to the <code>transfer_dir</code> root; <code>remote cd ..</code> (cdup) pops one component (no-op at root); a target that doesn't exist on disk is refused with E-packet rather than silently ACKed.</td></tr>
         <tr><td><code>remote space</code></td><td>G $</td><td>Report free disk bytes at the current effective directory.</td></tr>
-        <tr><td><code>remote kermit</code></td><td>G K</td><td>Identify the server (<code>Ethernet Gateway Kermit 0.5.5</code>).</td></tr>
+        <tr><td><code>remote kermit</code></td><td>G K</td><td>Identify the server (<code>Ethernet Gateway Kermit 0.6.0</code>).</td></tr>
         <tr><td><code>remote help</code></td><td>G H / G ?</td><td>List supported subcommands.</td></tr>
         <tr><td><code>remote delete &lt;file&gt;</code> / <code>remote era</code></td><td>G E</td><td>Delete a file in the current effective directory. Path-traversal rejected; missing files return E-packet (not silent ACK). One filename per call &mdash; no wildcard expansion.</td></tr>
         <tr><td><code>remote rename &lt;old&gt; &lt;new&gt;</code></td><td>G R</td><td>Rename a file in place. Both names field-encoded per spec &sect;6.7. Server refuses if the destination already exists, to avoid silent clobber.</td></tr>
@@ -1691,10 +1803,10 @@ hit the same entry.
 <table>
     <thead><tr><th>Command</th><th>Response</th></tr></thead>
     <tbody>
-        <tr><td><code>ATI</code> / <code>ATI0</code></td><td>Product ID and version: <code>Hayes-compatible Ethernet Gateway Modem Emulator v0.5.5</code></td></tr>
+        <tr><td><code>ATI</code> / <code>ATI0</code></td><td>Product ID and version: <code>Hayes-compatible Ethernet Gateway Modem Emulator v0.6.0</code></td></tr>
         <tr><td><code>ATI1</code></td><td>ROM checksum: <code>000</code> (virtual)</td></tr>
         <tr><td><code>ATI2</code></td><td>ROM self-test: <code>OK</code></td></tr>
-        <tr><td><code>ATI3</code></td><td>Firmware identifier: <code>Ethernet Gateway v0.5.5 (Hayes-compatible)</code></td></tr>
+        <tr><td><code>ATI3</code></td><td>Firmware identifier: <code>Ethernet Gateway v0.6.0 (Hayes-compatible)</code></td></tr>
         <tr><td><code>ATI4</code></td><td>Product description: <code>Hayes-compatible virtual modem over TCP</code></td></tr>
         <tr><td><code>ATI5</code></td><td>OEM / country code: <code>B00</code></td></tr>
         <tr><td><code>ATI6</code></td><td>Link diagnostics: <code>No link diagnostics available</code></td></tr>
@@ -2493,17 +2605,18 @@ numeric values fall back to the default.
         <tr><td><code>serial_<em>x</em>_x_code</code></td><td>u8</td><td><code>4</code></td><td>0–4</td><td>Saved <code>ATX</code> result-code level.</td></tr>
         <tr><td><code>ssh_enabled</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Run the SSH server.</td></tr>
         <tr><td><code>ssh_gateway_auth</code></td><td>string</td><td><code>password</code></td><td><code>key</code> or <code>password</code></td><td>Auth mode for the outbound SSH Gateway. See §10.1.</td></tr>
-        <tr><td><code>ssh_password</code></td><td>string</td><td><code>changeme</code></td><td>non-empty</td><td>SSH password. Independent of telnet. Stored plaintext.</td></tr>
         <tr><td><code>ssh_port</code></td><td>u16</td><td><code>2222</code></td><td>&ge; 1</td><td>SSH listen port.</td></tr>
-        <tr><td><code>ssh_username</code></td><td>string</td><td><code>admin</code></td><td>non-empty</td><td>SSH username.</td></tr>
         <tr><td><code>telnet_enabled</code></td><td>bool</td><td><code>true</code></td><td>true/false</td><td>Run the telnet server.</td></tr>
         <tr><td><code>telnet_gateway_negotiate</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Outbound telnet gateway: send proactive TTYPE / NAWS / DO ECHO offers.</td></tr>
         <tr><td><code>telnet_gateway_raw</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Outbound telnet gateway: raw-TCP escape hatch, no IAC layer.</td></tr>
         <tr><td><code>telnet_port</code></td><td>u16</td><td><code>2323</code></td><td>&ge; 1</td><td>Telnet listen port.</td></tr>
         <tr><td><code>transfer_dir</code></td><td>string</td><td><code>transfer</code></td><td>non-empty</td><td>Base directory for file transfers.</td></tr>
-        <tr><td><code>username</code></td><td>string</td><td><code>admin</code></td><td>non-empty</td><td>Telnet username.</td></tr>
+        <tr><td><code>username</code></td><td>string</td><td><code>admin</code></td><td>non-empty</td><td>Unified login username — shared by telnet, SSH, and the configuration web UI.</td></tr>
+        <tr><td><code>password</code></td><td>string</td><td><code>changeme</code></td><td>non-empty</td><td>Unified login password — shared by telnet, SSH, and the configuration web UI.  Stored plaintext.</td></tr>
         <tr><td><code>verbose</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Detailed XMODEM protocol logging.</td></tr>
         <tr><td><code>weather_zip</code></td><td>string</td><td>empty</td><td>5 digits</td><td>Last-used US ZIP. Updated automatically.</td></tr>
+        <tr><td><code>web_enabled</code></td><td>bool</td><td><code>false</code></td><td>true/false</td><td>Run the configuration web server on <code>web_port</code>.  Off by default; mirrors the GUI settings page in a browser.  See §5.6 / §6.4.</td></tr>
+        <tr><td><code>web_port</code></td><td>u16</td><td><code>8080</code></td><td>&ge; 1</td><td>Web-server listen port.</td></tr>
         <tr><td><code>xmodem_block_timeout</code></td><td>u64</td><td><code>20</code></td><td>&ge; 1 (seconds)</td><td>Per-block timeout during transfer.</td></tr>
         <tr><td><code>xmodem_max_retries</code></td><td>usize</td><td><code>10</code></td><td>&ge; 1</td><td>NAK retry cap per block.</td></tr>
         <tr><td><code>xmodem_negotiation_retry_interval</code></td><td>u64</td><td><code>7</code></td><td>&ge; 1 (seconds)</td><td>Gap between C/NAK pokes during the XMODEM/YMODEM handshake.</td></tr>
@@ -2656,7 +2769,7 @@ run to completion rather than halt mid-setup with <code>ERROR</code>.
 <hr>
 
 <p class="small" style="margin-top: 1.5em; text-align: center;">
-Ethernet Gateway v0.5.5 &mdash; Copyright &copy; 2026 Ricky Bryce &mdash;
+Ethernet Gateway v0.6.0 &mdash; Copyright &copy; 2026 Ricky Bryce &mdash;
 Licensed under GPL-3.0-or-later.
 </p>
 

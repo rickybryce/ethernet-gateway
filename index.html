@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Ethernet Gateway v0.5.5 &mdash; User Manual</title>
+    <title>Ethernet Gateway v0.6.0 &mdash; User Manual</title>
     <meta name="description" content="Complete user manual for Ethernet Gateway — a telnet/SSH gateway server with XMODEM file transfer, AI chat, web browser, weather, Hayes modem emulation on two independent serial ports, and per-port telnet-serial console bridges.">
     <style>
         :root {
@@ -519,7 +519,7 @@
             </div>
             <h1>Ethernet Gateway</h1>
             <p class="hdr-tagline">User Manual</p>
-            <div class="hdr-version">v0.5.5</div>
+            <div class="hdr-version">v0.6.0</div>
             <div class="hdr-badges">
                 <span class="hdr-badge">Telnet</span>
                 <span class="hdr-badge">SSH</span>
@@ -667,7 +667,7 @@
                     automatically.
                 </p>
                 <pre><code><span class="prompt-char">$</span> ./ethernet-gateway
-<span class="output-text">Ethernet Gateway v0.5.5
+<span class="output-text">Ethernet Gateway v0.6.0
 Author: Ricky Bryce
 
 Created default configuration: egateway.conf
@@ -694,7 +694,7 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                     <ol>
                         <li>Enable SSH in the configuration</li>
                         <li>Connect: <code>ssh -p 2222 admin@localhost</code></li>
-                        <li>Enter the SSH password (default: <code>changeme</code>)</li>
+                        <li>Enter the login password (default: <code>changeme</code> — the same one telnet and the web UI use)</li>
                     </ol>
                 </div>
             </div>
@@ -1149,15 +1149,15 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                 <table class="data-table">
                     <tr><th>Setting</th><th>Default</th><th>Description</th></tr>
                     <tr><td>Security enabled</td><td>false</td><td>Require login authentication</td></tr>
-                    <tr><td>Telnet username</td><td><code>admin</code></td><td>Telnet login username</td></tr>
-                    <tr><td>Telnet password</td><td><code>changeme</code></td><td>Telnet login password</td></tr>
-                    <tr><td>SSH username</td><td><code>admin</code></td><td>SSH login username (independent)</td></tr>
-                    <tr><td>SSH password</td><td><code>changeme</code></td><td>SSH login password (independent)</td></tr>
+                    <tr><td>Username</td><td><code>admin</code></td><td>Login username — shared by telnet, SSH, and the web UI</td></tr>
+                    <tr><td>Password</td><td><code>changeme</code></td><td>Login password — shared by telnet, SSH, and the web UI</td></tr>
                 </table>
                 <div class="callout callout-warn">
                     <strong>Important:</strong> The default password is <code>changeme</code>.
                     If you enable security, change the password immediately. After 3 failed
-                    login attempts from the same IP, that address is locked out for 5 minutes.
+                    login attempts from the same IP, that address is locked out for 5 minutes —
+                    and the lockout applies to all three protocols (telnet, SSH, web UI), so an
+                    attacker can't bounce between them to reset the counter.
                 </div>
 
                 <div class="cat">Server Configuration</div>
@@ -1295,8 +1295,8 @@ max_sessions = 50
 idle_timeout_secs = 900
 ssh_enabled = false
 ssh_port = 2222
-ssh_username = admin
-ssh_password = changeme
+web_enabled = false
+web_port = 8080
 groq_api_key =
 browser_homepage = http://telnetbible.com
 weather_zip =
@@ -1367,13 +1367,64 @@ ssh_gateway_auth = password</span></code></pre>
                     <tr><td>Key format</td><td>OpenSSH</td></tr>
                     <tr><td>File permissions</td><td>0600 (Unix)</td></tr>
                     <tr><td>Authentication</td><td>Password only</td></tr>
-                    <tr><td>Credentials</td><td>Independent from telnet</td></tr>
+                    <tr><td>Credentials</td><td>Shared with telnet and the web UI (<code>username</code> / <code>password</code>)</td></tr>
                 </table>
 
                 <p class="dim-text">
                     The Ed25519 host key is automatically generated on first use. The SSH
-                    server has its own username and password, configured separately from
-                    the telnet credentials.
+                    server authenticates against the unified <code>username</code> /
+                    <code>password</code> pair in <code>egateway.conf</code> — the same
+                    credentials used for telnet and the configuration web UI. There is no
+                    separate SSH credential pair anymore.
+                </p>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- WEB CONFIGURATION UI                          -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section">
+                <h2 id="web-ui">Web Configuration Interface</h2>
+
+                <p class="intro">Optional browser-based settings page that mirrors the desktop GUI.</p>
+
+                <table class="data-table">
+                    <tr><th>Detail</th><th>Value</th></tr>
+                    <tr><td>Default port</td><td>8080</td></tr>
+                    <tr><td>Default state</td><td>Disabled (opt-in)</td></tr>
+                    <tr><td>Protocol</td><td>HTTP/1.1 (hand-rolled, no external HTTP dep)</td></tr>
+                    <tr><td>Authentication</td><td>HTTP Basic, gated on <code>security_enabled</code></td></tr>
+                    <tr><td>Credentials</td><td>Unified <code>username</code> / <code>password</code> (shared with telnet and SSH)</td></tr>
+                    <tr><td>IP allowlist</td><td>Same private/loopback rules as telnet (honors <code>disable_ip_safety</code>)</td></tr>
+                    <tr><td>Brute-force lockout</td><td>3 failed logins per IP — 5-minute ban, shared with telnet + SSH</td></tr>
+                    <tr><td>Concurrent connection cap</td><td>16 (excess get HTTP 503)</td></tr>
+                </table>
+
+                <p class="dim-text">
+                    Enable it in the GUI's Server frame (Web Server checkbox) or via the
+                    telnet menu's <strong>Configuration &gt; Server Configuration &gt;
+                    W</strong> (Toggle Web). After enabling and restarting, browse to
+                    <code>http://&lt;server-ip&gt;:8080/</code>. The page mirrors every GUI
+                    frame and uses per-frame Save buttons that match the GUI's behaviors:
+                </p>
+                <ul>
+                    <li><strong>Server frame:</strong> Save and Restart — persists config
+                        and triggers a full server restart so port/listener changes take
+                        effect.</li>
+                    <li><strong>Serial Ports frame:</strong> Save — persists and reloads
+                        the serial port managers only (telnet/SSH sessions are untouched).</li>
+                    <li><strong>Security / File Transfer / AI/Browser / General:</strong>
+                        Save — persists only; the changes are read live by the relevant
+                        code paths without a restart.</li>
+                </ul>
+                <p class="dim-text">
+                    The web page includes a live <code>Console Output</code> tail that
+                    polls every 2&nbsp;seconds, a serial-port dropdown with a refresh
+                    button that re-scans the host's serial devices on click, and inline
+                    confirmation dialogs that warn before disabling the web server or
+                    changing its port (either action will break the operator's current
+                    browser session).
                 </p>
             </div>
 
@@ -1616,7 +1667,7 @@ ssh_gateway_auth = password</span></code></pre>
                 </p>
                 <div class="instructions">
                     <ul>
-                        <li><code>egateway.conf</code> &mdash; contains telnet/SSH passwords and the Groq API key</li>
+                        <li><code>egateway.conf</code> &mdash; contains the unified login password (shared by telnet, SSH, and the web UI) and the Groq API key</li>
                         <li><code>ethernet_ssh_host_key</code> &mdash; the gateway's SSH server private host key</li>
                         <li><code>ethernet_gateway_ssh_key</code> &mdash; the gateway's outgoing SSH client key</li>
                         <li><code>gateway_hosts</code> &mdash; remote-server host keys (privacy: reveals dial history)</li>
@@ -1798,7 +1849,7 @@ ssh_gateway_auth = password</span></code></pre>
         <!-- FOOTER                                            -->
         <!-- ══════════════════════════════════════════════════ -->
         <footer class="site-footer">
-            Ethernet Gateway v0.5.5 &mdash; &copy; 2026 Ricky Bryce &mdash;
+            Ethernet Gateway v0.6.0 &mdash; &copy; 2026 Ricky Bryce &mdash;
             Licensed under GPL-3.0-or-later
         </footer>
 
