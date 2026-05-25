@@ -1463,8 +1463,14 @@ impl TelnetSession {
     const MAX_FILE_SIZE: usize = crate::tnio::MAX_FILE_SIZE as usize;
     const MAX_FILENAME_LEN: usize = 64;
 
-    /// Create a session for a serial modem connection.  Uses ASCII terminal
-    /// (no color, no IAC), skips terminal detection and authentication.
+    /// Create a session for a serial modem connection.  Starts in
+    /// ASCII as a safe default, then runs the BACKSPACE-key terminal
+    /// probe in `detect_terminal_type` so a C64 dialing in via the
+    /// modem emulator can land in PETSCII instead of ASCII.  IAC
+    /// option negotiation is skipped (the wire isn't telnet — IAC
+    /// bytes would render as garbage on the caller's terminal).
+    /// Authentication is also skipped: arrival via ATDT on a physical
+    /// port is its own trust boundary.
     ///
     /// Serial sessions don't have a peer IP and don't run
     /// `authenticate()`, so the lockout map is genuinely empty —
@@ -2719,29 +2725,36 @@ impl TelnetSession {
     // ─── Terminal detection ─────────────────────────────────
 
     async fn detect_terminal_type(&mut self) -> Result<(), std::io::Error> {
-        // Advertise server-side echo + char-at-a-time mode, and request
-        // terminal type + window size from the client. Mark the DOs as
-        // sent so a client-initiated WILL TTYPE / WILL NAWS is treated
-        // as an acknowledgement instead of triggering a duplicate DO.
-        self.send_telnet_protocol(&[
-            IAC, WILL, OPT_ECHO,
-            IAC, WILL, OPT_SGA,
-            IAC, DO, OPT_SGA,
-            IAC, DO, OPT_TTYPE,
-            IAC, DO, OPT_NAWS,
-        ])
-        .await?;
-        self.neg_sent_will[OPT_ECHO as usize] = true;
-        self.neg_sent_will[OPT_SGA as usize] = true;
-        self.neg_sent_do[OPT_SGA as usize] = true;
-        self.neg_sent_do[OPT_TTYPE as usize] = true;
-        self.neg_sent_do[OPT_NAWS as usize] = true;
-        self.flush().await?;
+        // Serial callers don't speak the telnet protocol — dialing
+        // ATDT ETHERNET-GATEWAY puts a raw byte stream on the wire, so
+        // IAC bytes (0xFF) would render as garbage characters on the
+        // C64/CP/M terminal.  Skip option negotiation and go straight
+        // to the BACKSPACE prompt for serial.
+        if !self.is_serial {
+            // Advertise server-side echo + char-at-a-time mode, and request
+            // terminal type + window size from the client. Mark the DOs as
+            // sent so a client-initiated WILL TTYPE / WILL NAWS is treated
+            // as an acknowledgement instead of triggering a duplicate DO.
+            self.send_telnet_protocol(&[
+                IAC, WILL, OPT_ECHO,
+                IAC, WILL, OPT_SGA,
+                IAC, DO, OPT_SGA,
+                IAC, DO, OPT_TTYPE,
+                IAC, DO, OPT_NAWS,
+            ])
+            .await?;
+            self.neg_sent_will[OPT_ECHO as usize] = true;
+            self.neg_sent_will[OPT_SGA as usize] = true;
+            self.neg_sent_do[OPT_SGA as usize] = true;
+            self.neg_sent_do[OPT_TTYPE as usize] = true;
+            self.neg_sent_do[OPT_NAWS as usize] = true;
+            self.flush().await?;
 
-        // Give the client a moment to respond, then process negotiation
-        // replies (including any TTYPE IS / NAWS subnegotiations).
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        self.drain_input().await;
+            // Give the client a moment to respond, then process negotiation
+            // replies (including any TTYPE IS / NAWS subnegotiations).
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            self.drain_input().await;
+        }
 
         // If TTYPE already identified the client, skip the manual prompt.
         if self.ttype_matched {
@@ -2999,7 +3012,7 @@ impl TelnetSession {
     pub(crate) async fn run(&mut self) -> Result<(), std::io::Error> {
         let cfg = config::get_config();
 
-        if !self.is_serial && !self.is_ssh {
+        if !self.is_ssh {
             self.detect_terminal_type().await?;
 
             // Auto-set the IAC/CR-NUL transform default based on
@@ -3012,11 +3025,18 @@ impl TelnetSession {
             // Term, C-Kermit, SecureCRT) always negotiate and need
             // 0xFF escaped; raw TCP clients (netcat, IMP8, CCGMS,
             // StrikeTerm, AltairDuino firmware) stay silent and get a
-            // transparent byte stream.  The I key on the File Transfer
-            // menu still lets the user override per-session.
+            // transparent byte stream.  Serial sessions skip the
+            // negotiation entirely (no IAC), so telnet_negotiated
+            // stays false and xmodem_iac is left off — matching the
+            // raw byte stream a serial modem caller expects.  The I
+            // key on the File Transfer menu still lets the user
+            // override per-session.
             self.xmodem_iac = self.telnet_negotiated;
 
-            if cfg.security_enabled
+            // Serial sessions don't authenticate — they arrived via
+            // ATDT on a physical port, which is its own trust boundary.
+            if !self.is_serial
+                && cfg.security_enabled
                 && !self.authenticate().await?
             {
                 return Ok(());
