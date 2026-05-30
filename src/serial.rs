@@ -891,6 +891,17 @@ fn serial_thread(
 
 // ─── Command mode ──────────────────────────────────────────
 
+/// Whether `byte` should erase a character during command-mode line
+/// editing.  Always accepts the configured backspace char (`S5`, default
+/// ASCII BS 0x08) and ASCII DEL (0x7F).  The C64's PETSCII DEL (0x14, the
+/// INST/DEL key) is accepted only when PETSCII translation is active
+/// (`AT&P1`), so a plain-ASCII caller's command-mode editing is byte-for-
+/// byte unchanged — e.g. an ASCII terminal sending 0x14 (Ctrl-T) stays an
+/// ignored control byte, exactly as before the C64 affordance was added.
+fn is_command_backspace(byte: u8, bs: u8, petscii: bool) -> bool {
+    byte == bs || byte == 0x7F || (petscii && byte == 0x14)
+}
+
 fn command_mode_tick(state: &mut ModemState) {
     let mut buf = [0u8; 1];
     match state.port.read(&mut buf) {
@@ -915,13 +926,22 @@ fn command_mode_tick(state: &mut ModemState) {
                 if !cmd.is_empty() {
                     process_at_command(state, &cmd);
                 }
-            } else if byte == bs || byte == 0x7F {
-                // Backspace: configured S5 character or ASCII DEL.
+            } else if is_command_backspace(byte, bs, state.petscii_translate) {
                 if !state.cmd_buffer.is_empty() {
                     state.cmd_buffer.pop();
                     if state.echo {
-                        // Echo BS-SPACE-BS using the configured BS char.
-                        let _ = state.port.write_all(&[bs, b' ', bs]);
+                        if state.petscii_translate {
+                            // On a C64, PETSCII DEL is a self-contained
+                            // destructive backspace: a single 0x14 erases
+                            // the char to the left and pulls the line
+                            // back.  The ASCII BS-SPACE-BS dance would
+                            // just print garbage there.
+                            let _ = state.port.write_all(&[0x14]);
+                        } else {
+                            // ASCII: erase with BS-SPACE-BS using the
+                            // configured BS char.
+                            let _ = state.port.write_all(&[bs, b' ', bs]);
+                        }
                     }
                 }
             } else if byte == b'/' && matches!(state.cmd_buffer.as_str(), "A" | "a") {
@@ -4274,6 +4294,29 @@ mod tests {
         for b in [b'0', b'9', b' ', b'!', b':', b'-', 0x0D, 0x0A] {
             assert_eq!(translate_petscii_to_ascii_byte(b), b);
         }
+    }
+
+    #[test]
+    fn test_is_command_backspace() {
+        // Default S5 backspace char is ASCII BS (0x08).
+        let bs = S_REG_DEFAULTS[5];
+        assert_eq!(bs, 0x08);
+        // Configured BS and ASCII DEL are backspace regardless of mode.
+        for petscii in [false, true] {
+            assert!(is_command_backspace(0x08, bs, petscii));
+            assert!(is_command_backspace(0x7F, bs, petscii));
+            // A custom S5 char is honored too.
+            assert!(is_command_backspace(0x7F, 0x7F, petscii));
+            // Ordinary input is never a backspace.
+            for b in [b'A', b'+', b'0', b' ', 0x0D, 0x0A, 0x1B] {
+                assert!(!is_command_backspace(b, bs, petscii));
+            }
+        }
+        // C64 PETSCII DEL (INST/DEL key) is backspace ONLY under AT&P1 —
+        // a plain-ASCII caller's 0x14 (Ctrl-T) stays an ignored control
+        // byte, so ASCII command-mode editing is unchanged.
+        assert!(is_command_backspace(0x14, bs, true));
+        assert!(!is_command_backspace(0x14, bs, false));
     }
 
     #[test]
