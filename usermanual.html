@@ -1900,7 +1900,7 @@ baud rates report code 1.
         <tr><td><code>AT&amp;K3</code></td><td>Bidirectional RTS/CTS hardware flow control.</td></tr>
         <tr><td><code>AT&amp;K4</code></td><td>Bidirectional XON/XOFF software flow control.</td></tr>
         <tr><td><code>AT&amp;P0</code> (<em>gateway default</em>)</td><td>PETSCII translation off — direct-TCP dials (<code>ATDT&nbsp;host:port</code>) are raw ASCII passthrough.</td></tr>
-        <tr><td><code>AT&amp;P1</code></td><td>PETSCII translation on — vendor extension for C64/PET callers. The emulator case-swaps letters in both directions and maps ASCII BS&nbsp;↔&nbsp;PETSCII DEL so an ASCII BBS like <code>telehack.com</code> reads correctly. ANSI <code>ESC&nbsp;[ …</code> cursor/color sequences are stripped on the inbound side so they don't render as garbage. Applies only to direct-TCP dials; <code>ATDT&nbsp;ethernet-gateway</code> already detects PETSCII terminals via the telnet menu and renders accordingly. Persists via <code>AT&amp;W</code>.</td></tr>
+        <tr><td><code>AT&amp;P1</code></td><td>PETSCII translation on — vendor extension for C64/PET callers. The emulator case-swaps letters in both directions and maps ASCII BS&nbsp;↔&nbsp;PETSCII DEL so an ASCII BBS like <code>telehack.com</code> reads correctly. ANSI <code>ESC&nbsp;[ …</code> cursor/color sequences are stripped on the inbound side so they don't render as garbage. Inbound punctuation that renders wrong on a C64 in lower/upper mode is normalized to plain ASCII: back-tick (the old &ldquo;left single quote&rdquo;, which shows as a thick underscore) and UTF-8 &ldquo;smart&rdquo; single quotes&nbsp;&rarr; <code>'</code>; smart double quotes&nbsp;&rarr; <code>"</code>; tilde and en/em dashes&nbsp;&rarr; <code>-</code>; the ellipsis&nbsp;&rarr; <code>...</code>; other high bytes the C64 can't display are dropped or shown as <code>?</code>. Applies only to direct-TCP dials; <code>ATDT&nbsp;ethernet-gateway</code> already detects PETSCII terminals via the telnet menu and renders accordingly. Persists via <code>AT&amp;W</code>.</td></tr>
     </tbody>
 </table>
 
@@ -2000,6 +2000,21 @@ The implementation details:
     <li>Fewer or more than three consecutive escape characters are passed through as data.</li>
     <li>The escape is interrupted if the sender emits any non-escape byte mid-sequence.</li>
 </ul>
+
+<aside class="note">
+<span class="label">Escape won't trigger? (bit-banged serial)</span>
+On a C64 with a software/bit-banged interface (EZ232 and similar) the wire
+can pick up a stray byte while &ldquo;idle,&rdquo; which silently defeats the
+escape: a phantom byte just before your first <code>+</code> resets the
+leading guard timer, and one within a second of the third <code>+</code>
+flushes <code>+++</code> to the host and cancels the escape. To see exactly
+what happens, set <code>EGATEWAY_GATEWAY_DEBUG=1</code> (or toggle Gateway
+Debug Trace) and try again &mdash; the log shows <code>[esc]</code> lines for
+each escape character accepted, the silence measured before the first one,
+and the offending byte if a sequence is broken. Lowering <code>S12</code>
+(e.g. <code>ATS12=25</code> for a half-second guard) tightens the window that
+a stray byte can spoil.
+</aside>
 
 <h2 id="ch9-aslash">9.9 A/ — Repeat Last Command</h2>
 

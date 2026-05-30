@@ -571,6 +571,18 @@ pub fn get_security_flags() -> (bool, bool) {
     }
 }
 
+/// Read the gateway-debug trace flag without cloning the full Config.
+/// Consulted by the serial `+++` escape diagnostics on every read, so it
+/// avoids the ~20-String allocation `get_config()` would cost.  Mirrors
+/// the "Gateway Debug Trace" toggle in the menu/GUI/web config.
+pub fn get_gateway_debug() -> bool {
+    let guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
+    match guard.as_ref() {
+        Some(cfg) => cfg.gateway_debug,
+        None => DEFAULT_GATEWAY_DEBUG,
+    }
+}
+
 /// Load (or create) the configuration file and store it in the global singleton.
 pub fn load_or_create_config() -> Config {
     let cfg = if Path::new(CONFIG_FILE).exists() {

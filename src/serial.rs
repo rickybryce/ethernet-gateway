@@ -2263,6 +2263,69 @@ impl AnsiStripState {
     }
 }
 
+/// State machine that normalizes inbound punctuation so it renders
+/// legibly on a C64 in lower/upper (text) mode.  Old ASCII text files
+/// use back-tick as a "left single quote" and tilde as a dash; on the
+/// C64 0x60 renders as a horizontal bar (the "thick underscore" users
+/// reported) and 0x7E as a graphic.  Modern hosts emit UTF-8 "smart"
+/// quotes, dashes, and ellipses (all `0xE2 0x80 0xXX`).  None of these
+/// land on the intended glyph in PETSCII, so we fold them down to plain
+/// ASCII before the case-swap step.  High bytes the C64 can't display
+/// are dropped (PETSCII color/control range) or replaced with '?'.
+/// Stateful so a UTF-8 sequence split across TCP reads is still decoded.
+#[derive(Default)]
+enum PetsciiPunctState {
+    #[default]
+    Normal,
+    SawE2,   // got 0xE2, awaiting 0x80
+    SawE280, // got 0xE2 0x80, awaiting the final byte
+}
+
+impl PetsciiPunctState {
+    /// Push one input byte, appending its normalized replacement (zero
+    /// or more bytes — the ellipsis expands to three) to `out`.
+    fn feed(&mut self, byte: u8, out: &mut Vec<u8>) {
+        match self {
+            PetsciiPunctState::Normal => self.feed_ground(byte, out),
+            PetsciiPunctState::SawE2 => {
+                if byte == 0x80 {
+                    *self = PetsciiPunctState::SawE280;
+                } else {
+                    // The 0xE2 wasn't the lead of a U+2018-range glyph.
+                    // Emit '?' for the orphaned lead byte and reprocess
+                    // this one from the ground state (it may itself be a
+                    // fresh 0xE2 or other meaningful byte).
+                    out.push(b'?');
+                    *self = PetsciiPunctState::Normal;
+                    self.feed_ground(byte, out);
+                }
+            }
+            PetsciiPunctState::SawE280 => {
+                match byte {
+                    0x98 | 0x99 => out.push(0x27),         // ‘ ’ → '
+                    0x9C | 0x9D => out.push(0x22),         // “ ” → "
+                    0x93 | 0x94 => out.push(b'-'),         // en/em dash → -
+                    0xA6 => out.extend_from_slice(b"..."), // … → ...
+                    _ => out.push(b'?'),                   // other U+20xx
+                }
+                *self = PetsciiPunctState::Normal;
+            }
+        }
+    }
+
+    /// Handle one byte in the ground state (not mid-UTF-8 sequence).
+    fn feed_ground(&mut self, byte: u8, out: &mut Vec<u8>) {
+        match byte {
+            0xE2 => *self = PetsciiPunctState::SawE2,
+            0x60 => out.push(0x27),        // back-tick → apostrophe
+            0x7E => out.push(b'-'),        // tilde → dash
+            0x80..=0x9F => {}              // PETSCII color/control — drop
+            0xA0..=0xFF => out.push(b'?'), // other high bytes
+            _ => out.push(byte),
+        }
+    }
+}
+
 /// Online mode for direct TCP connections (ATDT host:port).
 /// Returns `Escaped` if the user sent +++, `Disconnected` on I/O error or EOF.
 fn online_mode_tcp(state: &mut ModemState, tcp: &mut std::net::TcpStream) -> OnlineExit {
@@ -2277,6 +2340,10 @@ fn online_mode_tcp(state: &mut ModemState, tcp: &mut std::net::TcpStream) -> Onl
     // across reads regardless so a CSI split across packets still
     // collapses correctly.
     let mut ansi = AnsiStripState::default();
+    // Punctuation normalizer for the inbound direction, applied after
+    // the ANSI stripper and before the ASCII→PETSCII case-swap.  Lives
+    // across reads so a UTF-8 smart-quote split across packets decodes.
+    let mut punct = PetsciiPunctState::default();
 
     let restart_flag = &SERIAL_RESTART[state.port_id.index()];
     loop {
@@ -2312,11 +2379,15 @@ fn online_mode_tcp(state: &mut ModemState, tcp: &mut std::net::TcpStream) -> Onl
             Ok(0) => return OnlineExit::Disconnected,
             Ok(n) => {
                 if state.petscii_translate {
-                    let translated: Vec<u8> = tcp_buf[..n]
-                        .iter()
-                        .filter_map(|&b| ansi.feed(b))
-                        .map(translate_ascii_to_petscii_byte)
-                        .collect();
+                    let mut translated = Vec::with_capacity(n);
+                    for &b in &tcp_buf[..n] {
+                        if let Some(stripped) = ansi.feed(b) {
+                            punct.feed(stripped, &mut translated);
+                        }
+                    }
+                    for b in translated.iter_mut() {
+                        *b = translate_ascii_to_petscii_byte(*b);
+                    }
                     if !translated.is_empty() {
                         if state.port.write_all(&translated).is_err() {
                             return OnlineExit::Disconnected;
@@ -2355,6 +2426,19 @@ fn guard_time(state: &ModemState) -> Duration {
     Duration::from_millis(state.s_regs[12] as u64 * 20)
 }
 
+/// Whether to emit `+++` escape-sequence diagnostics.  Honors the same two
+/// switches as the SSH/Telnet gateway trace — the `gateway_debug` config
+/// flag (the "Gateway Debug Trace" toggle in the menu/GUI/web config) or
+/// the `EGATEWAY_GATEWAY_DEBUG` env var — so a caller debugging a stubborn
+/// escape (e.g. a C64 where bit-banged RX noise keeps breaking the
+/// sequence) can see exactly which byte defeated it.  The flag read is a
+/// single Mutex acquisition with no allocation; called once per read, not
+/// per byte, so it costs nothing meaningful when off.
+fn escape_trace_enabled() -> bool {
+    config::get_gateway_debug()
+        || std::env::var_os("EGATEWAY_GATEWAY_DEBUG").is_some_and(|v| !v.is_empty())
+}
+
 /// Process bytes from the serial port during online mode.  Bytes that should
 /// be forwarded to the remote end are appended to `forward`.  Pending escape
 /// bytes from a possible escape sequence are held back (not appended) until
@@ -2369,6 +2453,7 @@ fn process_online_bytes(
     let guard = guard_time(state);
     // Per Hayes standard, S2 > 127 or S12 = 0 disables escape detection.
     let escape_enabled = esc <= 127 && !guard.is_zero();
+    let trace = escape_trace_enabled();
 
     for &byte in data {
         let now = Instant::now();
@@ -2376,14 +2461,37 @@ fn process_online_bytes(
         if escape_enabled && byte == esc {
             if state.plus_count == 0 {
                 // First escape char: only start sequence if guard time (silence) has elapsed
-                if now.duration_since(state.last_data_time) >= guard {
+                let silence = now.duration_since(state.last_data_time);
+                if silence >= guard {
                     state.plus_count = 1;
                     state.plus_start = now;
+                    if trace {
+                        glog!(
+                            "[esc] Port {}: escape char #1 accepted ({}ms silence before)",
+                            state.port_id.label(),
+                            silence.as_millis()
+                        );
+                    }
                     continue; // hold this byte
                 }
                 // Guard time not met — forward normally
+                if trace {
+                    glog!(
+                        "[esc] Port {}: escape char ignored — only {}ms silence before it (need {}ms); forwarded as data",
+                        state.port_id.label(),
+                        silence.as_millis(),
+                        guard.as_millis()
+                    );
+                }
             } else if state.plus_count < 3 {
                 state.plus_count += 1;
+                if trace {
+                    glog!(
+                        "[esc] Port {}: escape char #{} accepted",
+                        state.port_id.label(),
+                        state.plus_count
+                    );
+                }
                 if state.plus_count == 3 {
                     state.plus_start = now; // record time of third escape char
                     continue;
@@ -2396,6 +2504,14 @@ fn process_online_bytes(
 
         // Non-escape byte (or 4th escape char):  flush any pending escape chars
         if state.plus_count > 0 {
+            if trace {
+                glog!(
+                    "[esc] Port {}: sequence broken after {} escape char(s) by byte 0x{:02X}; pending chars flushed to host",
+                    state.port_id.label(),
+                    state.plus_count,
+                    byte
+                );
+            }
             for _ in 0..state.plus_count {
                 forward.push(esc);
             }
@@ -2415,6 +2531,12 @@ fn check_plus_complete(state: &mut ModemState) -> bool {
         && Instant::now().duration_since(state.plus_start) >= guard_time(state)
     {
         state.plus_count = 0;
+        if escape_trace_enabled() {
+            glog!(
+                "[esc] Port {}: escape complete (guard time after 3rd char elapsed) — returning to command mode",
+                state.port_id.label()
+            );
+        }
         return true;
     }
     false
@@ -4221,6 +4343,77 @@ mod tests {
         let mut ansi = AnsiStripState::default();
         let kept: Vec<u8> = b"A\x1b7B".iter().filter_map(|&b| ansi.feed(b)).collect();
         assert_eq!(kept, b"AB");
+    }
+
+    // ─── PETSCII inbound punctuation normalizer ────────────
+
+    /// Run a byte slice through a fresh normalizer in one shot.
+    fn punct_all(input: &[u8]) -> Vec<u8> {
+        let mut punct = PetsciiPunctState::default();
+        let mut out = Vec::new();
+        for &b in input {
+            punct.feed(b, &mut out);
+        }
+        out
+    }
+
+    #[test]
+    fn test_petscii_punct_legacy_ascii() {
+        // Back-tick (old "left single quote") → apostrophe; tilde → dash.
+        // Plain ASCII letters pass through untouched (case-swap happens
+        // in a later stage, not here).
+        assert_eq!(punct_all(b"it`s"), b"it's");
+        assert_eq!(punct_all(b"a~b"), b"a-b");
+        assert_eq!(punct_all(b"Hello, World!"), b"Hello, World!");
+    }
+
+    #[test]
+    fn test_petscii_punct_utf8_smart_glyphs() {
+        // UTF-8 smart quotes, dashes, and ellipsis fold to ASCII.
+        assert_eq!(punct_all("don\u{2019}t".as_bytes()), b"don't");
+        assert_eq!(punct_all("\u{2018}q\u{2019}".as_bytes()), b"'q'");
+        assert_eq!(punct_all("\u{201c}q\u{201d}".as_bytes()), b"\"q\"");
+        assert_eq!(punct_all("a\u{2013}b".as_bytes()), b"a-b"); // en dash
+        assert_eq!(punct_all("a\u{2014}b".as_bytes()), b"a-b"); // em dash
+        assert_eq!(punct_all("wait\u{2026}".as_bytes()), b"wait..."); // ellipsis → 3 bytes
+    }
+
+    #[test]
+    fn test_petscii_punct_utf8_split_across_reads() {
+        // A 3-byte ellipsis split mid-sequence still decodes — the
+        // parser state survives across feed() calls.
+        let mut punct = PetsciiPunctState::default();
+        let mut out = Vec::new();
+        let bytes = "x\u{2026}y".as_bytes(); // x E2 80 A6 y
+        punct.feed(bytes[0], &mut out); // 'x'
+        punct.feed(bytes[1], &mut out); // 0xE2
+        // Boundary: nothing emitted yet for the partial sequence.
+        assert_eq!(out, b"x");
+        punct.feed(bytes[2], &mut out); // 0x80
+        punct.feed(bytes[3], &mut out); // 0xA6 → "..."
+        punct.feed(bytes[4], &mut out); // 'y'
+        assert_eq!(out, b"x...y");
+    }
+
+    #[test]
+    fn test_petscii_punct_orphan_e2_recovery() {
+        // A lone 0xE2 not followed by 0x80 yields '?' for the orphan,
+        // then the following byte is processed normally.
+        assert_eq!(punct_all(&[b'A', 0xE2, b'B']), b"A?B");
+        // Two 0xE2 in a row: first is orphaned, second starts a fresh
+        // (also orphaned here) sequence.
+        assert_eq!(punct_all(&[0xE2, 0xE2, b'C']), b"??C");
+        // 0xE2 0x80 followed by an unrecognized final byte → '?'.
+        assert_eq!(punct_all(&[0xE2, 0x80, 0x88, b'Z']), b"?Z");
+    }
+
+    #[test]
+    fn test_petscii_punct_high_byte_sanitization() {
+        // PETSCII color/control bytes (0x80–0x9F) are dropped; other
+        // high bytes (0xA0–0xFF) collapse to '?'.
+        assert_eq!(punct_all(&[b'A', 0x90, b'B']), b"AB"); // dropped
+        assert_eq!(punct_all(&[b'A', 0xFF, b'B']), b"A?B"); // replaced
+        assert_eq!(punct_all(&[0xA0]), b"?");
     }
 
     // ─── Numeric result code mapping ──────────────────────
