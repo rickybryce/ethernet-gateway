@@ -650,13 +650,33 @@ async fn end_off_receiver(
     state: &mut ReadState,
     t: &Tunables,
 ) -> Result<(), String> {
+    // Everything here is best-effort: the final data block was already ack'd,
+    // so the file is complete.  A peer that tears down (EOF / closed pipe —
+    // which `send_code`/`accept_code` surface as Err) or goes silent must NOT
+    // turn a finished transfer into a failure, so we swallow errors and return
+    // Ok rather than propagating with `?`.  A local ESC abort here is moot for
+    // the same reason and likewise stops the handshake cleanly.
+    macro_rules! send_or_done {
+        ($code:expr) => {
+            if send_code(writer, $code, is_tcp).await.is_err() {
+                return Ok(());
+            }
+        };
+    }
+    macro_rules! accept_or_done {
+        ($allowed:expr) => {
+            match accept_code(reader, is_tcp, is_petscii, state, $allowed, t.block_timeout).await {
+                Ok(c) => c,
+                Err(_) => return Ok(()),
+            }
+        };
+    }
+
     // Acknowledge the final block and re-handshake.
     let mut got_ack = false;
     for _ in 0..=t.max_retries {
-        send_code(writer, Code::Goo, is_tcp).await?;
-        if let Some(Code::Ack) =
-            accept_code(reader, is_tcp, is_petscii, state, &[Code::Ack], t.block_timeout).await?
-        {
+        send_or_done!(Code::Goo);
+        if let Some(Code::Ack) = accept_or_done!(&[Code::Ack]) {
             got_ack = true;
             break;
         }
@@ -664,18 +684,18 @@ async fn end_off_receiver(
     if verbose && !got_ack {
         glog!("PUNTER recv: end-off ACK not received (peer may have torn down)");
     }
-    send_code(writer, Code::Sb, is_tcp).await?;
+    send_or_done!(Code::Sb);
 
     // Wait for the sender's SYN (resend S/B on timeout), then answer SYN and
     // wait for the sender's S/B (resend SYN on timeout).
     let mut got_syn = false;
     for _ in 0..=t.max_retries {
-        match accept_code(reader, is_tcp, is_petscii, state, &[Code::Syn], t.block_timeout).await? {
+        match accept_or_done!(&[Code::Syn]) {
             Some(Code::Syn) => {
                 got_syn = true;
                 break;
             }
-            _ => send_code(writer, Code::Sb, is_tcp).await?,
+            _ => send_or_done!(Code::Sb),
         }
     }
     if verbose && !got_syn {
@@ -683,8 +703,8 @@ async fn end_off_receiver(
     }
     let mut got_final_sb = false;
     for _ in 0..=t.max_retries {
-        send_code(writer, Code::Syn, is_tcp).await?;
-        match accept_code(reader, is_tcp, is_petscii, state, &[Code::Sb], t.block_timeout).await? {
+        send_or_done!(Code::Syn);
+        match accept_or_done!(&[Code::Sb]) {
             Some(Code::Sb) => {
                 got_final_sb = true;
                 break;
@@ -765,9 +785,17 @@ async fn send_phase(
         // tx20: wait for the receiver's response.  GOO = previous block good
         // (advance); BAD or a re-sent S/B = resend the current block.  In
         // spec mode, re-emit GOO each retry until we hear something.
-        let wait_budget = if started { t.block_timeout } else { t.negotiation_timeout };
+        //
+        // Re-probe on a short `retry_interval` cadence covering the budget
+        // rather than blocking the whole budget on a single read (mirrors the
+        // receiver and Novaterm's `codecyc`-bounded retry).  This also bounds
+        // the total wait to one budget — an unresponsive peer fails in
+        // ~negotiation_timeout, not max_retries × that.
+        let total_budget = if started { t.block_timeout } else { t.negotiation_timeout };
+        let probe = total_budget.min(t.retry_interval.max(1));
+        let attempts = total_budget.div_ceil(probe.max(1)).max(1);
         let mut code = None;
-        for attempt in 0..=t.max_retries {
+        for attempt in 0..attempts {
             if spec_mode && !started {
                 send_code(writer, Code::Goo, is_tcp).await?;
             }
@@ -777,7 +805,7 @@ async fn send_phase(
                 is_petscii,
                 state,
                 &[Code::Goo, Code::Bad, Code::Sb],
-                wait_budget,
+                probe,
             )
             .await?;
             if code.is_some() {
@@ -823,11 +851,16 @@ async fn send_phase(
         }
 
         // tx11: send ACK, wait for the receiver's S/B (resend ACK on timeout).
+        // Same short re-probe cadence: retransmit ACK every `retry_interval`
+        // up to one block timeout, so a dropped ACK recovers quickly and an
+        // unresponsive peer fails in ~block_timeout rather than 11× it.
+        let sb_probe = t.block_timeout.min(t.retry_interval.max(1));
+        let sb_attempts = t.block_timeout.div_ceil(sb_probe.max(1)).max(1);
         let mut got_sb = false;
-        for _ in 0..=t.max_retries {
+        for _ in 0..sb_attempts {
             send_code(writer, Code::Ack, is_tcp).await?;
             if let Some(Code::Sb) =
-                accept_code(reader, is_tcp, is_petscii, state, &[Code::Sb], t.block_timeout).await?
+                accept_code(reader, is_tcp, is_petscii, state, &[Code::Sb], sb_probe).await?
             {
                 got_sb = true;
                 break;
@@ -859,13 +892,31 @@ async fn end_off_sender(
     state: &mut ReadState,
     t: &Tunables,
 ) -> Result<(), String> {
+    // Best-effort, exactly like the receiver end-off: the final block was
+    // already acknowledged, so a peer that tears down (EOF / closed pipe →
+    // Err) or goes silent must not fail a finished transfer.  Swallow errors
+    // and return Ok instead of propagating with `?`.
+    macro_rules! send_or_done {
+        ($code:expr) => {
+            if send_code(writer, $code, is_tcp).await.is_err() {
+                return Ok(());
+            }
+        };
+    }
+    macro_rules! accept_or_done {
+        ($allowed:expr) => {
+            match accept_code(reader, is_tcp, is_petscii, state, $allowed, t.block_timeout).await {
+                Ok(c) => c,
+                Err(_) => return Ok(()),
+            }
+        };
+    }
+
     // tx41: ACK until the receiver's S/B.
     let mut got_sb = false;
     for _ in 0..=t.max_retries {
-        send_code(writer, Code::Ack, is_tcp).await?;
-        if let Some(Code::Sb) =
-            accept_code(reader, is_tcp, is_petscii, state, &[Code::Sb], t.block_timeout).await?
-        {
+        send_or_done!(Code::Ack);
+        if let Some(Code::Sb) = accept_or_done!(&[Code::Sb]) {
             got_sb = true;
             break;
         }
@@ -876,10 +927,8 @@ async fn end_off_sender(
     // tx5: SYN until the receiver's SYN comes back.
     let mut got_syn = false;
     for _ in 0..=t.max_retries {
-        send_code(writer, Code::Syn, is_tcp).await?;
-        if let Some(Code::Syn) =
-            accept_code(reader, is_tcp, is_petscii, state, &[Code::Syn], t.block_timeout).await?
-        {
+        send_or_done!(Code::Syn);
+        if let Some(Code::Syn) = accept_or_done!(&[Code::Syn]) {
             got_syn = true;
             break;
         }
@@ -1237,6 +1286,78 @@ mod tests {
         let (out, ft) = round_trip_opts(&[], PunterFileType::Unknown, true).await;
         assert_eq!(out, Vec::<u8>::new());
         assert_eq!(ft, PunterFileType::Unknown);
+    }
+
+    #[tokio::test]
+    async fn end_off_receiver_tolerates_peer_teardown() {
+        // Real C1 senders commonly close the link right after the final S/B.
+        // By the time we reach end-off the file is already complete, so a
+        // closed pipe (EOF) must NOT turn the transfer into a failure.
+        let t = Tunables {
+            negotiation_timeout: 1,
+            block_timeout: 1,
+            max_retries: 2,
+            retry_interval: 1,
+            block_payload: MAX_PAYLOAD,
+        };
+        let (peer_wr, mut rd) = duplex(64);
+        drop(peer_wr); // immediate EOF on every read
+        let (mut wr, _drain) = duplex(256);
+        let mut state = ReadState::default();
+        let res =
+            end_off_receiver(&mut rd, &mut wr, false, false, false, &mut state, &t).await;
+        assert!(res.is_ok(), "peer teardown during end-off must not fail a complete transfer");
+    }
+
+    #[tokio::test]
+    async fn end_off_sender_tolerates_peer_teardown() {
+        let t = Tunables {
+            negotiation_timeout: 1,
+            block_timeout: 1,
+            max_retries: 2,
+            retry_interval: 1,
+            block_payload: MAX_PAYLOAD,
+        };
+        let (peer_wr, mut rd) = duplex(64);
+        drop(peer_wr);
+        let (mut wr, _drain) = duplex(256);
+        let mut state = ReadState::default();
+        let res = end_off_sender(&mut rd, &mut wr, false, false, false, &mut state, &t).await;
+        assert!(res.is_ok(), "peer teardown during end-off must not fail a complete transfer");
+    }
+
+    #[tokio::test]
+    async fn send_phase_gives_up_quickly_on_a_silent_peer() {
+        // A connected-but-silent receiver must make the sender fail in about
+        // one negotiation budget, NOT max_retries × it. The peer's write half
+        // stays open (so reads block rather than EOF) but nothing is ever sent.
+        let t = Tunables {
+            negotiation_timeout: 2,
+            block_timeout: 1,
+            max_retries: 5,
+            retry_interval: 1,
+            block_payload: MAX_PAYLOAD,
+        };
+        let blocks = build_data_blocks(&[1, 2, 3], MAX_PAYLOAD).unwrap();
+
+        // reader: held-open but silent; writer: drained.
+        let (_hold, mut rd) = duplex(64);
+        let (mut wr, _drain) = duplex(1024);
+        let mut state = ReadState::default();
+
+        let start = std::time::Instant::now();
+        let res =
+            send_phase(&mut rd, &mut wr, false, false, false, &mut state, &blocks, false, &t).await;
+        let elapsed = start.elapsed();
+
+        assert!(res.is_err(), "silent peer must fail, not succeed");
+        // Bounded to ~negotiation_timeout. The pre-fix code waited
+        // (max_retries+1) × negotiation_timeout (here 6×2=12s; in production
+        // 11×45≈495s). Allow generous slack but well under that.
+        assert!(
+            elapsed < std::time::Duration::from_secs(6),
+            "send_phase took {elapsed:?}; expected ~negotiation_timeout"
+        );
     }
 
     #[tokio::test]
