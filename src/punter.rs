@@ -1543,3 +1543,301 @@ mod tests {
         }
     }
 }
+
+// ─── Independent reference-codec interop ──────────────────────────────────
+//
+// The in-pipe round-trips above run our sender against our receiver, so they
+// cannot catch a *mutual* wrong assumption — a bug both halves share. This
+// module is a second, independent C1 ("New Punter") implementation written
+// only from the wire spec / Novaterm `punter.src`: its own checksum, framing,
+// block builder, and full sender/receiver handshakes, deliberately NOT reusing
+// any of `punter.rs` (only the public `punter_send`/`punter_receive` entry
+// points). The two implementations talk over a real loopback TCP socket. If
+// they interoperate cleanly, that is strong evidence both match the protocol;
+// if they don't, one of them has a real bug. This is the closest automated
+// stand-in for a real CCGMS / Novaterm peer (no Linux Punter client exists).
+#[cfg(test)]
+mod reference_interop {
+    use super::{punter_receive, punter_send, PunterFileType};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    const GOO: [u8; 3] = *b"goo";
+    const BAD: [u8; 3] = *b"bad";
+    const ACK: [u8; 3] = *b"ack";
+    const SB: [u8; 3] = *b"s/b";
+    const SYN: [u8; 3] = *b"syn";
+
+    // Independently coded from the asm `checksum` routine: additive is a 16-bit
+    // wrapping sum; cyclic XORs the byte into the low byte then rotates the
+    // whole 16-bit accumulator left one bit. Computed over the block body
+    // (offset 4 onward).
+    fn checksums(body: &[u8]) -> (u16, u16) {
+        let mut add: u16 = 0;
+        let mut cyc: u16 = 0;
+        for &b in body {
+            add = add.wrapping_add(b as u16);
+            cyc ^= b as u16;
+            cyc = cyc.rotate_left(1);
+        }
+        (add, cyc)
+    }
+
+    fn build_block(next_size: u8, idx: u16, payload: &[u8]) -> Vec<u8> {
+        let mut blk = vec![0u8; 7 + payload.len()];
+        blk[4] = next_size;
+        blk[5] = (idx & 0xFF) as u8;
+        blk[6] = (idx >> 8) as u8;
+        blk[7..].copy_from_slice(payload);
+        let (a, c) = checksums(&blk[4..]);
+        blk[0] = a as u8;
+        blk[1] = (a >> 8) as u8;
+        blk[2] = c as u8;
+        blk[3] = (c >> 8) as u8;
+        blk
+    }
+
+    fn checksum_ok(blk: &[u8]) -> bool {
+        if blk.len() < 7 {
+            return false;
+        }
+        let (a, c) = checksums(&blk[4..]);
+        a == u16::from_le_bytes([blk[0], blk[1]]) && c == u16::from_le_bytes([blk[2], blk[3]])
+    }
+
+    /// Patch each block's "size of next block" field and recompute checksums;
+    /// the last block points at its own length.
+    fn backpatch(blocks: &mut [Vec<u8>]) {
+        let sizes: Vec<u8> = blocks.iter().map(|b| b.len() as u8).collect();
+        for (i, blk) in blocks.iter_mut().enumerate() {
+            let next = if i + 1 < sizes.len() { sizes[i + 1] } else { sizes[i] };
+            blk[4] = next;
+            let (a, c) = checksums(&blk[4..]);
+            blk[0] = a as u8;
+            blk[1] = (a >> 8) as u8;
+            blk[2] = c as u8;
+            blk[3] = (c >> 8) as u8;
+        }
+    }
+
+    fn build_type_blocks(ftype: u8) -> Vec<Vec<u8>> {
+        let mut b = vec![build_block(8, 0xFFFF, &[ftype])];
+        backpatch(&mut b);
+        b
+    }
+
+    fn build_data_blocks(data: &[u8]) -> Vec<Vec<u8>> {
+        let cap = 248usize;
+        let mut blocks = vec![build_block(0, 0x0000, &[])]; // header-only block 0
+        if data.is_empty() {
+            blocks.push(build_block(0, 0xFFFF, &[]));
+        } else {
+            let chunks: Vec<&[u8]> = data.chunks(cap).collect();
+            let last = chunks.len() - 1;
+            for (i, chunk) in chunks.iter().enumerate() {
+                let idx = if i == last { 0xFFFF } else { (i as u16) + 1 };
+                blocks.push(build_block(0, idx, chunk));
+            }
+        }
+        backpatch(&mut blocks);
+        blocks
+    }
+
+    // — raw socket helpers —
+
+    async fn put(s: &mut TcpStream, code: [u8; 3]) {
+        s.write_all(&code).await.unwrap();
+        s.flush().await.unwrap();
+    }
+
+    async fn put_bytes(s: &mut TcpStream, bytes: &[u8]) {
+        s.write_all(bytes).await.unwrap();
+        s.flush().await.unwrap();
+    }
+
+    /// Slide a 3-byte window over the stream until one of `allowed` matches.
+    async fn get_code(s: &mut TcpStream, allowed: &[[u8; 3]]) -> [u8; 3] {
+        let mut w = [0u8; 3];
+        let mut filled = 0;
+        let mut b = [0u8; 1];
+        loop {
+            s.read_exact(&mut b).await.unwrap();
+            w = [w[1], w[2], b[0]];
+            if filled < 3 {
+                filled += 1;
+            }
+            if filled == 3 && allowed.contains(&w) {
+                return w;
+            }
+        }
+    }
+
+    async fn get_block(s: &mut TcpStream, size: usize) -> Vec<u8> {
+        let mut buf = vec![0u8; size];
+        s.read_exact(&mut buf).await.unwrap();
+        buf
+    }
+
+    // — independent RECEIVER (mirrors rechand/receive) —
+
+    async fn ref_receive(s: &mut TcpStream) -> (Vec<u8>, u8) {
+        let type_payload = ref_recv_phase(s, 8).await;
+        let ftype = type_payload.first().copied().unwrap_or(3);
+        let data = ref_recv_phase(s, 7).await;
+        (data, ftype)
+    }
+
+    async fn ref_recv_phase(s: &mut TcpStream, first_size: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut next = first_size;
+        loop {
+            // send GOO, wait for the sender's ACK (skip its spec-mode GOO).
+            put(s, GOO).await;
+            get_code(s, &[ACK]).await;
+            // send S/B, then read the announced-size block.
+            put(s, SB).await;
+            let blk = get_block(s, next).await;
+            assert!(checksum_ok(&blk), "reference receiver: gateway sent a bad checksum");
+            if blk.len() > 7 {
+                out.extend_from_slice(&blk[7..]);
+            }
+            let final_block = blk[6] == 0xFF;
+            next = blk[4] as usize;
+            if final_block {
+                // end-off: ack final, S/B, then the SYN handshake.
+                put(s, GOO).await;
+                get_code(s, &[ACK]).await;
+                put(s, SB).await;
+                get_code(s, &[SYN]).await;
+                put(s, SYN).await;
+                get_code(s, &[SB]).await;
+                return out;
+            }
+        }
+    }
+
+    // — independent SENDER (mirrors tranhand/transmit) —
+
+    async fn ref_send(s: &mut TcpStream, data: &[u8], ftype: u8) {
+        ref_send_phase(s, &build_type_blocks(ftype), true).await;
+        ref_send_phase(s, &build_data_blocks(data), false).await;
+    }
+
+    async fn ref_send_phase(s: &mut TcpStream, blocks: &[Vec<u8>], spec: bool) {
+        let mut idx = 0usize;
+        let mut started = false;
+        loop {
+            if spec && !started {
+                put(s, GOO).await;
+            }
+            let code = get_code(s, &[GOO, BAD, SB]).await;
+            if code == GOO {
+                if started {
+                    if blocks[idx][6] == 0xFF {
+                        // end-off (mirrors end_off_sender): ACK→S/B, SYN→SYN,
+                        // then three S/B for the receiver to drain.
+                        put(s, ACK).await;
+                        get_code(s, &[SB]).await;
+                        put(s, SYN).await;
+                        get_code(s, &[SYN]).await;
+                        put(s, SB).await;
+                        put(s, SB).await;
+                        put(s, SB).await;
+                        return;
+                    }
+                    idx += 1;
+                }
+                started = true;
+            } else {
+                started = true; // BAD/S-B → resend the current block
+            }
+            put(s, ACK).await;
+            get_code(s, &[SB]).await;
+            put_bytes(s, &blocks[idx]).await;
+        }
+    }
+
+    // — harness: one side is the real gateway, the other the reference —
+
+    async fn gateway_receives_from_reference(
+        data: Vec<u8>,
+        ftype: PunterFileType,
+    ) -> (Vec<u8>, PunterFileType) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ftype_byte = ftype.to_byte();
+
+        let gateway = tokio::spawn(async move {
+            let (sock, _) = listener.accept().await.unwrap();
+            let (mut rd, mut wr) = sock.into_split();
+            punter_receive(&mut rd, &mut wr, false, false, false).await
+        });
+        let reference = tokio::spawn(async move {
+            let mut sock = TcpStream::connect(addr).await.unwrap();
+            ref_send(&mut sock, &data, ftype_byte).await;
+        });
+
+        reference.await.unwrap();
+        gateway.await.unwrap().expect("gateway receive failed")
+    }
+
+    async fn gateway_sends_to_reference(
+        data: Vec<u8>,
+        ftype: PunterFileType,
+    ) -> (Vec<u8>, u8) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let data_for_gateway = data.clone();
+
+        let gateway = tokio::spawn(async move {
+            let (sock, _) = listener.accept().await.unwrap();
+            let (mut rd, mut wr) = sock.into_split();
+            punter_send(&mut rd, &mut wr, &data_for_gateway, ftype, false, false, false).await
+        });
+        let reference = tokio::spawn(async move {
+            let mut sock = TcpStream::connect(addr).await.unwrap();
+            ref_receive(&mut sock).await
+        });
+
+        let got = reference.await.unwrap();
+        gateway.await.unwrap().expect("gateway send failed");
+        got
+    }
+
+    /// Fail fast instead of hanging forever if the two implementations desync.
+    async fn with_timeout<F: std::future::Future>(f: F) -> F::Output {
+        tokio::time::timeout(std::time::Duration::from_secs(30), f)
+            .await
+            .expect("interop exchange timed out — implementations desynced")
+    }
+
+    #[tokio::test]
+    async fn gateway_receives_what_reference_sends() {
+        for (data, ft) in [
+            (vec![], PunterFileType::Seq),
+            (vec![0x42], PunterFileType::Prg),
+            ((0..=255u8).collect::<Vec<u8>>(), PunterFileType::Usr),
+            ((0..3000u32).map(|i| (i * 31 + 5) as u8).collect(), PunterFileType::Unknown),
+        ] {
+            let expect = data.clone();
+            let (got, got_ft) = with_timeout(gateway_receives_from_reference(data, ft)).await;
+            assert_eq!(got, expect, "payload mismatch (gateway receiving)");
+            assert_eq!(got_ft, ft, "file type mismatch (gateway receiving)");
+        }
+    }
+
+    #[tokio::test]
+    async fn reference_receives_what_gateway_sends() {
+        for (data, ft) in [
+            (vec![], PunterFileType::Unknown),
+            (vec![0x99], PunterFileType::Seq),
+            ((0..=255u8).collect::<Vec<u8>>(), PunterFileType::Prg),
+            ((0..3000u32).map(|i| (i * 17 + 9) as u8).collect(), PunterFileType::Usr),
+        ] {
+            let expect = data.clone();
+            let (got, got_ft) = with_timeout(gateway_sends_to_reference(data, ft)).await;
+            assert_eq!(got, expect, "payload mismatch (gateway sending)");
+            assert_eq!(got_ft, ft.to_byte(), "file type mismatch (gateway sending)");
+        }
+    }
+}
