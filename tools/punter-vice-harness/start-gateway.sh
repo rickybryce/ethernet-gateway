@@ -27,4 +27,8 @@ done
 cd "$RUN"
 echo "Gateway: telnet 127.0.0.1:2323, transfer_dir=$RUN/transfer, verbose on"
 echo "Log: $HERE/gateway.log"
-exec "$BIN" 2>&1 | tee "$HERE/gateway.log"
+# Use process substitution (not a `| tee` pipeline) so `exec` replaces THIS
+# shell with the gateway — the script's PID then *is* the gateway, so the
+# orchestrator killing that PID actually stops it (a `| tee` pipeline would
+# leave the gateway orphaned on :2323). tee still mirrors to stdout + log.
+exec "$BIN" > >(tee "$HERE/gateway.log") 2>&1
