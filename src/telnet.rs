@@ -3890,23 +3890,25 @@ impl TelnetSession {
         .await?;
         self.send_line(&sep).await?;
         self.send_line("").await?;
+        // Keep each line <= 39 columns so it doesn't wrap on a 40-column
+        // PETSCII (C64) screen.
         self.send_line(&format!(
-            "  {}  XMODEM/YMODEM  (128/1K blocks, CRC-16 or checksum, auto)",
+            "  {}  XMODEM/YMODEM  128/1K, auto",
             self.cyan("X")
         ))
         .await?;
         self.send_line(&format!(
-            "  {}  ZMODEM         (1K subpackets, CRC-16, auto-start)",
+            "  {}  ZMODEM         1K, autostart",
             self.cyan("Z")
         ))
         .await?;
         self.send_line(&format!(
-            "  {}  KERMIT         (any flavor — auto-detects C/G/95/86/...)",
+            "  {}  KERMIT         any flavor, auto",
             self.cyan("K")
         ))
         .await?;
         self.send_line(&format!(
-            "  {}  PUNTER         (C1 — CCGMS / Novaterm Commodore BBS)",
+            "  {}  PUNTER         C1 CCGMS/Novaterm",
             self.cyan("P")
         ))
         .await?;
@@ -4532,33 +4534,35 @@ impl TelnetSession {
             .await?;
         self.send_line(&sep).await?;
         self.send_line("").await?;
+        // Keep each line <= 39 columns so it doesn't wrap on a 40-column
+        // PETSCII (C64) screen.
         self.send_line(&format!(
-            "  {}  XMODEM       (128-byte blocks)",
+            "  {}  XMODEM     128-byte blocks",
             self.cyan("X")
         ))
         .await?;
         self.send_line(&format!(
-            "  {}  XMODEM-1K    (1024-byte blocks)",
+            "  {}  XMODEM-1K  1024-byte blocks",
             self.cyan("1")
         ))
         .await?;
         self.send_line(&format!(
-            "  {}  YMODEM       (filename + size header, 1K)",
+            "  {}  YMODEM     name+size hdr, 1K",
             self.cyan("Y")
         ))
         .await?;
         self.send_line(&format!(
-            "  {}  ZMODEM       (autostart, 1K subpackets)",
+            "  {}  ZMODEM     autostart, 1K",
             self.cyan("Z")
         ))
         .await?;
         self.send_line(&format!(
-            "  {}  KERMIT       (any flavor, auto-detected)",
+            "  {}  KERMIT     any flavor, auto",
             self.cyan("K")
         ))
         .await?;
         self.send_line(&format!(
-            "  {}  PUNTER       (C1 — CCGMS / Novaterm)",
+            "  {}  PUNTER     C1 CCGMS/Novaterm",
             self.cyan("P")
         ))
         .await?;
