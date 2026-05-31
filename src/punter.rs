@@ -1117,6 +1117,18 @@ mod tests {
     // — Round-trip over an in-memory duplex pipe —
 
     async fn round_trip(data: &[u8], ftype: PunterFileType) -> (Vec<u8>, PunterFileType) {
+        round_trip_opts(data, ftype, false).await
+    }
+
+    /// As `round_trip`, but with `is_tcp` controllable so the telnet IAC
+    /// escaping + CR-NUL stuffing path (`tnio::raw_write_bytes`/`nvt_read_byte`)
+    /// is exercised end to end — every transfer's final block carries index
+    /// 0xFFFF (two 0xFF/IAC bytes), so the TCP path must survive that.
+    async fn round_trip_opts(
+        data: &[u8],
+        ftype: PunterFileType,
+        is_tcp: bool,
+    ) -> (Vec<u8>, PunterFileType) {
         // Two duplex pipes, cross-wired so each side's writer feeds the other's
         // reader.  A DuplexStream is itself both AsyncRead and AsyncWrite, and
         // writing one end appears on the read side of its partner — so we hand
@@ -1129,12 +1141,12 @@ mod tests {
         let sender = tokio::spawn(async move {
             let mut rd = r_to_s_b;
             let mut wr = s_to_r_a;
-            punter_send(&mut rd, &mut wr, &data_owned, ftype, false, false, false).await
+            punter_send(&mut rd, &mut wr, &data_owned, ftype, is_tcp, false, false).await
         });
         let receiver = tokio::spawn(async move {
             let mut rd = s_to_r_b;
             let mut wr = r_to_s_a;
-            punter_receive(&mut rd, &mut wr, false, false, false).await
+            punter_receive(&mut rd, &mut wr, is_tcp, false, false).await
         });
 
         let send_res = sender.await.unwrap();
@@ -1195,6 +1207,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn round_trip_over_tcp_escapes_iac_and_cr() {
+        // is_tcp=true routes blocks through raw_write_bytes/nvt_read_byte, so
+        // 0xFF (IAC) is doubled and 0x0D (CR) is NUL-stuffed on the wire and
+        // collapsed on read. Pack the payload with both, plus runs that would
+        // desync if either transform were one-sided.
+        let data: Vec<u8> = vec![
+            0xFF, 0xFF, 0x0D, 0x00, 0x0D, 0x0A, 0xFF, 0x0D, 0xFF, 0x00, 0x18, 0x1B, 0x5F,
+        ];
+        let (out, ft) = round_trip_opts(&data, PunterFileType::Prg, true).await;
+        assert_eq!(out, data);
+        assert_eq!(ft, PunterFileType::Prg);
+    }
+
+    #[tokio::test]
+    async fn round_trip_over_tcp_multi_block_all_byte_values() {
+        // Several blocks of every byte value over the TCP path — the final
+        // block's 0xFFFF index alone guarantees IAC bytes in the header, and
+        // the payload covers 0xFF/0x0D throughout.
+        let data: Vec<u8> = (0..2000u32).map(|i| (i % 256) as u8).collect();
+        let (out, _) = round_trip_opts(&data, PunterFileType::Seq, true).await;
+        assert_eq!(out, data);
+    }
+
+    #[tokio::test]
+    async fn round_trip_over_tcp_empty_preserves_iac_final_header() {
+        // Even an empty file ships a final block with index 0xFFFF (IAC IAC in
+        // the header) over TCP; it must round-trip cleanly.
+        let (out, ft) = round_trip_opts(&[], PunterFileType::Unknown, true).await;
+        assert_eq!(out, Vec::<u8>::new());
+        assert_eq!(ft, PunterFileType::Unknown);
+    }
+
+    #[tokio::test]
     async fn round_trip_preserves_usr_and_unknown_types() {
         // The declared file type survives Phase A end to end for every variant
         // — not just the original PRG/SEQ pair.
@@ -1202,6 +1247,63 @@ mod tests {
         assert_eq!(ft, PunterFileType::Usr);
         let (_, ft) = round_trip(&[1, 2, 3], PunterFileType::Unknown).await;
         assert_eq!(ft, PunterFileType::Unknown);
+    }
+
+    #[tokio::test]
+    async fn round_trip_recovers_from_a_single_corrupted_block() {
+        // An interposer flips one byte deep in the sender→receiver stream
+        // (a data-block body byte), then passes everything else verbatim. The
+        // receiver's checksum catches it, demands a resend (BAD), and the
+        // sender's retransmit — past the corruption point — restores the file.
+        // Exercises the rec2/badinc ↔ tx10/badinc resend loop the clean
+        // round-trips never touch.
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let data: Vec<u8> = (0..4000u32).map(|i| (i * 13 + 7) as u8).collect();
+        let data_owned = data.clone();
+
+        let (s_out_a, mut s_out_b) = duplex(1 << 20); // sender → interposer
+        let (mut r_in_a, r_in_b) = duplex(1 << 20); // interposer → receiver
+        let (r_out_a, r_out_b) = duplex(1 << 20); // receiver → sender (direct)
+
+        let interposer = tokio::spawn(async move {
+            let corrupt_at = 400usize;
+            let mut count = 0usize;
+            let mut byte = [0u8; 1];
+            loop {
+                match s_out_b.read(&mut byte).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        if count == corrupt_at {
+                            byte[0] ^= 0xFF; // single one-shot corruption
+                        }
+                        count += 1;
+                        if r_in_a.write_all(&byte).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        let sender = tokio::spawn(async move {
+            let mut rd = r_out_b;
+            let mut wr = s_out_a;
+            punter_send(&mut rd, &mut wr, &data_owned, PunterFileType::Prg, false, false, false)
+                .await
+        });
+        let receiver = tokio::spawn(async move {
+            let mut rd = r_in_b;
+            let mut wr = r_out_a;
+            punter_receive(&mut rd, &mut wr, false, false, false).await
+        });
+
+        let send_res = sender.await.unwrap();
+        let recv_res = receiver.await.unwrap();
+        interposer.await.unwrap();
+        send_res.expect("send should complete despite one corrupted block");
+        let (out, _) = recv_res.expect("receive should recover from the corruption");
+        assert_eq!(out, data);
     }
 
     // — Stray-ACK recovery: sender re-sent ACK because it missed our S/B —
