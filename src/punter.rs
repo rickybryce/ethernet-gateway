@@ -583,11 +583,19 @@ async fn receive_phase(
 /// mirroring `recmodem`'s timer, which `rcm5` clears before every character:
 /// a slow-but-steady sender completes as long as each byte arrives within
 /// `block_timeout` of the one before it.  The first byte after our S/B uses a
-/// shorter `retry_interval` window so a peer that never saw the S/B is
-/// re-prompted promptly — this bounds an unresponsive peer to
-/// ~max_retries × retry_interval instead of × block_timeout, consistent with
-/// the handshake waits.  The first missing byte ends the read; a short buffer
-/// simply fails the checksum upstream → BAD → resend.
+/// shorter `retry_interval` window so a peer that missed our S/B is re-prompted
+/// promptly.
+///
+/// Unlike the handshake waits (which bound total time via a probe budget), the
+/// S/B re-send here is **count-based** (`max_retries`): each re-send is the
+/// recovery action for a stray ACK or a blank read, and stray-ACK recovery
+/// alone needs at least two passes (one to consume the "ack", one to read the
+/// resent block) — so the loop count must not collapse with the time budget
+/// (it would, e.g., whenever `retry_interval >= block_timeout`).  The dead-peer
+/// bound is therefore ~`max_retries × retry_interval`; the per-byte
+/// `block_timeout` preserves slow-link tolerance for a block already arriving.
+/// The first missing byte ends the read; a short buffer simply fails the
+/// checksum upstream → BAD → resend.
 async fn read_block(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),
@@ -659,70 +667,61 @@ async fn end_off_receiver(
     t: &Tunables,
 ) -> Result<(), String> {
     // Everything here is best-effort: the final data block was already ack'd,
-    // so the file is complete.  A peer that tears down (EOF / closed pipe —
-    // which `send_code`/`accept_code` surface as Err) or goes silent must NOT
-    // turn a finished transfer into a failure, so we swallow errors and return
-    // Ok rather than propagating with `?`.  A local ESC abort here is moot for
-    // the same reason and likewise stops the handshake cleanly.
-    macro_rules! send_or_done {
-        ($code:expr) => {
-            if send_code(writer, $code, is_tcp).await.is_err() {
-                return Ok(());
-            }
-        };
-    }
-    macro_rules! accept_or_done {
-        ($allowed:expr) => {
-            match accept_code(reader, is_tcp, is_petscii, state, $allowed, t.block_timeout).await {
-                Ok(c) => c,
-                Err(_) => return Ok(()),
-            }
-        };
-    }
-
-    // Acknowledge the final block and re-handshake.
-    let mut got_ack = false;
-    for _ in 0..=t.max_retries {
-        send_or_done!(Code::Goo);
-        if let Some(Code::Ack) = accept_or_done!(&[Code::Ack]) {
-            got_ack = true;
-            break;
-        }
-    }
-    if verbose && !got_ack {
-        glog!("PUNTER recv: end-off ACK not received (peer may have torn down)");
-    }
-    send_or_done!(Code::Sb);
-
-    // Wait for the sender's SYN (resend S/B on timeout), then answer SYN and
-    // wait for the sender's S/B (resend SYN on timeout).
-    let mut got_syn = false;
-    for _ in 0..=t.max_retries {
-        match accept_or_done!(&[Code::Syn]) {
-            Some(Code::Syn) => {
-                got_syn = true;
+    // so the file is complete.  A peer that tears down (EOF / closed pipe,
+    // which `send_code`/`accept_code` surface as Err) or a local ESC must NOT
+    // turn a finished transfer into a failure.  Run the handshake with `?` in
+    // an inner future and discard any error — a teardown just stops the
+    // re-handshake early.  (Timeouts return `Ok(None)`, so the per-stage
+    // verbose warnings still fire.)
+    let _ = async {
+        // Acknowledge the final block and re-handshake.
+        let mut got_ack = false;
+        for _ in 0..=t.max_retries {
+            send_code(writer, Code::Goo, is_tcp).await?;
+            if let Some(Code::Ack) =
+                accept_code(reader, is_tcp, is_petscii, state, &[Code::Ack], t.block_timeout).await?
+            {
+                got_ack = true;
                 break;
             }
-            _ => send_or_done!(Code::Sb),
         }
-    }
-    if verbose && !got_syn {
-        glog!("PUNTER recv: end-off SYN not received (peer may have torn down)");
-    }
-    let mut got_final_sb = false;
-    for _ in 0..=t.max_retries {
-        send_or_done!(Code::Syn);
-        match accept_or_done!(&[Code::Sb]) {
-            Some(Code::Sb) => {
-                got_final_sb = true;
-                break;
+        if verbose && !got_ack {
+            glog!("PUNTER recv: end-off ACK not received (peer may have torn down)");
+        }
+        send_code(writer, Code::Sb, is_tcp).await?;
+
+        // Wait for the sender's SYN (resend S/B on timeout), then answer SYN
+        // and wait for the sender's S/B (resend SYN on timeout).
+        let mut got_syn = false;
+        for _ in 0..=t.max_retries {
+            match accept_code(reader, is_tcp, is_petscii, state, &[Code::Syn], t.block_timeout).await? {
+                Some(Code::Syn) => {
+                    got_syn = true;
+                    break;
+                }
+                _ => send_code(writer, Code::Sb, is_tcp).await?,
             }
-            _ => continue,
         }
+        if verbose && !got_syn {
+            glog!("PUNTER recv: end-off SYN not received (peer may have torn down)");
+        }
+        let mut got_final_sb = false;
+        for _ in 0..=t.max_retries {
+            send_code(writer, Code::Syn, is_tcp).await?;
+            match accept_code(reader, is_tcp, is_petscii, state, &[Code::Sb], t.block_timeout).await? {
+                Some(Code::Sb) => {
+                    got_final_sb = true;
+                    break;
+                }
+                _ => continue,
+            }
+        }
+        if verbose && !got_final_sb {
+            glog!("PUNTER recv: end-off final S/B not received (peer may have torn down)");
+        }
+        Ok::<(), String>(())
     }
-    if verbose && !got_final_sb {
-        glog!("PUNTER recv: end-off final S/B not received (peer may have torn down)");
-    }
+    .await;
     Ok(())
 }
 
@@ -901,49 +900,43 @@ async fn end_off_sender(
     t: &Tunables,
 ) -> Result<(), String> {
     // Best-effort, exactly like the receiver end-off: the final block was
-    // already acknowledged, so a peer that tears down (EOF / closed pipe →
-    // Err) or goes silent must not fail a finished transfer.  Swallow errors
-    // and return Ok instead of propagating with `?`.
-    macro_rules! send_or_done {
-        ($code:expr) => {
-            if send_code(writer, $code, is_tcp).await.is_err() {
-                return Ok(());
+    // already acknowledged, so a peer that tears down (EOF / closed pipe, which
+    // `send_code`/`accept_code` surface as Err) or a local ESC must not fail a
+    // finished transfer.  Run the SYN handshake with `?` in an inner future and
+    // discard any error — a teardown just stops it early.  (Timeouts return
+    // `Ok(None)`, so the per-stage verbose warnings still fire.)
+    let _ = async {
+        // tx41: ACK until the receiver's S/B.
+        let mut got_sb = false;
+        for _ in 0..=t.max_retries {
+            send_code(writer, Code::Ack, is_tcp).await?;
+            if let Some(Code::Sb) =
+                accept_code(reader, is_tcp, is_petscii, state, &[Code::Sb], t.block_timeout).await?
+            {
+                got_sb = true;
+                break;
             }
-        };
-    }
-    macro_rules! accept_or_done {
-        ($allowed:expr) => {
-            match accept_code(reader, is_tcp, is_petscii, state, $allowed, t.block_timeout).await {
-                Ok(c) => c,
-                Err(_) => return Ok(()),
+        }
+        if verbose && !got_sb {
+            glog!("PUNTER send: end-off S/B not received (peer may have torn down)");
+        }
+        // tx5: SYN until the receiver's SYN comes back.
+        let mut got_syn = false;
+        for _ in 0..=t.max_retries {
+            send_code(writer, Code::Syn, is_tcp).await?;
+            if let Some(Code::Syn) =
+                accept_code(reader, is_tcp, is_petscii, state, &[Code::Syn], t.block_timeout).await?
+            {
+                got_syn = true;
+                break;
             }
-        };
-    }
-
-    // tx41: ACK until the receiver's S/B.
-    let mut got_sb = false;
-    for _ in 0..=t.max_retries {
-        send_or_done!(Code::Ack);
-        if let Some(Code::Sb) = accept_or_done!(&[Code::Sb]) {
-            got_sb = true;
-            break;
         }
-    }
-    if verbose && !got_sb {
-        glog!("PUNTER send: end-off S/B not received (peer may have torn down)");
-    }
-    // tx5: SYN until the receiver's SYN comes back.
-    let mut got_syn = false;
-    for _ in 0..=t.max_retries {
-        send_or_done!(Code::Syn);
-        if let Some(Code::Syn) = accept_or_done!(&[Code::Syn]) {
-            got_syn = true;
-            break;
+        if verbose && !got_syn {
+            glog!("PUNTER send: end-off SYN not received (peer may have torn down)");
         }
+        Ok::<(), String>(())
     }
-    if verbose && !got_syn {
-        glog!("PUNTER send: end-off SYN not received (peer may have torn down)");
-    }
+    .await;
     // tx9: three S/B for the receiver to drain.  We deliberately do NOT read
     // here.  Consuming bytes during this drain would swallow the receiver's
     // *opening signal for the next phase* — at the type→data boundary the
@@ -1317,7 +1310,9 @@ mod tests {
         let elapsed = start.elapsed();
 
         assert!(res.is_err(), "silent peer must fail the block read");
-        // 4 attempts × ~1s ≈ 4s; comfortably under 4 × block_timeout (20s).
+        // Bounded by max_retries × retry_interval (the short first-byte wait):
+        // (3+1) S/B re-sends × ~1s ≈ 4s, NOT max_retries × block_timeout (20s).
+        // Generous slack for CI jitter.
         assert!(
             elapsed < std::time::Duration::from_secs(10),
             "read_block took {elapsed:?}; first-byte wait should bound it"
