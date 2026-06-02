@@ -59,10 +59,14 @@
 //! ## End-off
 //!
 //! After the final block (block index high byte 0xFF) both ends run a SYN
-//! handshake, and the sender finishes by transmitting `S/B` three times.  The
-//! receiver consumes one to complete the SYN/S-B exchange and *drains the other
-//! two* (two fixed 3-byte reads) before opening the next phase — verified
-//! against the real CCGMS receiver, which stalls if fewer than three arrive.
+//! handshake, and the sender finishes by transmitting `S/B` three times.  This
+//! is a *sender* obligation, enforced by `end_off_sender`: a real CCGMS
+//! receiver stalls if fewer than three `S/B` arrive after the final block.
+//! Our own receiver does not mirror that with fixed drain-reads — `end_off_
+//! receiver` runs a tolerant best-effort re-handshake (ACK the final block,
+//! exchange SYN/`S/B`) and any extra `S/B` the peer sends are harmlessly slid
+//! past by `accept_code`'s resync window.  (Do not "fix" the receiver to add
+//! blind drain-reads: they would swallow the next phase's opening signal.)
 //!
 //! Critically, after the type block CCGMS sends `GOO` **twice** — the block-ack
 //! `GOO` (inside its `recv_block`) and a second `GOO` before the `S/B` — and

@@ -4257,6 +4257,19 @@ impl TelnetSession {
         for (idx, (sender_name, data, ymeta)) in uploads.iter().enumerate() {
             if idx == 0 {
                 // First file: user-entered filename, honor overwrite.
+                // A codec may refine the name — Punter appends the
+                // .prg/.seq extension matching the declared CBM type when
+                // the user's filename had none (the same suffix
+                // `PunterFileType::autodetect` reads on the way back out).
+                // The user's overwrite choice for the base name carries to
+                // the suffixed name; a late collision still surfaces via
+                // create_new below.
+                let (save_name, save_path) = match sender_name {
+                    Some(n) if Self::validate_filename(n).is_ok() => {
+                        (n.clone(), self.transfer_path().join(n))
+                    }
+                    _ => (filename.clone(), filepath.clone()),
+                };
                 let mut opts = tokio::fs::OpenOptions::new();
                 opts.write(true);
                 if overwrite {
@@ -4264,7 +4277,7 @@ impl TelnetSession {
                 } else {
                     opts.create_new(true);
                 }
-                match opts.open(&filepath).await {
+                match opts.open(&save_path).await {
                     Ok(mut file) => {
                         if let Err(e) = file.write_all(data).await {
                             self.post_transfer_settle().await;
@@ -4274,8 +4287,8 @@ impl TelnetSession {
                         }
                         let _ = file.flush().await;
                         drop(file);
-                        Self::apply_ymodem_meta(&filepath, ymeta.as_ref());
-                        saved.push((filename.clone(), data.len()));
+                        Self::apply_ymodem_meta(&save_path, ymeta.as_ref());
+                        saved.push((save_name, data.len()));
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                         self.post_transfer_settle().await;
