@@ -238,6 +238,7 @@ struct App {
     kermit_packet_timeout_buf: String,
     kermit_idle_timeout_buf: String,
     kermit_max_retries_buf: String,
+    kermit_resume_max_age_hours_buf: String,
     kermit_max_packet_length_buf: String,
     kermit_window_size_buf: String,
     kermit_block_check_type_buf: String,
@@ -310,6 +311,7 @@ impl App {
         let kermit_packet_timeout_buf = cfg.kermit_packet_timeout.to_string();
         let kermit_idle_timeout_buf = cfg.kermit_idle_timeout.to_string();
         let kermit_max_retries_buf = cfg.kermit_max_retries.to_string();
+        let kermit_resume_max_age_hours_buf = cfg.kermit_resume_max_age_hours.to_string();
         let kermit_max_packet_length_buf = cfg.kermit_max_packet_length.to_string();
         let kermit_window_size_buf = cfg.kermit_window_size.to_string();
         let kermit_block_check_type_buf = cfg.kermit_block_check_type.to_string();
@@ -351,6 +353,7 @@ impl App {
             kermit_packet_timeout_buf,
             kermit_idle_timeout_buf,
             kermit_max_retries_buf,
+            kermit_resume_max_age_hours_buf,
             kermit_max_packet_length_buf,
             kermit_window_size_buf,
             kermit_block_check_type_buf,
@@ -393,6 +396,7 @@ impl App {
         // "disable" sentinel matching the config-file loader.
         if let Ok(v) = self.kermit_idle_timeout_buf.parse::<u64>() { self.cfg.kermit_idle_timeout = v; }
         if let Ok(v) = self.kermit_max_retries_buf.parse::<u32>() && v >= 1 { self.cfg.kermit_max_retries = v; }
+        if let Ok(v) = self.kermit_resume_max_age_hours_buf.parse::<u32>() && v >= 1 { self.cfg.kermit_resume_max_age_hours = v; }
         if let Ok(v) = self.kermit_max_packet_length_buf.parse::<u16>() && (10..=9024).contains(&v) { self.cfg.kermit_max_packet_length = v; }
         if let Ok(v) = self.kermit_window_size_buf.parse::<u8>() && (1..=31).contains(&v) { self.cfg.kermit_window_size = v; }
         if let Ok(v) = self.kermit_block_check_type_buf.parse::<u8>() && matches!(v, 1..=3) { self.cfg.kermit_block_check_type = v; }
@@ -1105,6 +1109,18 @@ impl App {
                     );
                 });
         });
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.cfg.kermit_locking_shifts, "Locking shifts");
+            ui.checkbox(&mut self.cfg.kermit_resume_partial, "Resume partial uploads");
+        });
+        ui.horizontal(|ui| {
+            labeled_field(
+                ui,
+                "Resume max age (h):",
+                &mut self.kermit_resume_max_age_hours_buf,
+                50.0,
+            );
+        });
 
         ui.add_space(6.0);
         ui.separator();
@@ -1294,6 +1310,8 @@ impl App {
             self.cfg.kermit_negotiation_timeout.to_string();
         self.kermit_packet_timeout_buf = self.cfg.kermit_packet_timeout.to_string();
         self.kermit_max_retries_buf = self.cfg.kermit_max_retries.to_string();
+        self.kermit_resume_max_age_hours_buf =
+            self.cfg.kermit_resume_max_age_hours.to_string();
         self.kermit_max_packet_length_buf =
             self.cfg.kermit_max_packet_length.to_string();
         self.kermit_window_size_buf = self.cfg.kermit_window_size.to_string();
@@ -2276,6 +2294,7 @@ impl eframe::App for App {
                 || self.kermit_negotiation_timeout_buf != self.last_synced_cfg.kermit_negotiation_timeout.to_string()
                 || self.kermit_packet_timeout_buf != self.last_synced_cfg.kermit_packet_timeout.to_string()
                 || self.kermit_max_retries_buf != self.last_synced_cfg.kermit_max_retries.to_string()
+                || self.kermit_resume_max_age_hours_buf != self.last_synced_cfg.kermit_resume_max_age_hours.to_string()
                 || self.kermit_max_packet_length_buf != self.last_synced_cfg.kermit_max_packet_length.to_string()
                 || self.kermit_window_size_buf != self.last_synced_cfg.kermit_window_size.to_string()
                 || self.kermit_block_check_type_buf != self.last_synced_cfg.kermit_block_check_type.to_string()
@@ -2349,6 +2368,10 @@ mod tests {
             app.cfg.kermit_max_retries.to_string()
         );
         assert_eq!(
+            app.kermit_resume_max_age_hours_buf,
+            app.cfg.kermit_resume_max_age_hours.to_string()
+        );
+        assert_eq!(
             app.kermit_max_packet_length_buf,
             app.cfg.kermit_max_packet_length.to_string()
         );
@@ -2396,6 +2419,7 @@ mod tests {
         app.kermit_negotiation_timeout_buf = "55".into();
         app.kermit_packet_timeout_buf = "11".into();
         app.kermit_max_retries_buf = "6".into();
+        app.kermit_resume_max_age_hours_buf = "72".into();
         app.kermit_max_packet_length_buf = "2048".into();
         app.kermit_window_size_buf = "8".into();
         app.kermit_block_check_type_buf = "2".into();
@@ -2418,6 +2442,7 @@ mod tests {
         assert_eq!(app.cfg.kermit_negotiation_timeout, 55);
         assert_eq!(app.cfg.kermit_packet_timeout, 11);
         assert_eq!(app.cfg.kermit_max_retries, 6);
+        assert_eq!(app.cfg.kermit_resume_max_age_hours, 72);
         assert_eq!(app.cfg.kermit_max_packet_length, 2048);
         assert_eq!(app.cfg.kermit_window_size, 8);
         assert_eq!(app.cfg.kermit_block_check_type, 2);

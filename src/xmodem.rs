@@ -111,10 +111,9 @@ pub(crate) async fn xmodem_receive(
 
     // Negotiate mode: try CRC first ('C') for 2/3 of the negotiation
     // window, then fall back to checksum (NAK) for the remaining time.
-    // With default config (60s window / 3s retry interval) that's ~13
+    // With default config (45s window / 7s retry interval) that's ~4
     // CRC requests before the fallback — plenty of time for the user to
-    // start a CRC-capable sender.  Older comments here said "20 attempts
-    // (60 seconds)"; that math never worked out.
+    // start a CRC-capable sender.
     let mut mode = TransferMode::Crc16;
     let mut attempt: u32 = 0;
 

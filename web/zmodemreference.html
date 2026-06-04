@@ -666,8 +666,8 @@
                     same byte as <code>CAN</code>) is the escape marker. Any byte in the data
                     or CRC that could be intercepted by the transport &mdash; <code>ZDLE</code>
                     itself, <code>DLE</code> (0x10), the XON/XOFF flow-control pair
-                    (0x11 / 0x13) and their high-bit twins (0x91 / 0x93), and a
-                    <code>CR</code> in certain positions &mdash; is rewritten on the wire as
+                    (0x11 / 0x13) and their high-bit twins (0x91 / 0x93), and
+                    <code>CR</code> (0x0D, and its high-bit twin 0x8D) &mdash; is rewritten on the wire as
                     <code>ZDLE</code> followed by the byte with bit&nbsp;6 flipped
                     (<code>byte XOR 0x40</code>). The receiver reverses the transform.
                 </p>

@@ -11248,6 +11248,17 @@ impl TelnetSession {
             ))
             .await?;
             self.send_line(&format!(
+                "  Locking: {}    Resume: {}",
+                self.amber(if cfg.kermit_locking_shifts { "on" } else { "off" }),
+                self.amber(if cfg.kermit_resume_partial { "on" } else { "off" }),
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  Resume age: {} h",
+                self.amber(&cfg.kermit_resume_max_age_hours.to_string())
+            ))
+            .await?;
+            self.send_line(&format!(
                 "  ATDT KERMIT: {}",
                 self.amber(if cfg.allow_atdt_kermit { "enabled" } else { "disabled" })
             ))
@@ -11341,7 +11352,14 @@ impl TelnetSession {
             ))
             .await?;
             self.send_line(&format!(
-                "  {}  Toggle ATDT KERMIT",
+                "  {}  Locking shifts   {}  Resume uploads",
+                self.cyan("F"),
+                self.cyan("U")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Resume max age   {}  Toggle ATDT KERMIT",
+                self.cyan("D"),
                 self.cyan("K"),
             ))
             .await?;
@@ -11516,6 +11534,33 @@ impl TelnetSession {
                 }
                 "k" => {
                     self.kermit_toggle_atdt_kermit(cfg.allow_atdt_kermit).await?;
+                }
+                "f" => {
+                    self.kermit_toggle_bool(
+                        "Locking shifts",
+                        "kermit_locking_shifts",
+                        cfg.kermit_locking_shifts,
+                    )
+                    .await?;
+                }
+                "u" => {
+                    self.kermit_toggle_bool(
+                        "Resume partial uploads",
+                        "kermit_resume_partial",
+                        cfg.kermit_resume_partial,
+                    )
+                    .await?;
+                }
+                "d" => {
+                    self.xmodem_set_numeric(
+                        "Resume max age",
+                        "kermit_resume_max_age_hours",
+                        cfg.kermit_resume_max_age_hours as u64,
+                        1,
+                        8760,
+                        "hours",
+                    )
+                    .await?;
                 }
                 "h" => {
                     self.kermit_show_help().await?;
@@ -11709,6 +11754,9 @@ impl TelnetSession {
                 "  C  Block check type 1/2/3",
                 "  L/S/T/A/E/I  toggles",
                 "  8  cycle 8-bit quote mode",
+                "  F  locking-shift toggle",
+                "  U  resume partial uploads",
+                "  D  resume max age (hours)",
                 "  K  ATDT KERMIT toggle",
                 "     (bypasses security)",
                 "",
@@ -11736,6 +11784,12 @@ impl TelnetSession {
                 "  E  Repeat-count compression",
                 "  I  Telnet IAC escape during transfer",
                 "  8  8-bit quote: auto / on / off",
+                "  F  Locking-shift (SO/SI) capability for",
+                "     8-bit data over 7-bit links",
+                "  U  Resume partial uploads (disposition R):",
+                "     append to a matching on-disk partial",
+                "  D  Resume max age in hours: ignore on-disk",
+                "     partials older than this when resuming",
                 "  K  Allow ATDT KERMIT from either serial",
                 "     port's modem (bypasses security_enabled",
                 "     auth gate; prompts for explicit Y/N",
