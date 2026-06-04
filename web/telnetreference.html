@@ -547,6 +547,7 @@
             <a href="#session">Full Session</a>
             <a href="#examples">Examples</a>
             <a href="#glossary">Glossary</a>
+            <a href="#references">References</a>
         </nav>
 
         <div class="body-content">
@@ -1029,6 +1030,42 @@ IAC DO   NAWS     <span class="output-text">"tell me your window size"</span></c
                     file-transfer-over-telnet byte transforms (IAC escaping and CR-NUL
                     stuffing during XMODEM/YMODEM), see the
                     <a href="xmodemreference.html">XMODEM Protocol Reference</a>.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- PROTOCOL REFERENCES                            -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="references">
+                <div class="section-title">Protocol References</div>
+                <p class="intro">Deep-dive reference pages for every transfer protocol and interface the gateway speaks.</p>
+                <div class="compat-grid">
+                    <div class="compat-card">
+                        <h3><a href="xmodemreference.html">XMODEM</a></h3>
+                        <p>128-byte blocks; CRC-16 / checksum negotiation.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="ymodemreference.html">YMODEM</a></h3>
+                        <p>Block-0 metadata, batch, exact size truncation.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="zmodemreference.html">ZMODEM</a></h3>
+                        <p>Streaming; ZDLE, CRC-32, autostart, resume.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="kermitreference.html">Kermit</a></h3>
+                        <p>Send-Init negotiation; F / A / D / Z / B transfer.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="atcommandreference.html">AT Commands</a></h3>
+                        <p>Hayes command set, S-registers, +++ escape.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3 style="color: var(--yellow);">Telnet <span class="dim-text" style="font-size:0.78em;">(this page)</span></h3>
+                        <p>IAC negotiation, every option, the NVT data phase.</p>
+                    </div>
                 </div>
             </div>
 
