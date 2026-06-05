@@ -1753,6 +1753,26 @@ and on the web config page &mdash; see §8.7 for the <code>punter_*</code>
 key reference.
 </p>
 
+<aside class="note">
+<span class="label">Cancelling and restarting</span>
+Punter has no in-band cancel signal &mdash; when you abort a transfer on the
+Commodore (<span class="kbd">RUN/STOP</span> in CCGMS), the terminal stops
+locally and sends <em>nothing</em> over the wire, so the gateway cannot tell
+you bailed. It keeps the old transfer alive until it times out (up to
+<code>punter_block_timeout</code>, default 20&nbsp;s), then prints
+<code>Transfer&nbsp;failed</code> and returns to the menu. <strong>Wait for
+that <code>Transfer&nbsp;failed</code> message before restarting.</strong> If
+you re-arm your Commodore receiver while the gateway is still finishing the
+aborted transfer, its fresh handshake collides with the dying one and the two
+ends desync. The reliable sequence is: cancel on the Commodore &rarr; wait for
+the gateway to report <code>Transfer&nbsp;failed</code> and redraw the menu
+&rarr; start the new transfer on the gateway &rarr; then start the matching
+transfer on the Commodore. (To shorten the wait, lower
+<code>punter_block_timeout</code>.) The gateway clears any stray bytes the
+aborted transfer left in the line before each new Punter transfer, so a clean
+restart resyncs reliably.
+</aside>
+
 <!-- ═══════════════════ 9. Hayes AT modem ═══════════════════ -->
 <h1 id="ch9">9. Serial / Hayes AT Modem Emulation</h1>
 
