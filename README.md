@@ -1,6 +1,6 @@
 # Ethernet Gateway
 
-A telnet-based XMODEM/YMODEM/ZMODEM/Kermit file transfer server, SSH
+A telnet-based XMODEM/YMODEM/ZMODEM/Kermit/Punter file transfer server, SSH
 gateway, Hayes-compatible modem emulator on **two physically
 independent serial ports** (each with optional telnet-serial console
 bridge) for serial-attached retro hardware, text-mode web browser, and
@@ -453,6 +453,10 @@ Most settings can be changed from within a telnet or SSH session using the
     locking shifts, 8-bit quoting). See the
     [Kermit Reference](http://ethernetgateway.com/kermit.html) for
     the full discussion of each tunable.
+  - **P** Punter settings -- negotiation timeout and retry interval,
+    per-block timeout, retry limit, max bad-block rounds, block size,
+    and the hang-up-on-failure toggle (drops carrier on give-up, since
+    C1 has no in-band abort to free a stranded C64)
 - **O** Other Settings -- AI API key, browser homepage, weather zip, verbose
   logging, GUI on startup
 - **R** Reset Defaults -- restore all settings to factory defaults
@@ -509,7 +513,7 @@ browser_homepage = http://telnetbible.com
 weather_zip =
 
 # Verbose logging: set to true for detailed per-block / per-subpacket
-# protocol diagnostics across XMODEM, YMODEM, ZMODEM, and Kermit.
+# protocol diagnostics across XMODEM, YMODEM, ZMODEM, Kermit, and Punter.
 verbose = false
 
 # XMODEM-family protocol timeouts (apply to XMODEM, XMODEM-1K, and YMODEM —
@@ -534,6 +538,108 @@ zmodem_negotiation_timeout = 45
 zmodem_frame_timeout = 30
 zmodem_max_retries = 10
 zmodem_negotiation_retry_interval = 5
+
+# Kermit protocol tunables.
+# kermit_negotiation_timeout:  seconds to wait for the Send-Init handshake.
+# kermit_packet_timeout:       seconds to wait for each packet response.
+# kermit_idle_timeout:         seconds the gateway's Kermit *server* waits
+#                              between commands from the peer before sending
+#                              an idle-timeout error and disconnecting.  Set
+#                              to 0 to disable the deadline entirely (server
+#                              waits indefinitely for the peer's next command).
+#                              Distinct from kermit_negotiation_timeout, which
+#                              bounds the handshake itself.
+# kermit_max_retries:          retry limit per packet on NAK / timeout.
+# kermit_max_packet_length:    advertised MAXL (10..=9024).  Long packets are
+#                              negotiated separately; values >94 require the
+#                              peer to also support extended-length packets.
+# kermit_window_size:          sliding-window depth (1..=31).  1 = stop-and-wait.
+# kermit_block_check_type:     1 = 6-bit checksum, 2 = 12-bit, 3 = CRC-16/KERMIT.
+# kermit_long_packets:         advertise long-packet capability.
+# kermit_sliding_windows:      advertise sliding-window capability.
+# kermit_streaming:            advertise streaming-Kermit (no per-packet ACKs).
+#                              Big speed win on TCP/SSH; turn this off only if
+#                              your remote side bridges into an unreliable
+#                              serial line (some WiFi modems do this).
+# kermit_attribute_packets:    advertise A-packet (file metadata) support.
+# kermit_repeat_compression:   use repeat-count compression (RLE).
+# kermit_8bit_quote:           auto (only when peer asks), on, or off.
+# kermit_resume_partial:       resume partial uploads (spec disposition='R').
+#                              Off by default; turn on only when the peer is
+#                              known to honor disposition='R' in the A-packet
+#                              ACK, otherwise the transfer can corrupt the
+#                              file.
+# kermit_resume_max_age_hours: ignore on-disk partials older than this when
+#                              deciding whether to resume.  168 = one week.
+# kermit_locking_shifts:       advertise SO/SI region-shift capability for
+#                              8-bit transit on 7-bit links (Frank da Cruz
+#                              §3.4.5).  Off by default — no modern Kermit
+#                              peer (C-Kermit, G-Kermit, Kermit-95, E-Kermit)
+#                              negotiates it; flip on only if you're talking
+#                              to a strict-spec implementation that does.
+# allow_atdt_kermit:           let `ATDT KERMIT` from the serial modem
+#                              emulator drop directly into Kermit server mode
+#                              without going through the telnet menu.  Off
+#                              by default because it bypasses any
+#                              security_enabled username/password gate.
+#                              Enable only on trusted serial lines; for any
+#                              auth-required deployment leave this off and
+#                              have callers go via the telnet F/K path.
+kermit_negotiation_timeout = 30
+kermit_packet_timeout = 10
+kermit_idle_timeout = 30
+kermit_max_retries = 5
+kermit_max_packet_length = 4096
+kermit_window_size = 1
+kermit_block_check_type = 3
+kermit_long_packets = true
+kermit_sliding_windows = false
+kermit_streaming = false
+kermit_attribute_packets = true
+kermit_repeat_compression = true
+kermit_8bit_quote = auto
+kermit_resume_partial = false
+kermit_resume_max_age_hours = 168
+kermit_locking_shifts = false
+allow_atdt_kermit = false
+
+# Standalone Kermit server listener.
+# kermit_server_enabled:  bind a dedicated TCP port that drops every accepted
+#                         connection straight into Kermit server mode — no
+#                         telnet menu, no auth gate, no private-IP allowlist.
+#                         Off by default; enabling it bypasses every security
+#                         check the gateway has, so opt in only when the
+#                         network path itself is trusted.
+# kermit_server_port:     TCP port for the listener (default 2424).
+kermit_server_enabled = false
+kermit_server_port = 2424
+
+# Punter (C1) protocol tunables.  C1 is the file-transfer protocol CCGMS /
+# Novaterm / StrikeTerm speak natively on Commodore BBSes.
+# punter_block_size:                 total block size in bytes (8..=255, the
+#                                    7-byte header included).  255 = native max
+#                                    (248-byte payload); lower it toward 40 for
+#                                    noisy lines at the cost of handshake overhead.
+# punter_negotiation_timeout:        seconds to wait for the peer's first code.
+# punter_block_timeout:              per-block read timeout once under way.
+# punter_max_retries:                handshake-code / block retry limit.
+# punter_max_bad_rounds:             consecutive corrupt-block resend rounds
+#                                    tolerated before giving up (kept higher
+#                                    than max_retries; a real C64 peer never
+#                                    caps these, so a low value strands it).
+# punter_negotiation_retry_interval: seconds between code re-sends.
+# punter_hangup_on_failure:          drop the connection (carrier) when a
+#                                    transfer gives up so the C64 — which C1
+#                                    can't be told to abort — exits instead of
+#                                    hanging.  Ends the whole session; off by
+#                                    default.
+punter_block_size = 255
+punter_negotiation_timeout = 45
+punter_block_timeout = 20
+punter_max_retries = 10
+punter_max_bad_rounds = 30
+punter_negotiation_retry_interval = 5
+punter_hangup_on_failure = false
 
 # Serial ports.  The gateway exposes two physically independent ports —
 # Port A and Port B — each with its own enabled flag, role (modem
@@ -670,7 +776,7 @@ Y or N to continue; no default is applied.
 
 ### Supported Protocols
 
-The gateway implements five file-transfer protocols, selectable per-transfer
+The gateway implements six file-transfer protocols, selectable per-transfer
 from menus on the gateway side:
 
 | Protocol | Block size | CRC | Direction | Notes |
@@ -680,10 +786,12 @@ from menus on the gateway side:
 | **YMODEM** | 1024 B + block-0 header | CRC-16 | up/down | Block 0 carries filename + size; the receive path auto-detects it. |
 | **ZMODEM** | variable subpackets (1 K default) | CRC-16 out, CRC-16 or CRC-32 in | up/down | Full Forsberg spec: ZRQINIT handshake, ZDLE escaping, ZSKIP, batch sends and receives. On upload the first file is saved under the name you entered; subsequent files in a batch use the sender's filename (validated, collisions skipped via ZSKIP). |
 | **Kermit** | configurable long packets (4096 default) | 6-bit / 12-bit checksum or CRC-16/KERMIT | up/down + server | Columbia spec — sliding windows, attribute packets, RESEND, locking shifts, 8-bit quoting. Both **client** (push/pull from the menu) and **server** (idle in the file-transfer menu's `K` slot, on the standalone TCP listener, or via `ATDT KERMIT`) modes. See the [Kermit Reference](http://ethernetgateway.com/kermit.html) for the full surface. |
+| **Punter** | 255 B blocks, 248 B payload (configurable down to 40) | dual checksum — 16-bit additive + cyclic rotate-left | up/down | C1 "New Punter" — the protocol CCGMS / Novaterm / StrikeTerm speak natively on Commodore BBSes. Two-phase transfer (type block then data blocks) with a 3-byte ASCII handshake. C1 has no in-band abort, so a stalled give-up can optionally drop carrier (`punter_hangup_on_failure`) to free a stranded C64. |
 
 On upload, the gateway offers **XMODEM / YMODEM** (variant auto-detected),
-**ZMODEM**, or **Kermit**. On download, you pick the specific variant you
-want including Kermit. Kermit also has a dedicated server mode (press **K**
+**ZMODEM**, **Kermit**, or **Punter**. On download, you pick the specific
+variant you want, including Kermit and Punter. Kermit also has a dedicated
+server mode (press **K**
 on the File Transfer menu) and a standalone TCP listener (set
 `kermit_server_enabled = true` in `egateway.conf`).
 
@@ -696,10 +804,12 @@ on the File Transfer menu) and a standalone TCP listener (set
    least one letter or digit)
 4. On the **SELECT UPLOAD PROTOCOL** screen, press **X** (XMODEM / YMODEM —
    block size, CRC mode, and batch header are auto-detected), **Z** (ZMODEM),
-   or **K** (Kermit, any flavor — see the
-   [Kermit Reference](http://ethernetgateway.com/kermit.html))
+   **K** (Kermit, any flavor — see the
+   [Kermit Reference](http://ethernetgateway.com/kermit.html)), or **P**
+   (Punter — Commodore C1)
 5. The server displays "Start XMODEM/YMODEM send now", "Start ZMODEM send
-   now", or "Start Kermit send now" and waits for the negotiation handshake
+   now", "Start Kermit send now", or "Start PUNTER send … now" and waits for
+   the negotiation handshake
 6. In your terminal client, start the matching upload
    - Most terminal programs have a "Send File" or "Upload" option under a
      Transfer or File menu
@@ -716,7 +826,7 @@ on the File Transfer menu) and a standalone TCP listener (set
    page)
 3. Enter the number of the file to download
 4. On the **SELECT PROTOCOL** screen, choose **X** (XMODEM), **1** (XMODEM-1K),
-   **Y** (YMODEM), **Z** (ZMODEM), or **K** (Kermit)
+   **Y** (YMODEM), **Z** (ZMODEM), **K** (Kermit), or **P** (Punter)
 5. The server prompts "Start *protocol* receive now" and waits for the peer
    to begin
 6. In your terminal client, start the matching receive and choose where to
