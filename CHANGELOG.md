@@ -42,17 +42,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Configuration menus. Read fresh per gateway session (no restart
   needed); `EGATEWAY_GATEWAY_DEBUG` still forces it on. The trace now
   timestamps each input byte.
+- **Web protocol reference pages** served by the configuration web
+  server — per-protocol references (XMODEM, YMODEM, ZMODEM, Kermit, the
+  Hayes AT command set, and telnet), each documenting that protocol's
+  retry/recovery behavior, plus character-set and ANSI escape-sequence
+  references, reachable from a new References nav entry.
+- **Kermit resume and locking-shift settings are now editable** from
+  the telnet Kermit settings menu, the web configuration page, and the
+  desktop GUI (previously `egateway.conf`-only).
+- **`punter_hangup_on_failure`** — optional drop-carrier-on-give-up for
+  Punter, editable from the telnet / web / GUI Punter settings. Because
+  C1 has no in-band abort, a give-up otherwise leaves the C64 hung;
+  enabling this drops carrier so it sees loss-of-carrier instead.
 
 ### Fixed
 - AI chat: a follow-up question that merely starts with a menu command
   letter (e.g. "Quantum…") is no longer swallowed by the answer-screen
   navigation. A lone command letter still navigates; any longer line
   is sent to the model.
+- **Transfer retry/recovery brought to strict spec.** XMODEM/YMODEM now
+  NAK on a data-phase inter-block timeout (re-prompting the sender) and
+  cancel with CAN×3 on a non-duplicate block-sequence error instead of
+  NAK-looping; ZMODEM routes every data-phase error through one bounded
+  counter that re-sends ZRPOS and resets on progress (no infinite ZRPOS
+  loop on a permanently-corrupt stream); Kermit emits an Error packet
+  when it gives up so the peer is told rather than left waiting.
+- **Punter no longer strands a peer on a failed transfer.** A cancel /
+  restart from the C64 side is tolerated (longer pre-transfer input
+  drain), and corrupt-block recovery is bounded by its own larger round
+  cap rather than quitting early and leaving the peer hung.
 
 ### Changed
 - Removed the duplicate Port A/B status banner from the main
   configuration menu — per-port mode is already shown under Serial
   Configuration.
+- **Punter bad-block cap decoupled** — `punter_max_bad_rounds` (default
+  30) bounds consecutive corrupt-block resend rounds separately from
+  `punter_max_retries`, since a real C64 peer never caps resends and a
+  low shared cap made the gateway give up first and strand it.
 
 ## [0.6.0] - 2026-05-24
 
