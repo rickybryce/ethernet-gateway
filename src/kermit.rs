@@ -2116,6 +2116,54 @@ pub(crate) async fn kermit_send_with_starting_seq(
     starting_seq: u8,
     text_response: bool,
 ) -> Result<(), String> {
+    // Strict spec (Frank da Cruz, "Kermit Protocol Manual"): if the transfer
+    // aborts after Send-Init, the sender sends an Error ('E') packet so the
+    // peer stops cleanly instead of waiting out its own timeout — our receiver
+    // already does this on its aborts.  `kermit_send_impl` records the
+    // negotiated framing in `abort_framing` once Send-Init completes; `None`
+    // means the abort happened during Send-Init (the peer never engaged), so
+    // no 'E' is sent.
+    let mut abort_framing: Option<(u8, u8, u8, u8)> = None;
+    let result = kermit_send_impl(
+        reader,
+        writer,
+        files,
+        is_tcp,
+        is_petscii,
+        verbose,
+        starting_seq,
+        text_response,
+        &mut abort_framing,
+    )
+    .await;
+    if let Err(ref e) = result {
+        // Don't echo 'E' back at a peer that already aborted us (E / CAN×2).
+        let peer_aborted = e.contains("peer sent E-packet") || e.contains("peer aborted");
+        if !peer_aborted
+            && let Some((chkt, npad, padc, eol)) = abort_framing
+        {
+            if verbose {
+                glog!("Kermit send: transfer aborted — notifying peer with E-packet");
+            }
+            // E's seq is non-critical: the peer treats any E as a session abort.
+            let _ = send_error(writer, 0, "Transfer aborted", chkt, npad, padc, eol, is_tcp).await;
+        }
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn kermit_send_impl(
+    reader: &mut (impl AsyncRead + Unpin),
+    writer: &mut (impl AsyncWrite + Unpin),
+    files: &[KermitSendFile<'_>],
+    is_tcp: bool,
+    is_petscii: bool,
+    verbose: bool,
+    starting_seq: u8,
+    text_response: bool,
+    abort_framing: &mut Option<(u8, u8, u8, u8)>,
+) -> Result<(), String> {
     let cfg = config::get_config();
     if files.is_empty() {
         return Err("Kermit: no files to send".into());
@@ -2245,6 +2293,9 @@ pub(crate) async fn kermit_send_with_starting_seq(
 
     let peer_init = parse_send_init_payload(&peer_caps);
     let session = intersect_capabilities(&our_caps, &peer_init);
+    // Send-Init complete: record the negotiated framing so the public wrapper
+    // can emit a spec-required Error packet if the transfer aborts past here.
+    *abort_framing = Some((session.chkt, session.npad, session.padc, session.eol));
     let flavor = detect_flavor(&peer_init);
     // Honor peer's TIME for our retransmit/read deadlines from here on.
     let pkt_timeout = effective_packet_timeout(session.time, cfg.kermit_packet_timeout);
@@ -7767,6 +7818,120 @@ mod tests {
         let kinds = recv_task.await.unwrap();
         send_result.expect("kermit_send_with_starting_seq failed");
         kinds
+    }
+
+    /// Strict spec (Frank da Cruz, "Kermit Protocol Manual"): when the sender
+    /// exhausts its retries on a packet it must send an Error ('E') packet so
+    /// the peer stops cleanly instead of waiting out its own timeout.  A mock
+    /// receiver ACKs Send-Init, then NAKs every following packet to drive the
+    /// sender to give up — and we assert it emits 'E' on the way out.
+    #[tokio::test]
+    async fn test_sender_emits_error_packet_on_give_up() {
+        let _guard = CONFIG_LOCK.lock().await;
+        init_test_config();
+        let (sx, rx) = duplex(65536);
+        let (mut rx_r_for_send, mut sx_w_for_send) = split(sx);
+        let (mut sx_r_for_recv, mut rx_w_for_recv) = split(rx);
+
+        let send_task = tokio::spawn(async move {
+            let file = KermitSendFile {
+                name: "BODY",
+                data: b"hello, world\n",
+                modtime: None,
+                mode: None,
+            };
+            kermit_send_with_starting_seq(
+                &mut rx_r_for_send,
+                &mut sx_w_for_send,
+                &[file],
+                false,
+                false,
+                false,
+                0,
+                false,
+            )
+            .await
+        });
+
+        let recv_task = tokio::spawn(async move {
+            let mut state = ReadState::default();
+            let our_caps = config_capabilities();
+            let deadline = || tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+            // 1. Read S, ACK with our capabilities so the sender proceeds past
+            //    Send-Init (only then is the abort-E behaviour in play).
+            let s_pkt = read_packet(
+                &mut sx_r_for_recv,
+                false,
+                false,
+                b'1',
+                CR,
+                false,
+                &mut state,
+                Some(deadline()),
+            )
+            .await
+            .unwrap();
+            assert_eq!(s_pkt.kind, TYPE_SEND_INIT);
+            let session =
+                intersect_capabilities(&our_caps, &parse_send_init_payload(&s_pkt.payload));
+            let ack_payload = build_send_init_payload(&our_caps);
+            send_ack_with_payload(
+                &mut rx_w_for_recv,
+                s_pkt.seq,
+                &ack_payload,
+                b'1',
+                0,
+                0,
+                CR,
+                false,
+            )
+            .await
+            .unwrap();
+            // 2. NAK every following packet to exhaust the sender's retries,
+            //    watching for the Error packet it must send when it gives up.
+            let mut saw_error = false;
+            loop {
+                let pkt = match read_packet(
+                    &mut sx_r_for_recv,
+                    false,
+                    false,
+                    session.chkt,
+                    session.eol,
+                    false,
+                    &mut state,
+                    Some(deadline()),
+                )
+                .await
+                {
+                    Ok(p) => p,
+                    Err(_) => break, // sender gave up and closed the link
+                };
+                if pkt.kind == TYPE_ERROR {
+                    saw_error = true;
+                    break;
+                }
+                send_nak(
+                    &mut rx_w_for_recv,
+                    pkt.seq,
+                    session.chkt,
+                    session.npad,
+                    session.padc,
+                    session.eol,
+                    false,
+                )
+                .await
+                .unwrap();
+            }
+            saw_error
+        });
+
+        let send_result = send_task.await.unwrap();
+        let saw_error = recv_task.await.unwrap();
+        assert!(send_result.is_err(), "sender must report the abort");
+        assert!(
+            saw_error,
+            "sender must emit an Error ('E') packet when it exhausts retries (strict spec)",
+        );
     }
 
     #[tokio::test]
