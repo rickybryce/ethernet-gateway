@@ -743,7 +743,7 @@
                         <li>The gateway sends <code>ZRINIT</code> advertising <code>CANFDX | CANOVIO | CANFC32</code>.</li>
                         <li>The sender transmits a <code>ZFILE</code> header and a subpacket with the filename, size, and optional mtime / mode. The gateway parses it and validates the path (no traversal).</li>
                         <li>The gateway replies <code>ZRPOS(0)</code> to accept. In a batch, a colliding filename is declined with <code>ZSKIP</code> so the sender moves on.</li>
-                        <li>The sender streams <code>ZDATA</code> subpackets. The gateway checks each subpacket's CRC (16 or 32); on a bad one it sends <code>ZRPOS</code> with the last good byte offset, and the sender resumes there.</li>
+                        <li>The sender streams <code>ZDATA</code> subpackets. The gateway checks each subpacket's CRC (16 or 32); on a bad one &mdash; or a late/garbled header, or a stall &mdash; it re-sends <code>ZRPOS</code> with the last good byte offset and the sender resumes there. A good subpacket clears the error count; <code>zmodem_max_retries</code> <em>consecutive</em> errors without progress ends the transfer.</li>
                         <li>The sender sends <code>ZEOF(length)</code>; the gateway answers <code>ZRINIT</code> for the next file. mtime and mode from the <code>ZFILE</code> subpacket are applied to the saved file when present.</li>
                         <li>The sender sends <code>ZFIN</code>; the gateway returns <code>ZFIN</code>; the sender sends <code>"OO"</code> and the session closes.</li>
                     </ol>
@@ -801,12 +801,12 @@
                 <div class="section-title">Error Recovery, Resume &amp; Skip</div>
                 <table class="data-table">
                     <tr><th>Situation</th><th>What happens</th></tr>
-                    <tr><td>Bad subpacket CRC (16 or 32)</td><td>The receiver sends <code>ZRPOS</code> with the last good byte offset; the sender seeks there and resumes. Recovery is by <strong>position</strong>, not block number.</td></tr>
+                    <tr><td>Any data-phase error (bad subpacket CRC 16/32, a late or garbled header, a position mismatch)</td><td>The receiver re-sends <code>ZRPOS</code> with the last good byte offset and the sender resumes there &mdash; recovery is by <strong>position</strong>, not block number. All of these share one counter that <strong>resets on each good subpacket</strong> and bounds <em>consecutive</em> errors at <code>zmodem_max_retries</code> (default 10) before the receiver cancels.</td></tr>
                     <tr><td>Garbled header</td><td>Answered with <code>ZNAK</code> (or a repeated request); the frame is re-sent.</td></tr>
                     <tr><td>Resume a partial file</td><td>On <code>ZFILE</code> the receiver may answer a <strong>non-zero</strong> <code>ZRPOS</code>; the gateway-as-sender honors it and starts mid-file.</td></tr>
                     <tr><td>Decline one file</td><td><code>ZSKIP</code> &mdash; the gateway sends it to refuse a colliding name on receive, and honors it on send by advancing to the next file.</td></tr>
                     <tr><td>Abort</td><td><code>ZABORT</code>, or the <code>CAN</code> (0x18) run a terminal sends on Ctrl-X; the session tears down cleanly.</td></tr>
-                    <tr><td>Stall</td><td>A frame that doesn't complete within <code>zmodem_frame_timeout</code> is retried up to <code>zmodem_max_retries</code> times.</td></tr>
+                    <tr><td>Stall (no data within <code>zmodem_frame_timeout</code>)</td><td>The receiver re-prompts with <code>ZRPOS</code> rather than abandoning the transfer on the first quiet moment, counting toward the same consecutive-error bound; the sender likewise retransmits stalled frames up to <code>zmodem_max_retries</code>.</td></tr>
                     <tr><td>File exceeds 8&nbsp;MB</td><td>The transfer is aborted &mdash; the same cap as the other protocols.</td></tr>
                 </table>
             </div>

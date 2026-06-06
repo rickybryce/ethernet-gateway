@@ -665,7 +665,7 @@
                     <h3>Identical to XMODEM-1K from here</h3>
                     <ol>
                         <li>Data blocks are numbered from <strong>1</strong>: <code>STX</code> for 1024-byte blocks (the YMODEM norm) or <code>SOH</code> for a 128-byte block, decided per block from the header byte.</li>
-                        <li>Each block is validated (complement, CRC-16, sequence) and <code>ACK</code>'d; a bad block is <code>NAK</code>'d and resent &mdash; the same stop-and-wait loop as XMODEM.</li>
+                        <li>Each block is validated (complement, CRC-16, sequence) and <code>ACK</code>'d &mdash; the same stop-and-wait recovery as XMODEM: a corrupt block is <code>NAK</code>'d and resent (bounded by <code>xmodem_max_retries</code>), a duplicate is re-<code>ACK</code>'d, an inter-block timeout re-prompts with <code>NAK</code>, and a valid block with a non-duplicate sequence number cancels with <code>CAN</code>.</li>
                     </ol>
                 </div>
 

@@ -749,8 +749,10 @@
                         <li>For every block the gateway reads: header byte, block number, its one's-complement, the data (128 or 1024 bytes per the header), then the trailer (2 CRC bytes, or 1 checksum byte).</li>
                         <li>It validates three things: the complement matches the block number, the CRC/checksum is correct, and the block number is the one expected next.</li>
                         <li>All good &rarr; the gateway sends <code>ACK</code> (0x06) and the sender advances to the next block.</li>
-                        <li>Anything wrong &rarr; the gateway sends <code>NAK</code> (0x15) and the sender <strong>resends the same block</strong>.</li>
+                        <li>Bad CRC/checksum or a bad complement &rarr; the gateway sends <code>NAK</code> (0x15) and the sender <strong>resends the same block</strong>, up to <code>xmodem_max_retries</code> (default 10) consecutive errors before it cancels.</li>
                         <li>A re-sent copy of an already-accepted block (its number matches one of the last two seen) is simply <code>ACK</code>'d again without being stored &mdash; this recovers from a lost <code>ACK</code> without duplicating data.</li>
+                        <li>A valid block carrying a <strong>different, non-duplicate block number</strong> is an unrecoverable loss of sync (XMODEM has no way to request a specific block), so the gateway cancels with three <code>CAN</code> (0x18) bytes &mdash; the spec-mandated response.</li>
+                        <li>If no block arrives within the block timeout (<code>xmodem_block_timeout</code>, default 20&nbsp;s), the gateway <code>NAK</code>s to re-prompt the sender &mdash; which retransmits the block it's still awaiting an <code>ACK</code> for &mdash; bounded by the same retry count rather than abandoning the transfer on the first quiet moment.</li>
                     </ol>
                 </div>
 
@@ -880,9 +882,10 @@
                 <div class="section-title">Error Handling &amp; Limits</div>
                 <table class="data-table">
                     <tr><th>Situation</th><th>What happens</th></tr>
-                    <tr><td>Bad CRC / checksum, bad complement, or wrong block number</td><td>Receiver sends <code>NAK</code>; sender resends the same block.</td></tr>
+                    <tr><td>Bad CRC / checksum or bad complement</td><td>Receiver sends <code>NAK</code>; sender resends the same block (bounded by <code>xmodem_max_retries</code> consecutive errors).</td></tr>
                     <tr><td>Lost <code>ACK</code> (duplicate block arrives)</td><td>The duplicate is <code>ACK</code>'d again but not stored, keeping the streams in sync.</td></tr>
-                    <tr><td>No response within the block timeout</td><td>The waiting side retries, up to <code>xmodem_max_retries</code> times.</td></tr>
+                    <tr><td>Valid block, wrong (non-duplicate) number</td><td>An unrecoverable loss of sync &mdash; the receiver cancels with three <code>CAN</code> bytes.</td></tr>
+                    <tr><td>No block within the block timeout</td><td>The receiver <code>NAK</code>s to re-prompt the sender (which retransmits), bounded by <code>xmodem_max_retries</code>; the sender likewise resends on its own timeout.</td></tr>
                     <tr><td>Too many retries</td><td>The transfer is cancelled with three <code>CAN</code> (0x18) bytes.</td></tr>
                     <tr><td>Deliberate abort</td><td><strong>Two</strong> consecutive <code>CAN</code> bytes from either side abort the session (a lone <code>CAN</code> is treated as line noise).</td></tr>
                     <tr><td>File exceeds 8&nbsp;MB</td><td>The receiver aborts with three <code>CAN</code> bytes.</td></tr>
