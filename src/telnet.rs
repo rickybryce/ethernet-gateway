@@ -11010,7 +11010,14 @@ impl TelnetSession {
     }
 
     async fn zmodem_show_help(&mut self) -> Result<(), std::io::Error> {
-        let lines: &[&str] = if self.terminal_type == TerminalType::Petscii {
+        let lines = Self::zmodem_help_lines(self.terminal_type == TerminalType::Petscii);
+        self.show_help_page("ZMODEM SETTINGS HELP", lines).await
+    }
+
+    /// ZMODEM settings help, split by terminal width.  Associated fn so a unit
+    /// test asserts the REAL lines fit 40 columns (see `punter_help_lines`).
+    fn zmodem_help_lines(petscii: bool) -> &'static [&'static str] {
+        if petscii {
             &[
                 "  Configure ZMODEM file transfer",
                 "  settings.",
@@ -11046,8 +11053,7 @@ impl TelnetSession {
                 "",
                 "  Takes effect on next transfer.",
             ]
-        };
-        self.show_help_page("ZMODEM SETTINGS HELP", lines).await
+        }
     }
 
     // ─── PUNTER SETTINGS ────────────────────────────────────
@@ -11896,7 +11902,14 @@ impl TelnetSession {
     }
 
     async fn kermit_show_help(&mut self) -> Result<(), std::io::Error> {
-        let lines: &[&str] = if self.terminal_type == TerminalType::Petscii {
+        let lines = Self::kermit_help_lines(self.terminal_type == TerminalType::Petscii);
+        self.show_help_page("KERMIT SETTINGS HELP", lines).await
+    }
+
+    /// Kermit settings help, split by terminal width.  Associated fn so a unit
+    /// test asserts the REAL lines fit 40 columns (see `punter_help_lines`).
+    fn kermit_help_lines(petscii: bool) -> &'static [&'static str] {
+        if petscii {
             &[
                 "  Configure Kermit transfer",
                 "  parameters.  Negotiated with",
@@ -11954,8 +11967,7 @@ impl TelnetSession {
                 "  Streaming requires a reliable transport.",
                 "  Disable when bridging to flaky serial.",
             ]
-        };
-        self.show_help_page("KERMIT SETTINGS HELP", lines).await
+        }
     }
 
     async fn xmodem_set_dir(&mut self, current: &str) -> Result<(), std::io::Error> {
@@ -12045,7 +12057,15 @@ impl TelnetSession {
     }
 
     async fn xmodem_show_help(&mut self) -> Result<(), std::io::Error> {
-        let lines: &[&str] = if self.terminal_type == TerminalType::Petscii {
+        let lines = Self::xmodem_help_lines(self.terminal_type == TerminalType::Petscii);
+        self.show_help_page("XMODEM SETTINGS HELP", lines).await
+    }
+
+    /// XMODEM-family settings help, split by terminal width.  An associated fn
+    /// (no `self`) so a unit test asserts the REAL lines fit 40 columns —
+    /// matching `punter_help_lines`, with no duplicated copy to drift.
+    fn xmodem_help_lines(petscii: bool) -> &'static [&'static str] {
+        if petscii {
             &[
                 "  Configure XMODEM family transfer",
                 "  settings. Shared with XMODEM-1K",
@@ -12081,8 +12101,7 @@ impl TelnetSession {
                 "",
                 "  Takes effect on next transfer.",
             ]
-        };
-        self.show_help_page("XMODEM SETTINGS HELP", lines).await
+        }
     }
 
     // ─── TROUBLESHOOTING ────────────────────────────────────
@@ -15218,22 +15237,7 @@ mod tests {
     /// XMODEM settings help lines (PETSCII) must fit 40 cols.
     #[test]
     fn test_xmodem_help_lines_fit_petscii() {
-        let lines = [
-            "  Configure XMODEM family transfer",
-            "  settings. Shared with XMODEM-1K",
-            "  and YMODEM.",
-            "  N  Negotiation timeout: how",
-            "     long to wait for transfer",
-            "     to begin",
-            "  I  Retry interval: C/NAK poke",
-            "     gap (spec ~10 s, def 7 s)",
-            "  B  Block timeout: how long to",
-            "     wait for each block",
-            "  M  Max retries per block",
-            "  R  Restart the server",
-            "  Takes effect on next transfer.",
-        ];
-        for line in &lines {
+        for line in TelnetSession::xmodem_help_lines(true) {
             assert!(
                 line.len() <= PETSCII_WIDTH,
                 "xmodem help '{}' is {} chars, exceeds {}",
@@ -15247,25 +15251,26 @@ mod tests {
     /// ZMODEM settings help lines (PETSCII) must fit 40 cols.
     #[test]
     fn test_zmodem_help_lines_fit_petscii() {
-        let lines = [
-            "  Configure ZMODEM file transfer",
-            "  settings.",
-            "  N  Negotiation timeout: how",
-            "     long to wait for ZRQINIT /",
-            "     ZRINIT handshake",
-            "  I  Retry interval: ZRINIT/",
-            "     ZRQINIT re-send gap (def 5)",
-            "  F  Frame timeout: per-frame",
-            "     read timeout in transfer",
-            "  M  Max retries for ZRQINIT /",
-            "     ZRPOS / ZDATA frames",
-            "  R  Restart the server",
-            "  Takes effect on next transfer.",
-        ];
-        for line in &lines {
+        for line in TelnetSession::zmodem_help_lines(true) {
             assert!(
                 line.len() <= PETSCII_WIDTH,
                 "zmodem help '{}' is {} chars, exceeds {}",
+                line,
+                line.len(),
+                PETSCII_WIDTH,
+            );
+        }
+    }
+
+    /// Kermit settings help lines (PETSCII) must fit 40 cols.  Asserts the
+    /// REAL lines via the shared associated fn (no duplicated copy) — Kermit's
+    /// help had no width guard before this.
+    #[test]
+    fn test_kermit_help_lines_fit_petscii() {
+        for line in TelnetSession::kermit_help_lines(true) {
+            assert!(
+                line.len() <= PETSCII_WIDTH,
+                "kermit help '{}' is {} chars, exceeds {}",
                 line,
                 line.len(),
                 PETSCII_WIDTH,
