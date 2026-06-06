@@ -3470,9 +3470,12 @@ impl TelnetSession {
         match input {
             "u" => {
                 if let Err(e) = self.file_transfer_upload().await {
-                    // ConnectionAborted = a deliberate hangup (e.g. Punter
-                    // hangup-on-failure); propagate so the session ends and
-                    // the writer is shut down (carrier drop).
+                    // ConnectionAborted means the session should end: either a
+                    // deliberate Punter hangup-on-failure (`punter_hangup`) or
+                    // the client already dropped (`wait_for_key`/reads surface
+                    // EOF as ConnectionAborted).  Propagate so `run()` tears
+                    // down and the writer is shut (carrier drop) instead of
+                    // writing a doomed "Press any key" to a dead socket.
                     if e.kind() == std::io::ErrorKind::ConnectionAborted {
                         return Err(e);
                     }
