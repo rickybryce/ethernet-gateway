@@ -1305,6 +1305,8 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                     <tr><td>Retry interval</td><td>5s</td><td>1&ndash;60 seconds (handshake re-send gap)</td></tr>
                     <tr><td>Block timeout</td><td>20s</td><td>1&ndash;120 seconds (per-block read)</td></tr>
                     <tr><td>Max retries</td><td>10</td><td>1&ndash;100</td></tr>
+                    <tr><td>Max bad rounds</td><td>30</td><td>Corrupt-block resend rounds tolerated before giving up; kept higher than max retries (a real C64 peer never caps resends)</td></tr>
+                    <tr><td>Hangup on failure</td><td>false</td><td>Drop carrier on give-up so a stranded C64 sees loss-of-carrier (C1 has no in-band abort)</td></tr>
                 </table>
 
                 <div class="cat">Serial Modem / Console Settings (per port)</div>
@@ -1406,7 +1408,9 @@ punter_block_size = 255
 punter_negotiation_timeout = 45
 punter_block_timeout = 20
 punter_max_retries = 10
+punter_max_bad_rounds = 30
 punter_negotiation_retry_interval = 5
+punter_hangup_on_failure = false
 disable_ip_safety = false
 ssh_gateway_auth = password</span></code></pre>
                 <p class="dim-text" style="margin-top:8px;">

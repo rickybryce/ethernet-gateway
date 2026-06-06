@@ -585,16 +585,16 @@ zmodem_negotiation_retry_interval = 5
 #                              Enable only on trusted serial lines; for any
 #                              auth-required deployment leave this off and
 #                              have callers go via the telnet F/K path.
-kermit_negotiation_timeout = 30
+kermit_negotiation_timeout = 300
 kermit_packet_timeout = 10
-kermit_idle_timeout = 30
+kermit_idle_timeout = 300
 kermit_max_retries = 5
 kermit_max_packet_length = 4096
-kermit_window_size = 1
+kermit_window_size = 4
 kermit_block_check_type = 3
 kermit_long_packets = true
-kermit_sliding_windows = false
-kermit_streaming = false
+kermit_sliding_windows = true
+kermit_streaming = true
 kermit_attribute_packets = true
 kermit_repeat_compression = true
 kermit_8bit_quote = auto
