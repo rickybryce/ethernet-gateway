@@ -101,7 +101,7 @@ jobs:
           ./appimagetool --appimage-extract >/dev/null
           mkdir -p AppDir/usr/bin
           cp target/${{ matrix.target }}/release/ethernet-gateway AppDir/usr/bin/
-          cp ethernetgatewaylogo.png AppDir/ethernet-gateway.png
+          cp web/ethernetgatewaylogo.png AppDir/ethernet-gateway.png
           cat > AppDir/ethernet-gateway.desktop <<'EOF'
           [Desktop Entry]
           Type=Application
