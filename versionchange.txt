@@ -1,0 +1,37 @@
+# versionchange.txt
+#
+# Checklist of files that carry the project version string and must be bumped
+# on every version change. Tracked in-repo as a maintenance aid.
+#
+# Runtime version strings (ATI / ATI3, Kermit identity, webserver banner, GUI
+# title, startup log) all derive from env!("CARGO_PKG_VERSION"), so bumping
+# Cargo.toml updates them automatically — the doc files below must be matched
+# by hand.
+#
+# Current version: 0.6.1
+#
+# ── Source of truth ─────────────────────────────────────────────
+Cargo.toml              # package version (line 3 only — NOT the russh/dep "0.60" specs); Cargo.lock follows on build
+versionchange.txt       # the "Current version:" line in this file's header
+#
+# ── Documentation (match Cargo.toml by hand) ────────────────────
+README.md               # download/verify example artifact filenames (ethernet-gateway-vX.Y.Z-...)
+usermanual.html         # .version header, sha256 example, Kermit identity, ATI/ATI3 strings, footer
+#                         DO NOT bump the historical refs: "removed in v0.6.0", "prior to v0.6.0"
+web/index.html          # <title>, .hdr-version, startup-banner output-text, footer
+web/appendix.html       # .hdr-version, footer
+web/kermit.html         # <title>, .hdr-version, "Ethernet Gateway Kermit X.Y.Z" identity strings, footer
+web/kermitreference.html
+web/xmodemreference.html
+web/ymodemreference.html
+web/zmodemreference.html
+web/atcommandreference.html  # also the ATI / ATI3 example rows
+web/telnetreference.html
+#
+# ── On release (separate step) ──────────────────────────────────
+CHANGELOG.md            # add a new [X.Y.Z] - DATE section + update the compare link; keep prior entries
+#
+# Verify after a bump:
+#   grep -rn '0\.6\.0' web/ README.md   # expect: none
+#   grep -n  '0\.6\.0' usermanual.html  # expect: ONLY the two historical refs
+#   cargo build                          # confirms Cargo.toml parsed + new version compiled
