@@ -48,13 +48,46 @@ pub fn run(
     gui_ctx: Arc<std::sync::Mutex<Option<egui::Context>>>,
 ) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let options = eframe::NativeOptions {
+        // `mut` is only needed on ARM, where we patch wgpu limits below.
+        #[allow(unused_mut)]
+        let mut options = eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_title(format!("Ethernet Gateway v{}", env!("CARGO_PKG_VERSION")))
                 .with_inner_size([1120.0, 810.0])
                 .with_min_inner_size([640.0, 480.0]),
             ..Default::default()
         };
+
+        // ARM SBCs such as the Raspberry Pi have GPUs (e.g. VideoCore/V3D)
+        // that report several device limits below wgpu's desktop defaults
+        // (max_color_attachments, max_inter_stage_shader_variables, buffer
+        // sizes, ...). eframe's default requests the desktop limits, so
+        // device creation aborts with errors like:
+        //   "Limit 'max_color_attachments' value 8 is better than allowed 4".
+        // Rather than clamp fields one at a time, request exactly the limits
+        // the chosen adapter advertises — that satisfies every field at once
+        // and is always valid, since you can't request more than the adapter
+        // supports. egui runs fine on these (it targets WebGL2-class limits).
+        // Desktop builds are unaffected — they keep eframe's defaults.
+        #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+        {
+            use eframe::egui_wgpu::{wgpu, WgpuSetup};
+            if let WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
+                // Prefer the OpenGL ES backend on ARM. The Raspberry Pi's V3D
+                // Vulkan driver (Mesa) is incomplete and aborts device creation
+                // with a wgpu-hal "Requested feature is not available on this
+                // device" panic; the GLES backend is V3D's mature path. An
+                // explicit WGPU_BACKEND still wins, for debugging.
+                setup.instance_descriptor.backends =
+                    wgpu::Backends::from_env().unwrap_or(wgpu::Backends::GL);
+                // Request exactly the limits the adapter advertises (see above).
+                setup.device_descriptor = Arc::new(|adapter| wgpu::DeviceDescriptor {
+                    label: Some("egui wgpu device (arm)"),
+                    required_limits: adapter.limits(),
+                    ..Default::default()
+                });
+            }
+        }
 
         eframe::run_native(
             "Ethernet Gateway",

@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.6.1] - 2026-06-06
 
 ### Added
+- **Raspberry Pi 4+ (aarch64 Linux) build** — releases now ship an
+  `Ethernet_Gateway-aarch64.AppImage` alongside the existing
+  x86_64 Linux / Windows / macOS artifacts, built on a native arm64
+  runner. Two ARM-only desktop-GUI fixes make it run on the Pi's
+  VideoCore/V3D GPU: the wgpu device now requests exactly the limits
+  the adapter advertises (so startup no longer aborts with
+  "Limit 'max_color_attachments' value 8 is better than allowed 4" or
+  the equivalent for other limits), and the GUI prefers the OpenGL ES
+  backend instead of the Pi's incomplete Vulkan driver (which panicked
+  with "Requested feature is not available on this device").
+  `WGPU_BACKEND` still overrides. Other platforms are unaffected.
 - **Punter (C1) file-transfer protocol** — the protocol CCGMS /
   Novaterm / StrikeTerm speak natively on Commodore BBSes, added
   alongside XMODEM/YMODEM/ZMODEM/Kermit. Single-file C1 with the full

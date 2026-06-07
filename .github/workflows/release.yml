@@ -26,6 +26,12 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             archive: tar.gz
+            appimage_arch: x86_64
+          # Native arm64 Linux runner — produces the Raspberry Pi 4+ build.
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            archive: tar.gz
+            appimage_arch: aarch64
           - os: macos-latest
             target: aarch64-apple-darwin
             archive: tar.gz
@@ -42,7 +48,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Install Linux build dependencies
-        if: matrix.os == 'ubuntu-latest'
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -84,19 +90,22 @@ jobs:
           Compress-Archive -Path "dist\$name\*" -DestinationPath "dist\$name.zip"
           Add-Content -Path $env:GITHUB_ENV -Value "ARTIFACT=dist\$name.zip"
 
-      # ─── AppImage (Linux x86_64 only) ──────────────────────
+      # ─── AppImage (Linux only) ─────────────────────────────
       # Bundles the same release binary the tar.gz ships, so users who
       # prefer an integrated AppImage launcher don't need to reach for
-      # the tar.gz + system-wide install.  Runs only on the Linux build
-      # slot because AppImage is a Linux-only container format.
+      # the tar.gz + system-wide install.  Runs on each Linux build slot
+      # (x86_64 and aarch64) because AppImage is a Linux-only container
+      # format; the arch is taken from matrix.appimage_arch.
       - name: Build AppImage
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        if: matrix.appimage_arch != ''
         shell: bash
         run: |
           set -euo pipefail
+          ARCH="${{ matrix.appimage_arch }}"
           # appimagetool is a self-contained AppImage; GitHub runners
-          # lack FUSE, so extract it and invoke AppRun directly.
-          wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage -O appimagetool
+          # lack FUSE, so extract it and invoke AppRun directly.  Each
+          # arch has its own appimagetool build with a matching runtime.
+          wget -q "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-${ARCH}.AppImage" -O appimagetool
           chmod +x appimagetool
           ./appimagetool --appimage-extract >/dev/null
           mkdir -p AppDir/usr/bin
@@ -118,8 +127,8 @@ jobs:
           exec "${HERE}/usr/bin/ethernet-gateway" "$@"
           EOF
           chmod +x AppDir/AppRun
-          ARCH=x86_64 ./squashfs-root/AppRun AppDir dist/Ethernet_Gateway-x86_64.AppImage
-          echo "APPIMAGE=dist/Ethernet_Gateway-x86_64.AppImage" >> "$GITHUB_ENV"
+          ARCH="${ARCH}" ./squashfs-root/AppRun AppDir "dist/Ethernet_Gateway-${ARCH}.AppImage"
+          echo "APPIMAGE=dist/Ethernet_Gateway-${ARCH}.AppImage" >> "$GITHUB_ENV"
 
       - name: SHA-256 checksum
         shell: bash
