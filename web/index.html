@@ -916,6 +916,15 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                     for server mode and full configuration.
                 </div>
 
+                <div class="callout callout-info">
+                    <strong>Punter reference:</strong>
+                    For Punter C1's two-phase design &mdash; the 7-byte block header, the dual
+                    additive + cyclic checksums, the size-of-next-block field, the
+                    GOO/BAD/ACK/S-B/SYN handshake, the type-block-then-data-blocks flow, and
+                    the end-off, with step-by-step upload and download handshakes &mdash; see the
+                    <a href="punterreference.html"><strong>Punter C1 Protocol Reference page</strong></a>.
+                </div>
+
                 <div class="cat">IAC &amp; CR-NUL Transforms</div>
                 <p class="dim-text">
                     Telnet NVT (RFC 854) reserves byte 0xFF as the IAC command marker
@@ -950,6 +959,13 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                     Connect to remote SSH servers through Ethernet Gateway. Press
                     <strong>S</strong> from the main menu.
                 </p>
+                <div class="callout callout-info">
+                    <strong>SSH reference:</strong>
+                    For the full picture of both SSH roles &mdash; the inbound server, the
+                    three key files, trust-on-first-use host-key verification, the
+                    password-vs-gateway-key auth modes, and ANSI stripping &mdash; see the
+                    <a href="sshreference.html"><strong>SSH Reference page</strong></a>.
+                </div>
                 <div class="instructions">
                     <h3>Connecting</h3>
                     <ol>
@@ -958,20 +974,20 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                         <li>Enter the port (default: 22)</li>
                         <li>Enter your username for the remote server</li>
                         <li>If the host key is unknown, confirm the SHA-256 fingerprint; if it has changed, review the warning carefully before accepting</li>
-                        <li>The gateway attempts <strong>public-key authentication</strong> first; if the remote accepts the gateway's key, you skip straight to the shell</li>
-                        <li>If the pubkey is not accepted, you are prompted for a password</li>
+                        <li>The gateway authenticates with the <strong>single configured method</strong> (config key <code>ssh_gateway_auth</code>): in <code>password</code> mode (default) it prompts you for the remote password; in <code>key</code> mode it uses the gateway's own client key. There is <strong>no fallback</strong> between the two &mdash; the remote sees exactly one auth attempt</li>
                         <li>Once authenticated, you have a full interactive shell on the remote server</li>
                         <li>Press <strong>Esc</strong> twice to disconnect and return to the main menu</li>
                     </ol>
                 </div>
 
                 <div class="instructions">
-                    <h3>Public-Key Authentication</h3>
+                    <h3>Public-Key Authentication (gateway-key mode)</h3>
                     <ol>
+                        <li>Set <code>ssh_gateway_auth = key</code> in config &mdash; this is what enables key-based dial-out (the default is <code>password</code>)</li>
                         <li>On first outbound dial, the gateway auto-generates an Ed25519 client keypair and stores it as <code>ethernet_gateway_ssh_key</code> (0o600 on Unix)</li>
                         <li>From the SSH Gateway menu, press <strong>K</strong> &mdash; the public key is displayed in OpenSSH <code>ssh-ed25519 AAAA&hellip;</code> format</li>
                         <li>Copy that single line into the remote server's <code>~/.ssh/authorized_keys</code></li>
-                        <li>Future dials to that host skip the password prompt entirely</li>
+                        <li>Dials to that host then authenticate with the key and skip the password prompt entirely (in <code>key</code> mode the gateway never falls back to a password)</li>
                     </ol>
                 </div>
 
@@ -1308,6 +1324,12 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                     <tr><td>Max bad rounds</td><td>30</td><td>Corrupt-block resend rounds tolerated before giving up; kept higher than max retries (a real C64 peer never caps resends)</td></tr>
                     <tr><td>Hangup on failure</td><td>false</td><td>Drop carrier on give-up so a stranded C64 sees loss-of-carrier (C1 has no in-band abort)</td></tr>
                 </table>
+                <div class="callout callout-info">
+                    <strong>Punter reference:</strong> for the block format, the dual
+                    checksums, the GOO/BAD/ACK/S-B/SYN handshake, and step-by-step upload /
+                    download flows, see the
+                    <a href="punterreference.html"><strong>Punter C1 Protocol Reference page</strong></a>.
+                </div>
 
                 <div class="cat">Serial Modem / Console Settings (per port)</div>
                 <p class="dim-text">
@@ -1840,6 +1862,17 @@ ssh_gateway_auth = password</span></code></pre>
                         </p>
                     </div>
                     <div class="compat-card">
+                        <h3><a href="punterreference.html">Punter C1 Protocol Reference</a></h3>
+                        <p>
+                            The Commodore protocol CCGMS, Novaterm, and StrikeTerm speak
+                            natively: the 7-byte block header, the dual additive + cyclic
+                            checksums, the size-of-next-block field, the
+                            GOO/BAD/ACK/S-B/SYN handshake, the two-phase (type block then
+                            data blocks) transfer, the end-off, and bad-block recovery &mdash;
+                            with step-by-step upload and download flows.
+                        </p>
+                    </div>
+                    <div class="compat-card">
                         <h3><a href="appendix.html">Character Code Appendices</a></h3>
                         <p>
                             Reference tables for every character set the gateway speaks
@@ -1859,6 +1892,18 @@ ssh_gateway_auth = password</span></code></pre>
                             NAWS, STATUS, TIMING-MARK), subnegotiation, the RFC 1143 Q-method
                             that prevents negotiation loops, and the inbound-server vs
                             outbound-gateway policies &mdash; with example exchanges.
+                        </p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="sshreference.html">SSH Reference</a></h3>
+                        <p>
+                            The encrypted access method, both directions: the inbound
+                            russh server (Ed25519 host key, unified credentials, the
+                            duplex bridge into a session), and the outbound SSH
+                            gateway/proxy &mdash; trust-on-first-use host-key verification
+                            against <code>gateway_hosts</code>, the password-vs-gateway-key
+                            auth modes (no fallback), the three on-disk key files, and ANSI
+                            stripping for PETSCII / ASCII terminals.
                         </p>
                     </div>
                     <div class="compat-card">

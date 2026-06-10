@@ -1,0 +1,1006 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Punter C1 Protocol Reference &mdash; Ethernet Gateway v0.6.1</title>
+    <meta name="description" content="Step-by-step reference for the Ethernet Gateway Punter C1 (&quot;New Punter&quot;) implementation: the 7-byte block header, the dual additive + cyclic checksums, the size-of-next-block field, the GOO/BAD/ACK/S-B/SYN handshake, the two-phase (type block then data blocks) transfer, the end-off, and bad-block recovery &mdash; for both downloads (gateway sends) and uploads (gateway receives) to Commodore terminals like CCGMS, Novaterm, and StrikeTerm.">
+    <style>
+        :root {
+            --green: #33ff33;
+            --cyan: #00ffff;
+            --yellow: #ffff00;
+            --white: #f0f0f0;
+            --amber: #ffcc00;
+            --magenta: #ff66ff;
+            --red: #ff4444;
+            --dim: #888888;
+            --bg: #0a0a2e;
+            --bg-dark: #060620;
+            --bg-light: #101040;
+            --border: #3333aa;
+            --border-bright: #5555ff;
+            --link: #00ccff;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        html { scroll-behavior: smooth; }
+
+        body {
+            background: var(--bg);
+            color: var(--white);
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 19px;
+            line-height: 1.6;
+        }
+
+        /* ---- Page shell (25% wider than telnetbible.com) ---- */
+        .page {
+            max-width: 1100px;
+            margin: 0 auto;
+            border-left: 2px solid var(--border);
+            border-right: 2px solid var(--border);
+            background: var(--bg-dark);
+        }
+
+        /* ---- Header ---- */
+        .site-header {
+            background: var(--bg-dark);
+            padding: 36px 32px 24px;
+            text-align: center;
+            border-bottom: 2px dashed var(--border);
+        }
+
+        .header-photos {
+            display: inline-flex;
+            justify-content: center;
+            align-items: flex-end;
+            gap: 0;
+            margin-bottom: 14px;
+            border: 1px solid var(--cyan);
+            box-shadow: 0 0 12px rgba(0, 255, 255, 0.3);
+        }
+
+        .logo-photo {
+            height: 180px;
+            width: auto;
+            display: block;
+        }
+
+        .sysop-photo {
+            height: 180px;
+            width: auto;
+            image-rendering: pixelated;
+            display: block;
+        }
+
+        .site-header h1 {
+            font-size: 2.4em;
+            color: var(--yellow);
+            letter-spacing: 4px;
+            text-transform: uppercase;
+            text-shadow: 0 0 10px rgba(255, 255, 0, 0.4);
+            line-height: 1.1;
+        }
+
+        .hdr-tagline {
+            color: var(--green);
+            font-size: 0.95em;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            margin-top: 4px;
+        }
+
+        .hdr-version {
+            display: inline-block;
+            font-size: 0.8em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            padding: 3px 12px;
+            border: 1px solid var(--green);
+            color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+            margin-top: 14px;
+        }
+
+        .hdr-badges {
+            margin-top: 10px;
+            display: flex;
+            justify-content: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .hdr-badge {
+            font-size: 0.8em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            padding: 3px 12px;
+            border: 1px solid var(--green);
+            color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+        }
+
+        /* ---- Nav ---- */
+        .site-nav {
+            background: var(--bg-light);
+            display: flex;
+            justify-content: center;
+            flex-wrap: wrap;
+            border-bottom: 1px solid var(--border);
+            padding: 2px 0;
+        }
+
+        .site-nav a {
+            color: var(--cyan);
+            text-decoration: none;
+            padding: 10px 14px;
+            font-size: 0.85em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+
+        .site-nav a:hover {
+            color: var(--yellow);
+            background: rgba(255, 255, 0, 0.08);
+        }
+
+        /* ---- Divider ---- */
+        .divider {
+            border: none;
+            border-top: 1px dashed var(--border);
+            margin: 0;
+        }
+
+        /* ---- Content area ---- */
+        .body-content {
+            padding: 0 32px 36px;
+        }
+
+        /* ---- Section ---- */
+        .section {
+            margin-top: 28px;
+        }
+
+        .section-title {
+            color: var(--yellow);
+            font-size: 1.2em;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            text-align: center;
+            padding: 8px 0;
+            border-top: 1px solid var(--border);
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 16px;
+        }
+
+        .section > .intro {
+            font-size: 0.95em;
+            color: var(--dim);
+            margin-bottom: 16px;
+            text-align: center;
+        }
+
+        /* ---- Category headers ---- */
+        .cat {
+            font-size: 0.95em;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            color: var(--bg-dark);
+            background: var(--cyan);
+            display: inline-block;
+            padding: 2px 14px;
+            margin: 20px 0 10px;
+        }
+
+        .cat:first-of-type { margin-top: 0; }
+
+        /* ---- Paragraphs ---- */
+        p {
+            font-size: 0.95em;
+            color: var(--white);
+            margin-bottom: 12px;
+        }
+
+        .dim-text {
+            color: var(--dim);
+        }
+
+        /* ---- Feature table ---- */
+        .feature-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 6px;
+            margin-bottom: 4px;
+        }
+
+        .feature-table td {
+            padding: 8px 10px;
+            vertical-align: top;
+            font-size: 0.95em;
+            border-bottom: 1px solid rgba(51, 51, 170, 0.4);
+        }
+
+        .feature-table tr:last-child td {
+            border-bottom: none;
+        }
+
+        .feature-table .key-col {
+            width: 50px;
+            text-align: center;
+            color: var(--yellow);
+            font-weight: bold;
+            white-space: nowrap;
+        }
+
+        .feature-table .name-col {
+            color: var(--green);
+            white-space: nowrap;
+            width: 1%;
+            padding-right: 16px;
+        }
+
+        .feature-table .desc-col {
+            color: var(--dim);
+        }
+
+        /* ---- Data tables ---- */
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 10px 0 16px;
+            font-size: 0.9em;
+        }
+
+        .data-table th {
+            background: var(--bg-light);
+            color: var(--yellow);
+            text-align: left;
+            padding: 10px 14px;
+            border: 1px solid var(--border);
+            font-weight: bold;
+            letter-spacing: 1px;
+        }
+
+        .data-table td {
+            padding: 8px 14px;
+            border: 1px solid rgba(51, 51, 170, 0.4);
+            color: var(--white);
+        }
+
+        .data-table tr:hover td {
+            background: rgba(255, 255, 0, 0.03);
+        }
+
+        .data-table code {
+            color: var(--green);
+            background: none;
+            border: none;
+            padding: 0;
+        }
+
+        /* ---- Instruction blocks ---- */
+        .instructions {
+            border: 1px solid var(--border);
+            padding: 18px 22px;
+            margin-bottom: 12px;
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .instructions h3 {
+            font-size: 1em;
+            color: var(--cyan);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+            padding-bottom: 6px;
+            border-bottom: 1px dashed var(--border);
+        }
+
+        .instructions ol, .instructions ul {
+            margin-left: 22px;
+            font-size: 0.95em;
+            color: var(--white);
+        }
+
+        .instructions ol li, .instructions ul li {
+            margin-bottom: 3px;
+            padding-left: 2px;
+        }
+
+        .instructions p {
+            font-size: 0.95em;
+            color: var(--dim);
+        }
+
+        /* ---- Code ---- */
+        code {
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 0.95em;
+            color: var(--green);
+            background: rgba(0, 0, 0, 0.4);
+            padding: 1px 6px;
+            border: 1px solid var(--border);
+        }
+
+        pre {
+            background: #000000;
+            border: 1px solid var(--border);
+            padding: 16px 20px;
+            overflow-x: auto;
+            margin: 10px 0 16px;
+            line-height: 1.5;
+        }
+
+        pre code {
+            background: none;
+            border: none;
+            padding: 0;
+            color: var(--green);
+        }
+
+        .prompt-char { color: var(--amber); }
+        .output-text { color: var(--dim); }
+
+        /* ---- Callout boxes ---- */
+        .callout {
+            border: 1px solid var(--amber);
+            background: rgba(255, 204, 0, 0.05);
+            padding: 14px 22px;
+            margin: 12px 0;
+            font-size: 0.95em;
+            color: var(--dim);
+        }
+
+        .callout strong { color: var(--amber); }
+
+        .callout-info {
+            border-color: var(--cyan);
+            background: rgba(0, 255, 255, 0.03);
+        }
+
+        .callout-info strong { color: var(--cyan); }
+
+        .callout-warn {
+            border-color: var(--red);
+            background: rgba(255, 68, 68, 0.05);
+        }
+
+        .callout-warn strong { color: var(--red); }
+
+        .callout-tip {
+            border-color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+        }
+
+        .callout-tip strong { color: var(--green); }
+
+        /* ---- Menu rendering ---- */
+        .menu-block {
+            background: #000000;
+            border: 1px solid var(--green);
+            padding: 20px 28px;
+            margin: 14px 0 18px;
+            line-height: 1.8;
+        }
+
+        .menu-block .sep { color: var(--dim); }
+        .menu-block .title { color: var(--yellow); font-weight: bold; }
+        .menu-block .key { color: var(--cyan); font-weight: bold; }
+        .menu-block .label { color: var(--white); }
+        .menu-block .menu-dim { color: var(--dim); }
+        .menu-block .val { color: var(--amber); }
+
+        /* ---- Lists ---- */
+        ul, ol {
+            margin: 8px 0 14px 28px;
+            font-size: 0.95em;
+        }
+
+        li {
+            margin-bottom: 4px;
+        }
+
+        /* ---- Links ---- */
+        .body-content a {
+            color: var(--link);
+            text-decoration: none;
+        }
+
+        .body-content a:hover {
+            color: var(--yellow);
+            text-decoration: underline;
+        }
+
+        /* ---- Compat cards ---- */
+        .compat-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+
+        .compat-card {
+            border: 1px solid var(--border);
+            padding: 18px 20px;
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .compat-card h3 {
+            font-size: 1em;
+            color: var(--cyan);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 6px;
+        }
+
+        .compat-card p {
+            font-size: 0.9em;
+            color: var(--dim);
+            line-height: 1.5;
+            margin-bottom: 0;
+        }
+
+        /* ---- Author ---- */
+        .author-block {
+            display: flex;
+            align-items: center;
+            gap: 24px;
+            border: 1px solid var(--border);
+            padding: 20px 24px;
+            background: rgba(0, 0, 0, 0.3);
+            margin-top: 12px;
+        }
+
+        .author-block img {
+            width: 180px;
+            height: auto;
+            image-rendering: pixelated;
+            border: 1px solid var(--cyan);
+            box-shadow: 0 0 8px rgba(0, 255, 255, 0.2);
+        }
+
+        .author-block .author-info h3 {
+            color: var(--cyan);
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .author-block .author-info p {
+            color: var(--dim);
+        }
+
+        /* ---- Footer ---- */
+        .site-footer {
+            background: var(--bg-dark);
+            color: var(--dim);
+            text-align: center;
+            padding: 22px 32px;
+            font-size: 0.85em;
+            border-top: 2px dashed var(--border);
+        }
+
+        .site-footer a {
+            color: var(--cyan);
+            text-decoration: none;
+        }
+
+        .site-footer a:hover { color: var(--yellow); }
+
+        /* ---- Responsive ---- */
+        @media (max-width: 900px) {
+            body { font-size: 17px; }
+            .site-header { padding: 24px 16px 16px; }
+            .site-header h1 { font-size: 1.6em; letter-spacing: 2px; }
+            .hdr-tagline { letter-spacing: 2px; font-size: 0.85em; }
+            .body-content { padding: 0 16px 28px; }
+            .site-nav a { padding: 8px 10px; font-size: 0.78em; }
+            .compat-grid { grid-template-columns: 1fr; }
+            .section-title { font-size: 1em; letter-spacing: 2px; }
+            .feature-table .desc-col { display: none; }
+            .logo-photo { height: 120px; }
+            .sysop-photo { height: 120px; }
+            .author-block { flex-direction: column; text-align: center; }
+        }
+    </style>
+</head>
+<body>
+    <div class="page">
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- HEADER                                            -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <header class="site-header">
+            <div class="header-photos">
+                <img src="ricky.png" alt="Author: Ricky Bryce" class="sysop-photo">
+                <img src="ethernetgatewaylogo.png" alt="Ethernet Gateway" class="logo-photo">
+            </div>
+            <h1>Ethernet Gateway</h1>
+            <p class="hdr-tagline">Punter C1 Protocol Reference</p>
+            <div class="hdr-version">v0.6.1</div>
+            <div class="hdr-badges">
+                <span class="hdr-badge">Punter C1</span>
+                <span class="hdr-badge">Dual Checksum</span>
+                <span class="hdr-badge">Two-Phase</span>
+                <span class="hdr-badge">GOO/BAD/ACK</span>
+                <span class="hdr-badge">Commodore</span>
+            </div>
+        </header>
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- NAV                                               -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <nav class="site-nav">
+            <a href="index.html">&laquo; User Manual</a>
+            <a href="#overview">Overview</a>
+            <a href="#block">Block Format</a>
+            <a href="#checksums">Checksums</a>
+            <a href="#handshake">Handshake</a>
+            <a href="#phases">Phases</a>
+            <a href="#download">Download</a>
+            <a href="#upload">Upload</a>
+            <a href="#endoff">End-Off</a>
+            <a href="#recovery">Recovery</a>
+            <a href="#tunables">Tunables</a>
+            <a href="xmodemreference.html">XMODEM</a>
+            <a href="#references">References</a>
+        </nav>
+
+        <div class="body-content">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- OVERVIEW                                      -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="overview">
+                <div class="section-title">Overview</div>
+                <p class="intro">Punter C1 (&ldquo;New Punter&rdquo;) is the file-transfer protocol that CCGMS, Novaterm, and StrikeTerm speak natively on Commodore 64/128 BBSes &mdash; the one you reach for when the peer is a real C64.</p>
+
+                <p>
+                    Punter predates and is unrelated to the XMODEM family. Where XMODEM
+                    sends a fixed 128-byte block and waits for a single
+                    <code>ACK</code>/<code>NAK</code>, Punter C1 is built around a
+                    <strong>three-token handshake per block</strong>
+                    (<code>GOO</code> &rarr; <code>ACK</code> &rarr; <code>S/B</code> &rarr; block),
+                    <strong>two independent per-block checksums</strong>, and a
+                    <strong>two-phase</strong> transfer: a short <em>type block</em> that
+                    announces the Commodore file type, then the <em>data blocks</em>
+                    themselves. Each block also carries the size of the <em>next</em> block,
+                    so the receiver always knows exactly how many bytes to read.
+                </p>
+                <p>
+                    The gateway implements single-file C1 in <code>src/punter.rs</code>. It is
+                    a clean-room Rust implementation written from Michael Steil's C1 wire
+                    description (pagetable.com) and cross-checked against the Novaterm
+                    9.6 / v10 <code>punter.src</code> 6502 source for the corners the prose
+                    spec leaves ambiguous &mdash; the checksum loop bounds, the handshake
+                    direction, and the end-off sequence in particular.
+                </p>
+
+                <div class="callout callout-info">
+                    <strong>Which protocol should I use?</strong> Punter is the right choice
+                    only when the other end is a Commodore terminal that speaks it
+                    (CCGMS, Novaterm, StrikeTerm). For modern terminals prefer
+                    <a href="zmodemreference.html">ZMODEM</a>; for the simplest possible
+                    transfer or the oldest hardware, <a href="xmodemreference.html">XMODEM</a>;
+                    for a 7-bit-clean link, <a href="kermit.html">Kermit</a>. Punter is
+                    <strong>single-file</strong> &mdash; one file per transfer, no batch.
+                </div>
+
+                <div class="callout callout-warn">
+                    <strong>No in-band abort.</strong> The C1 wire protocol has no message
+                    that means &ldquo;cancel.&rdquo; A peer that stops responding simply
+                    times out. The gateway's only way to signal a hard failure back to a
+                    stranded C64 is to drop carrier &mdash; see
+                    <code>punter_hangup_on_failure</code> under <a href="#tunables">Tunables</a>.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- BLOCK FORMAT                                  -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="block">
+                <div class="section-title">Block Format</div>
+                <p class="intro">Every Punter C1 block is 7 to 255 bytes: a 7-byte header followed by up to 248 payload bytes.</p>
+
+                <pre><code>offset 0   additive checksum   (2 bytes, little-endian)
+offset 2   cyclic   checksum   (2 bytes, little-endian)
+offset 4   size of NEXT block  (1 byte)
+offset 5   block index         (2 bytes, little-endian; high byte 0xFF = final)
+offset 7   payload             (0&ndash;248 bytes)</code></pre>
+
+                <table class="data-table">
+                    <tr><th>Field</th><th>Offset</th><th>Size</th><th>Meaning</th></tr>
+                    <tr><td>Additive checksum</td><td>0</td><td>2</td><td>16-bit additive checksum of bytes 4&hellip;end (see <a href="#checksums">Checksums</a>).</td></tr>
+                    <tr><td>Cyclic checksum</td><td>2</td><td>2</td><td>16-bit cyclic (XOR + rotate) checksum of bytes 4&hellip;end.</td></tr>
+                    <tr><td>Next-block size</td><td>4</td><td>1</td><td>Total length of the <em>next</em> block on the wire &mdash; how the receiver knows how many bytes to read for the next read.</td></tr>
+                    <tr><td>Block index</td><td>5</td><td>2</td><td>Sequence number, little-endian. A <strong>high byte of <code>0xFF</code></strong> flags the <strong>final</strong> block of the phase.</td></tr>
+                    <tr><td>Payload</td><td>7</td><td>0&ndash;248</td><td>File data (data phase) or the single file-type byte (type phase).</td></tr>
+                </table>
+
+                <p class="dim-text">
+                    Both checksums cover the block from <strong>offset 4 to end-of-block</strong>
+                    &mdash; they deliberately skip themselves (the four checksum bytes).
+                    Verified against the <code>checksum</code> routine in
+                    <code>punter.src</code>: the loop runs from <code>sizepos</code> (offset 4)
+                    up to the block's own length.
+                </p>
+
+                <div class="callout callout-info">
+                    <strong>The &ldquo;size of next block&rdquo; trick.</strong> Because each
+                    block announces the length of the one after it, the receiver never has to
+                    guess or frame on a delimiter. That leaves one bootstrap problem: the
+                    <em>first</em> block of each phase has no predecessor to size it. C1 solves
+                    this with fixed, a-priori-known first-block lengths &mdash;
+                    <strong>7 bytes</strong> (header only, no payload) for the first
+                    <em>data</em> block, and <strong>8 bytes</strong> (header + one type byte)
+                    for the <em>type</em> block.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- CHECKSUMS                                     -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="checksums">
+                <div class="section-title">The Two Checksums</div>
+                <p class="intro">C1 protects every block with two independent 16-bit checksums computed over the same bytes &mdash; a corrupt block almost never satisfies both.</p>
+
+                <div class="cat">Additive</div>
+                <p class="dim-text">
+                    A plain <strong>wrapping 16-bit sum</strong> of the covered bytes. On the
+                    6502 this is the <code>clc / adc / bcc / inc</code> sequence with carry
+                    into the high byte; no carry ever leaves the 16-bit accumulator, so it is
+                    exactly a 16-bit add that wraps on overflow.
+                </p>
+
+                <div class="cat">Cyclic</div>
+                <p class="dim-text">
+                    Per byte: <strong>XOR the byte into the low byte</strong> of the 16-bit
+                    accumulator, then <strong>rotate the whole 16-bit accumulator left by one
+                    bit, circularly</strong> (bit&nbsp;15 feeds back into bit&nbsp;0). The
+                    rotate happens <em>after</em> the XOR. This is the
+                    <code>eor</code>-then-<code>rol</code>/<code>rol</code> pattern in the asm.
+                </p>
+
+                <p>The reference implementation, byte for byte:</p>
+                <pre><code>additive = 0
+cyclic   = 0
+for b in bytes[4..end]:
+    additive = (additive + b) &amp; 0xFFFF        <span class="output-text"># wrapping add</span>
+    cyclic   = cyclic XOR b                     <span class="output-text"># XOR into low byte</span>
+    cyclic   = rotate_left_16(cyclic, 1)        <span class="output-text"># circular, post-XOR</span></code></pre>
+
+                <p class="dim-text">
+                    Both results are written little-endian into the block header
+                    (additive at offset 0, cyclic at offset 2). On receive, the gateway
+                    recomputes both over the received bytes 4&hellip;end and compares; a
+                    mismatch on <em>either</em> checksum makes the block bad and triggers a
+                    <code>BAD</code> resend request (see <a href="#recovery">Recovery</a>).
+                </p>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- HANDSHAKE                                     -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="handshake">
+                <div class="section-title">Handshake Codes</div>
+                <p class="intro">Five three-byte ASCII tokens carry all the control signalling. They travel UPPERCASE on the wire.</p>
+
+                <table class="data-table">
+                    <tr><th>Code</th><th>Bytes</th><th>Sent by</th><th>Meaning</th></tr>
+                    <tr><td><code>GOO</code></td><td><code>47 4F 4F</code></td><td>Receiver</td><td>&ldquo;Good &mdash; send the next block.&rdquo; Also the per-block go-ahead.</td></tr>
+                    <tr><td><code>BAD</code></td><td><code>42 41 44</code></td><td>Receiver</td><td>&ldquo;That block was corrupt &mdash; resend the <em>same</em> block.&rdquo;</td></tr>
+                    <tr><td><code>ACK</code></td><td><code>41 43 4B</code></td><td>Sender</td><td>Acknowledges the receiver's <code>GOO</code>/<code>BAD</code>.</td></tr>
+                    <tr><td><code>S/B</code></td><td><code>53 2F 42</code></td><td>Receiver</td><td>&ldquo;Send Block&rdquo; &mdash; the final go-ahead before the block bytes flow.</td></tr>
+                    <tr><td><code>SYN</code></td><td><code>53 59 4E</code></td><td>Both</td><td>Synchronisation token exchanged during the <a href="#endoff">end-off</a>.</td></tr>
+                </table>
+
+                <div class="callout callout-info">
+                    <strong>Why uppercase?</strong> Novaterm's source renders the codes as
+                    <code>.asc "goobadacks/bsyn"</code>, but a real C64 assembles that in the
+                    default uppercase/graphics PETSCII charset, so the bytes that actually
+                    leave the machine are <code>0x47 0x4F 0x4F</code>&hellip; The gateway
+                    therefore <strong>sends uppercase</strong> so real C64 peers recognise it,
+                    and <strong>matches case-insensitively</strong> on receive so a peer that
+                    happens to send lowercase still works. (The <code>/</code> in
+                    <code>S/B</code> is 0x2F, unaffected by case.)
+                </div>
+
+                <div class="cat">Per-block exchange</div>
+                <p class="dim-text">
+                    The asm is authoritative on direction (some prose write-ups get it
+                    backwards): the <strong>receiver</strong> drives with
+                    <code>GOO</code>/<code>BAD</code> and <code>S/B</code>; the
+                    <strong>sender</strong> answers <code>ACK</code> and then transmits the
+                    block. One data block looks like:
+                </p>
+                <pre><code><span class="prompt-char">receiver</span>  -> GOO        <span class="output-text">(or BAD to demand a resend of the same block)</span>
+<span class="prompt-char">sender</span>    -> ACK
+<span class="prompt-char">receiver</span>  -> S/B
+<span class="prompt-char">sender</span>    -> &lt;block bytes&gt;</code></pre>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- PHASES                                        -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="phases">
+                <div class="section-title">Two Phases &amp; File Types</div>
+                <p class="intro">A C1 transfer runs in two phases: a one-block <em>type</em> phase, then the <em>data</em> phase.</p>
+
+                <div class="cat">Phase A &mdash; type block</div>
+                <p class="dim-text">
+                    A single 8-byte block whose lone payload byte is the Commodore file
+                    type. It tells the receiver what kind of file is coming so the byte
+                    stream can be reconstructed faithfully on a CBM filesystem.
+                </p>
+                <table class="data-table">
+                    <tr><th>Byte</th><th>Type</th><th>Meaning</th></tr>
+                    <tr><td><code>0</code></td><td>PRG</td><td>Load-address-prefixed Commodore program.</td></tr>
+                    <tr><td><code>1</code></td><td>SEQ</td><td>Flat sequential file.</td></tr>
+                    <tr><td><code>2</code></td><td>USR</td><td>Flat user-defined file.</td></tr>
+                    <tr><td><code>3</code></td><td>&mdash;</td><td>Unknown / none.</td></tr>
+                </table>
+                <p class="dim-text">
+                    Linux has no CBM directory entry to carry this, so the gateway maps it to
+                    the filename extension. On <strong>send</strong>, the outbound type is
+                    auto-detected from the extension (<code>.prg</code> / <code>.seq</code> /
+                    <code>.usr</code>). On <strong>receive</strong>, the matching extension is
+                    appended when the saved filename lacks one &mdash; preserving the
+                    round-trip. A type byte outside <code>0..=3</code> is treated as
+                    <strong>Unknown</strong> (left without a suffix) rather than silently
+                    coerced to SEQ.
+                </p>
+
+                <div class="cat">Phase B &mdash; data blocks</div>
+                <p class="dim-text">
+                    The file payload, carried in blocks of up to 248 data bytes each. The
+                    first data block is the fixed 7-byte header-only block; every subsequent
+                    block's length is announced by the previous block's
+                    <em>next-block size</em> field. The <strong>final</strong> data block is
+                    flagged by setting the block index's high byte to <code>0xFF</code>, after
+                    which the two sides run the <a href="#endoff">end-off</a>.
+                </p>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- DOWNLOAD                                       -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="download">
+                <div class="section-title">Download &mdash; Gateway as Sender</div>
+                <p class="intro">You pull a file from the gateway to your Commodore terminal. The gateway sends; your terminal's receiver drives with GOO / BAD / S/B.</p>
+
+                <pre><code><span class="output-text"># Phase A — type block</span>
+<span class="prompt-char">term</span>     &lt;- GOO                          <span class="output-text">receiver ready</span>
+<span class="prompt-char">gateway</span>  -> ACK
+<span class="prompt-char">term</span>     &lt;- S/B
+<span class="prompt-char">gateway</span>  -> [type block: 1 byte = PRG/SEQ/USR]
+<span class="output-text"># Phase B — data blocks (repeat per block)</span>
+<span class="prompt-char">term</span>     &lt;- GOO                          <span class="output-text">(BAD = resend the last block)</span>
+<span class="prompt-char">gateway</span>  -> ACK
+<span class="prompt-char">term</span>     &lt;- S/B
+<span class="prompt-char">gateway</span>  -> [data block, up to 248 bytes] ... until the 0xFF-flagged final block
+<span class="output-text"># End-off</span>
+<span class="prompt-char">both</span>     &lt;-> SYN handshake
+<span class="prompt-char">gateway</span>  -> S/B  S/B  S/B                 <span class="output-text">sender obligation (CCGMS needs all three)</span></code></pre>
+
+                <div class="instructions">
+                    <h3>Step by step</h3>
+                    <ol>
+                        <li>From the File Transfer menu press <strong>D</strong>, choose the file, then press <strong>P</strong> for Punter. The outbound file type (PRG / SEQ / USR) is auto-detected from the filename extension.</li>
+                        <li>The gateway waits for the receiver's opening <code>GOO</code> (up to <code>punter_negotiation_timeout</code>, default 45&nbsp;s), then answers <code>ACK</code>; the receiver sends <code>S/B</code> and the gateway transmits the <strong>type block</strong>.</li>
+                        <li>For each data block the receiver sends <code>GOO</code>, the gateway answers <code>ACK</code>, the receiver sends <code>S/B</code>, and the gateway sends the block (header + up to 248 payload bytes, with both checksums and the next-block size filled in).</li>
+                        <li>If a block arrives corrupt the receiver sends <code>BAD</code> instead of <code>GOO</code>; the gateway re-sends the <strong>same</strong> block. There is no resend cap on a real C64 peer, so the gateway tolerates up to <code>punter_max_bad_rounds</code> (default 30) consecutive corrupt-block rounds before giving up.</li>
+                        <li>The last block is flagged by setting its block-index high byte to <code>0xFF</code>.</li>
+                        <li>The two sides run the <strong>end-off</strong>: a <code>SYN</code> exchange, after which the gateway sends <code>S/B</code> <strong>three times</strong>. A real CCGMS receiver stalls if fewer than three arrive, so this is a firm sender obligation.</li>
+                    </ol>
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- UPLOAD                                         -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="upload">
+                <div class="section-title">Upload &mdash; Gateway as Receiver</div>
+                <p class="intro">You send a file from your Commodore terminal to the gateway. The gateway receives, so it drives with GOO / BAD / S/B.</p>
+
+                <pre><code><span class="output-text"># Phase A — type block</span>
+<span class="prompt-char">gateway</span>  -> GOO                          <span class="output-text">receiver ready</span>
+<span class="prompt-char">term</span>     &lt;- ACK
+<span class="prompt-char">gateway</span>  -> S/B
+<span class="prompt-char">term</span>     &lt;- [type block: 1 byte = PRG/SEQ/USR]
+<span class="output-text"># Phase B — data blocks (repeat per block)</span>
+<span class="prompt-char">gateway</span>  -> GOO                          <span class="output-text">(BAD if the block failed a checksum)</span>
+<span class="prompt-char">term</span>     &lt;- ACK
+<span class="prompt-char">gateway</span>  -> S/B
+<span class="prompt-char">term</span>     &lt;- [data block] ... until the 0xFF-flagged final block
+<span class="output-text"># End-off</span>
+<span class="prompt-char">both</span>     &lt;-> SYN handshake (tolerant best-effort)</code></pre>
+
+                <div class="instructions">
+                    <h3>Step by step</h3>
+                    <ol>
+                        <li>Press <strong>U</strong>, enter the filename (max 64 chars; no path traversal), confirm overwrite if needed, then press <strong>P</strong> for Punter.</li>
+                        <li>The gateway sends the opening <code>GOO</code>; the sender answers <code>ACK</code>; the gateway sends <code>S/B</code> and reads the fixed 8-byte <strong>type block</strong>, recording the file type (PRG / SEQ / USR / Unknown).</li>
+                        <li>For each data block the gateway sends <code>GOO</code>, the sender answers <code>ACK</code>, the gateway sends <code>S/B</code>, and the sender transmits the block. The gateway reads exactly the number of bytes announced by the previous block's next-block-size field.</li>
+                        <li>The gateway recomputes <strong>both</strong> checksums over bytes 4&hellip;end. If either fails it answers <code>BAD</code> and the sender re-sends the same block; a good block clears the count. Up to <code>punter_max_bad_rounds</code> (default 30) consecutive bad rounds are tolerated before giving up.</li>
+                        <li>When a block whose index high byte is <code>0xFF</code> arrives, the gateway has the final block. It runs a tolerant best-effort end-off (ACK the final block, exchange <code>SYN</code>/<code>S/B</code>), sliding past any extra <code>S/B</code> the peer sends.</li>
+                        <li>The file is saved under the name you entered, with a <code>.prg</code>/<code>.seq</code>/<code>.usr</code> extension appended if the type was known and the name had none.</li>
+                    </ol>
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- END-OFF                                        -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="endoff">
+                <div class="section-title">The End-Off</div>
+                <p class="intro">After the final (0xFF-flagged) block, both ends run a closing handshake. Getting it exactly right is what keeps CCGMS from hanging.</p>
+
+                <p class="dim-text">
+                    The end-off is a <code>SYN</code> exchange followed by the
+                    <strong>sender</strong> transmitting <code>S/B</code> three times. This is
+                    a <em>sender</em> obligation: a real CCGMS receiver stalls (the classic
+                    &ldquo;Downloading&hellip;&rdquo; hang) if fewer than three
+                    <code>S/B</code> arrive after the final block.
+                </p>
+
+                <div class="callout callout-warn">
+                    <strong>The double-GOO after the type block.</strong> CCGMS sends
+                    <code>GOO</code> <em>twice</em> after the type block &mdash; the block-ack
+                    <code>GOO</code> and a second <code>GOO</code> before <code>S/B</code> &mdash;
+                    and each needs its own <code>ACK</code>. The gateway's sender re-sends
+                    <code>ACK</code> on a short cadence until <code>S/B</code> arrives; a single
+                    slow <code>ACK</code> would strand CCGMS looping <code>GOO</code> forever.
+                </div>
+
+                <div class="callout callout-tip">
+                    <strong>Receiver tolerance.</strong> The gateway's <em>receiver</em> does
+                    <em>not</em> mirror the three-<code>S/B</code> rule with fixed drain-reads.
+                    It runs a tolerant best-effort re-handshake and lets its resync window
+                    harmlessly slide past any extra <code>S/B</code>. Blind drain-reads would
+                    swallow the opening signal of whatever comes next.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- RECOVERY                                       -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="recovery">
+                <div class="section-title">Error Recovery</div>
+                <table class="data-table">
+                    <tr><th>Situation</th><th>What happens</th></tr>
+                    <tr><td>Block fails a checksum (either additive or cyclic)</td><td>The receiver answers <code>BAD</code> instead of <code>GOO</code>; the sender re-sends the <strong>same</strong> block. Recovery is by <strong>resend</strong>, not by position or sequence skip.</td></tr>
+                    <tr><td>Many consecutive corrupt blocks</td><td>Bounded by <code>punter_max_bad_rounds</code> (default 30) &mdash; the count of consecutive corrupt-block rounds tolerated before giving up. This is deliberately <strong>larger</strong> than <code>punter_max_retries</code>, because a real C64 peer never caps its own resends; a low cap would make the gateway quit first and strand the peer.</td></tr>
+                    <tr><td>Stray / duplicated handshake code</td><td><code>accept_code</code>'s sliding resync window slides past it, so an extra <code>ACK</code> or <code>S/B</code> doesn't desync the conversation.</td></tr>
+                    <tr><td>Silent peer (no response within the timeout)</td><td>Bounded waits (<code>punter_negotiation_timeout</code> for the opening handshake, <code>punter_block_timeout</code> per block) end the transfer rather than hanging forever. C1 has no &ldquo;cancel&rdquo; message, so a give-up is just a stop.</td></tr>
+                    <tr><td>Give-up while a C64 is still waiting</td><td>If <code>punter_hangup_on_failure</code> is enabled, the gateway drops carrier so a stranded C64 sees loss-of-carrier instead of hanging. Off by default.</td></tr>
+                    <tr><td>File exceeds 8&nbsp;MB</td><td>The transfer is aborted &mdash; the same cap shared across XMODEM / YMODEM / ZMODEM / Kermit / Punter.</td></tr>
+                </table>
+
+                <div class="callout callout-info">
+                    <strong><code>max_retries</code> vs. <code>max_bad_rounds</code>.</strong>
+                    These are intentionally separate. <code>punter_max_retries</code> bounds
+                    handshake-level retries (waiting for an expected code); the larger
+                    <code>punter_max_bad_rounds</code> bounds how many corrupt-block resend
+                    rounds the gateway will sit through before concluding the link is
+                    hopeless. The earlier implementations conflated the two at a low cap,
+                    which made the gateway give up while a healthy C64 peer was still happily
+                    resending.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- TUNABLES                                      -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="tunables">
+                <div class="section-title">Tunables</div>
+                <p class="intro">Punter has its own independent settings (separate from the XMODEM and ZMODEM families). Editable from the telnet <em>Configuration &rarr; File Transfer</em> menu, the GUI / web <em>File Transfer</em> popup, or <code>egateway.conf</code> &mdash; changes apply on the next transfer, no restart.</p>
+                <table class="data-table">
+                    <tr><th>Key</th><th>Default</th><th>Range / Meaning</th></tr>
+                    <tr><td><code>punter_block_size</code></td><td>255</td><td>8&ndash;255 bytes total block size. Lower toward ~40 on a noisy line so a corrupt block costs fewer bytes to resend.</td></tr>
+                    <tr><td><code>punter_negotiation_timeout</code></td><td>45 s</td><td>1&ndash;300 s. Time to complete the opening (type-block) handshake.</td></tr>
+                    <tr><td><code>punter_negotiation_retry_interval</code></td><td>5 s</td><td>1&ndash;60 s. Gap between handshake re-sends during negotiation.</td></tr>
+                    <tr><td><code>punter_block_timeout</code></td><td>20 s</td><td>1&ndash;120 s. Per-block read timeout once the transfer is live.</td></tr>
+                    <tr><td><code>punter_max_retries</code></td><td>10</td><td>1&ndash;100. Handshake-level retry cap (waiting for an expected code).</td></tr>
+                    <tr><td><code>punter_max_bad_rounds</code></td><td>30</td><td>Consecutive corrupt-block resend rounds tolerated before giving up &mdash; deliberately higher than <code>max_retries</code> (a real C64 peer never caps resends).</td></tr>
+                    <tr><td><code>punter_hangup_on_failure</code></td><td>false</td><td>Drop carrier on a give-up so a stranded C64 sees loss-of-carrier (C1 has no in-band abort).</td></tr>
+                </table>
+
+                <div class="callout callout-info">
+                    <strong>See also:</strong> the
+                    <a href="xmodemreference.html">XMODEM</a>,
+                    <a href="ymodemreference.html">YMODEM</a>, and
+                    <a href="zmodemreference.html">ZMODEM</a> references for the other
+                    transfer protocols, the
+                    <a href="index.html#file-transfer">File Transfer section of the User Manual</a>
+                    for the menu walkthrough, and the
+                    <a href="kermit.html">Kermit Reference</a> for the 7-bit-clean
+                    alternative. Punter is the right choice when the peer is a real
+                    Commodore terminal (CCGMS, Novaterm, StrikeTerm).
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- PROTOCOL REFERENCES                            -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="references">
+                <div class="section-title">References</div>
+                <p class="intro">Deep-dive reference pages for every protocol and interface, plus the character-set tables and ANSI escape-sequence reference.</p>
+                <div class="compat-grid">
+                    <div class="compat-card">
+                        <h3><a href="xmodemreference.html">XMODEM</a></h3>
+                        <p>128-byte blocks; CRC-16 / checksum negotiation.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="ymodemreference.html">YMODEM</a></h3>
+                        <p>Block-0 metadata, batch, exact size truncation.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="zmodemreference.html">ZMODEM</a></h3>
+                        <p>Streaming; ZDLE, CRC-32, autostart, resume.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="kermitreference.html">Kermit</a></h3>
+                        <p>Send-Init negotiation; F / A / D / Z / B transfer.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3 style="color: var(--yellow);">Punter <span class="dim-text" style="font-size:0.78em;">(this page)</span></h3>
+                        <p>C1 dual checksum, two-phase, GOO/BAD/ACK.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="atcommandreference.html">AT Commands</a></h3>
+                        <p>Hayes command set, S-registers, +++ escape.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="telnetreference.html">Telnet</a></h3>
+                        <p>IAC negotiation, every option, the NVT data phase.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="sshreference.html">SSH</a></h3>
+                        <p>Server, gateway, host keys, TOFU, auth modes.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="appendix.html">Character Code Tables</a></h3>
+                        <p>Hex tables for every encoding: ASCII, ANSI, PETSCII, ATASCII, Baudot/ITA2, ZX Spectrum, TRS-80.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="appendix.html#ansi-table">ANSI Escape Sequences</a></h3>
+                        <p>Cursor, colour/SGR, erase, and screen-mode escape codes, with the raw hex bytes.</p>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- FOOTER                                            -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <footer class="site-footer">
+            Ethernet Gateway v0.6.1 &mdash; &copy; 2026 Ricky Bryce &mdash;
+            Licensed under GPL-3.0-or-later &mdash;
+            <a href="index.html">User Manual</a>
+        </footer>
+    </div>
+</body>
+</html>

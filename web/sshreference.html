@@ -1,0 +1,926 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SSH Reference &mdash; Ethernet Gateway v0.6.1</title>
+    <meta name="description" content="Reference for the Ethernet Gateway SSH implementation (russh): the inbound SSH server (Ed25519 host key, unified credentials, per-IP lockout, the duplex bridge to a session), and the outbound SSH gateway/proxy (trust-on-first-use host-key verification against gateway_hosts, password or gateway-key authentication, and ANSI stripping for PETSCII/ASCII terminals).">
+    <style>
+        :root {
+            --green: #33ff33;
+            --cyan: #00ffff;
+            --yellow: #ffff00;
+            --white: #f0f0f0;
+            --amber: #ffcc00;
+            --magenta: #ff66ff;
+            --red: #ff4444;
+            --dim: #888888;
+            --bg: #0a0a2e;
+            --bg-dark: #060620;
+            --bg-light: #101040;
+            --border: #3333aa;
+            --border-bright: #5555ff;
+            --link: #00ccff;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        html { scroll-behavior: smooth; }
+
+        body {
+            background: var(--bg);
+            color: var(--white);
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 19px;
+            line-height: 1.6;
+        }
+
+        /* ---- Page shell (25% wider than telnetbible.com) ---- */
+        .page {
+            max-width: 1100px;
+            margin: 0 auto;
+            border-left: 2px solid var(--border);
+            border-right: 2px solid var(--border);
+            background: var(--bg-dark);
+        }
+
+        /* ---- Header ---- */
+        .site-header {
+            background: var(--bg-dark);
+            padding: 36px 32px 24px;
+            text-align: center;
+            border-bottom: 2px dashed var(--border);
+        }
+
+        .header-photos {
+            display: inline-flex;
+            justify-content: center;
+            align-items: flex-end;
+            gap: 0;
+            margin-bottom: 14px;
+            border: 1px solid var(--cyan);
+            box-shadow: 0 0 12px rgba(0, 255, 255, 0.3);
+        }
+
+        .logo-photo {
+            height: 180px;
+            width: auto;
+            display: block;
+        }
+
+        .sysop-photo {
+            height: 180px;
+            width: auto;
+            image-rendering: pixelated;
+            display: block;
+        }
+
+        .site-header h1 {
+            font-size: 2.4em;
+            color: var(--yellow);
+            letter-spacing: 4px;
+            text-transform: uppercase;
+            text-shadow: 0 0 10px rgba(255, 255, 0, 0.4);
+            line-height: 1.1;
+        }
+
+        .hdr-tagline {
+            color: var(--green);
+            font-size: 0.95em;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            margin-top: 4px;
+        }
+
+        .hdr-version {
+            display: inline-block;
+            font-size: 0.8em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            padding: 3px 12px;
+            border: 1px solid var(--green);
+            color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+            margin-top: 14px;
+        }
+
+        .hdr-badges {
+            margin-top: 10px;
+            display: flex;
+            justify-content: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .hdr-badge {
+            font-size: 0.8em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            padding: 3px 12px;
+            border: 1px solid var(--green);
+            color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+        }
+
+        /* ---- Nav ---- */
+        .site-nav {
+            background: var(--bg-light);
+            display: flex;
+            justify-content: center;
+            flex-wrap: wrap;
+            border-bottom: 1px solid var(--border);
+            padding: 2px 0;
+        }
+
+        .site-nav a {
+            color: var(--cyan);
+            text-decoration: none;
+            padding: 10px 14px;
+            font-size: 0.85em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+
+        .site-nav a:hover {
+            color: var(--yellow);
+            background: rgba(255, 255, 0, 0.08);
+        }
+
+        /* ---- Divider ---- */
+        .divider {
+            border: none;
+            border-top: 1px dashed var(--border);
+            margin: 0;
+        }
+
+        /* ---- Content area ---- */
+        .body-content {
+            padding: 0 32px 36px;
+        }
+
+        /* ---- Section ---- */
+        .section {
+            margin-top: 28px;
+        }
+
+        .section-title {
+            color: var(--yellow);
+            font-size: 1.2em;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            text-align: center;
+            padding: 8px 0;
+            border-top: 1px solid var(--border);
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 16px;
+        }
+
+        .section > .intro {
+            font-size: 0.95em;
+            color: var(--dim);
+            margin-bottom: 16px;
+            text-align: center;
+        }
+
+        /* ---- Category headers ---- */
+        .cat {
+            font-size: 0.95em;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            color: var(--bg-dark);
+            background: var(--cyan);
+            display: inline-block;
+            padding: 2px 14px;
+            margin: 20px 0 10px;
+        }
+
+        .cat:first-of-type { margin-top: 0; }
+
+        /* ---- Paragraphs ---- */
+        p {
+            font-size: 0.95em;
+            color: var(--white);
+            margin-bottom: 12px;
+        }
+
+        .dim-text {
+            color: var(--dim);
+        }
+
+        /* ---- Feature table ---- */
+        .feature-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 6px;
+            margin-bottom: 4px;
+        }
+
+        .feature-table td {
+            padding: 8px 10px;
+            vertical-align: top;
+            font-size: 0.95em;
+            border-bottom: 1px solid rgba(51, 51, 170, 0.4);
+        }
+
+        .feature-table tr:last-child td {
+            border-bottom: none;
+        }
+
+        .feature-table .key-col {
+            width: 50px;
+            text-align: center;
+            color: var(--yellow);
+            font-weight: bold;
+            white-space: nowrap;
+        }
+
+        .feature-table .name-col {
+            color: var(--green);
+            white-space: nowrap;
+            width: 1%;
+            padding-right: 16px;
+        }
+
+        .feature-table .desc-col {
+            color: var(--dim);
+        }
+
+        /* ---- Data tables ---- */
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 10px 0 16px;
+            font-size: 0.9em;
+        }
+
+        .data-table th {
+            background: var(--bg-light);
+            color: var(--yellow);
+            text-align: left;
+            padding: 10px 14px;
+            border: 1px solid var(--border);
+            font-weight: bold;
+            letter-spacing: 1px;
+        }
+
+        .data-table td {
+            padding: 8px 14px;
+            border: 1px solid rgba(51, 51, 170, 0.4);
+            color: var(--white);
+        }
+
+        .data-table tr:hover td {
+            background: rgba(255, 255, 0, 0.03);
+        }
+
+        .data-table code {
+            color: var(--green);
+            background: none;
+            border: none;
+            padding: 0;
+        }
+
+        /* ---- Instruction blocks ---- */
+        .instructions {
+            border: 1px solid var(--border);
+            padding: 18px 22px;
+            margin-bottom: 12px;
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .instructions h3 {
+            font-size: 1em;
+            color: var(--cyan);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+            padding-bottom: 6px;
+            border-bottom: 1px dashed var(--border);
+        }
+
+        .instructions ol, .instructions ul {
+            margin-left: 22px;
+            font-size: 0.95em;
+            color: var(--white);
+        }
+
+        .instructions ol li, .instructions ul li {
+            margin-bottom: 3px;
+            padding-left: 2px;
+        }
+
+        .instructions p {
+            font-size: 0.95em;
+            color: var(--dim);
+        }
+
+        /* ---- Code ---- */
+        code {
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 0.95em;
+            color: var(--green);
+            background: rgba(0, 0, 0, 0.4);
+            padding: 1px 6px;
+            border: 1px solid var(--border);
+        }
+
+        pre {
+            background: #000000;
+            border: 1px solid var(--border);
+            padding: 16px 20px;
+            overflow-x: auto;
+            margin: 10px 0 16px;
+            line-height: 1.5;
+        }
+
+        pre code {
+            background: none;
+            border: none;
+            padding: 0;
+            color: var(--green);
+        }
+
+        .prompt-char { color: var(--amber); }
+        .output-text { color: var(--dim); }
+
+        /* ---- Callout boxes ---- */
+        .callout {
+            border: 1px solid var(--amber);
+            background: rgba(255, 204, 0, 0.05);
+            padding: 14px 22px;
+            margin: 12px 0;
+            font-size: 0.95em;
+            color: var(--dim);
+        }
+
+        .callout strong { color: var(--amber); }
+
+        .callout-info {
+            border-color: var(--cyan);
+            background: rgba(0, 255, 255, 0.03);
+        }
+
+        .callout-info strong { color: var(--cyan); }
+
+        .callout-warn {
+            border-color: var(--red);
+            background: rgba(255, 68, 68, 0.05);
+        }
+
+        .callout-warn strong { color: var(--red); }
+
+        .callout-tip {
+            border-color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+        }
+
+        .callout-tip strong { color: var(--green); }
+
+        /* ---- Menu rendering ---- */
+        .menu-block {
+            background: #000000;
+            border: 1px solid var(--green);
+            padding: 20px 28px;
+            margin: 14px 0 18px;
+            line-height: 1.8;
+        }
+
+        .menu-block .sep { color: var(--dim); }
+        .menu-block .title { color: var(--yellow); font-weight: bold; }
+        .menu-block .key { color: var(--cyan); font-weight: bold; }
+        .menu-block .label { color: var(--white); }
+        .menu-block .menu-dim { color: var(--dim); }
+        .menu-block .val { color: var(--amber); }
+
+        /* ---- Lists ---- */
+        ul, ol {
+            margin: 8px 0 14px 28px;
+            font-size: 0.95em;
+        }
+
+        li {
+            margin-bottom: 4px;
+        }
+
+        /* ---- Links ---- */
+        .body-content a {
+            color: var(--link);
+            text-decoration: none;
+        }
+
+        .body-content a:hover {
+            color: var(--yellow);
+            text-decoration: underline;
+        }
+
+        /* ---- Compat cards ---- */
+        .compat-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+
+        .compat-card {
+            border: 1px solid var(--border);
+            padding: 18px 20px;
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .compat-card h3 {
+            font-size: 1em;
+            color: var(--cyan);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 6px;
+        }
+
+        .compat-card p {
+            font-size: 0.9em;
+            color: var(--dim);
+            line-height: 1.5;
+            margin-bottom: 0;
+        }
+
+        /* ---- Author ---- */
+        .author-block {
+            display: flex;
+            align-items: center;
+            gap: 24px;
+            border: 1px solid var(--border);
+            padding: 20px 24px;
+            background: rgba(0, 0, 0, 0.3);
+            margin-top: 12px;
+        }
+
+        .author-block img {
+            width: 180px;
+            height: auto;
+            image-rendering: pixelated;
+            border: 1px solid var(--cyan);
+            box-shadow: 0 0 8px rgba(0, 255, 255, 0.2);
+        }
+
+        .author-block .author-info h3 {
+            color: var(--cyan);
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .author-block .author-info p {
+            color: var(--dim);
+        }
+
+        /* ---- Footer ---- */
+        .site-footer {
+            background: var(--bg-dark);
+            color: var(--dim);
+            text-align: center;
+            padding: 22px 32px;
+            font-size: 0.85em;
+            border-top: 2px dashed var(--border);
+        }
+
+        .site-footer a {
+            color: var(--cyan);
+            text-decoration: none;
+        }
+
+        .site-footer a:hover { color: var(--yellow); }
+
+        /* ---- Responsive ---- */
+        @media (max-width: 900px) {
+            body { font-size: 17px; }
+            .site-header { padding: 24px 16px 16px; }
+            .site-header h1 { font-size: 1.6em; letter-spacing: 2px; }
+            .hdr-tagline { letter-spacing: 2px; font-size: 0.85em; }
+            .body-content { padding: 0 16px 28px; }
+            .site-nav a { padding: 8px 10px; font-size: 0.78em; }
+            .compat-grid { grid-template-columns: 1fr; }
+            .section-title { font-size: 1em; letter-spacing: 2px; }
+            .feature-table .desc-col { display: none; }
+            .logo-photo { height: 120px; }
+            .sysop-photo { height: 120px; }
+            .author-block { flex-direction: column; text-align: center; }
+        }
+    </style>
+</head>
+<body>
+    <div class="page">
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- HEADER                                            -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <header class="site-header">
+            <div class="header-photos">
+                <img src="ricky.png" alt="Author: Ricky Bryce" class="sysop-photo">
+                <img src="ethernetgatewaylogo.png" alt="Ethernet Gateway" class="logo-photo">
+            </div>
+            <h1>Ethernet Gateway</h1>
+            <p class="hdr-tagline">SSH Reference</p>
+            <div class="hdr-version">v0.6.1</div>
+            <div class="hdr-badges">
+                <span class="hdr-badge">SSH</span>
+                <span class="hdr-badge">russh</span>
+                <span class="hdr-badge">Ed25519</span>
+                <span class="hdr-badge">TOFU</span>
+                <span class="hdr-badge">Server</span>
+                <span class="hdr-badge">Gateway</span>
+            </div>
+        </header>
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- NAV                                               -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <nav class="site-nav">
+            <a href="index.html">&laquo; User Manual</a>
+            <a href="#overview">Overview</a>
+            <a href="#roles">Two Roles</a>
+            <a href="#server">Server</a>
+            <a href="#keyfiles">Key Files</a>
+            <a href="#gateway">Gateway</a>
+            <a href="#hostkey">Host-Key Verify</a>
+            <a href="#auth">Authentication</a>
+            <a href="#ansi">ANSI Filtering</a>
+            <a href="#security">Security</a>
+            <a href="#config">Config</a>
+            <a href="telnetreference.html">Telnet</a>
+            <a href="#references">References</a>
+        </nav>
+
+        <div class="body-content">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- OVERVIEW                                      -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="overview">
+                <div class="section-title">Overview</div>
+                <p class="intro">SSH is the encrypted access method &mdash; the modern counterpart to <a href="telnetreference.html">telnet</a> for reaching the gateway, and the way the gateway dials out to remote shells.</p>
+
+                <p>
+                    Where <a href="telnetreference.html">telnet</a> is a cleartext NVT
+                    stream the gateway implements byte-for-byte, SSH is a full encrypted
+                    transport. The gateway does <strong>not</strong> hand-roll the SSH wire
+                    protocol &mdash; it builds on the
+                    <a href="https://github.com/Eugeny/russh">russh</a> crate (pure-Rust
+                    SSH) and supplies the policy around it: host keys, authentication, the
+                    bridge into a terminal session, and trust decisions when dialing out.
+                    Everything here lives in <code>src/ssh.rs</code> (the inbound server and
+                    key management) and the gateway driver in <code>src/telnet.rs</code>
+                    (the outbound proxy).
+                </p>
+
+                <div class="callout callout-info">
+                    <strong>Telnet vs. SSH.</strong> Use <strong>telnet</strong> (default
+                    port 2323) for retro hardware that can't do crypto &mdash; Commodore 64,
+                    CP/M, AltairDuino. Use <strong>SSH</strong> (default port 2222) for
+                    encrypted access from modern terminals. Both land on the
+                    <em>same</em> menus and features, and both share one credential pair and
+                    one lockout map. See the
+                    <a href="telnetreference.html">Telnet Negotiation Reference</a> for the
+                    cleartext side.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- TWO ROLES                                      -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="roles">
+                <div class="section-title">Two Roles</div>
+                <p class="intro">The gateway speaks SSH in both directions &mdash; keep the two straight, because they use different keys.</p>
+                <table class="data-table">
+                    <tr><th>Role</th><th>Direction</th><th>What it is</th></tr>
+                    <tr><td><strong>SSH Server</strong></td><td>Inbound &mdash; a client connects <em>to</em> the gateway</td><td>An encrypted front door onto the same menus telnet offers. The gateway proves its identity with its <strong>host key</strong>; the client authenticates with the unified username / password. Off by default.</td></tr>
+                    <tr><td><strong>SSH Gateway</strong></td><td>Outbound &mdash; the gateway dials <em>out</em> to a remote SSH server</td><td>A proxy: from the main menu you open an interactive shell on some other machine. The gateway authenticates with either a password you type or its own <strong>client key</strong>, and verifies the remote's host key trust-on-first-use.</td></tr>
+                </table>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- SERVER                                         -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="server">
+                <div class="section-title">Inbound SSH Server</div>
+                <p class="intro">An encrypted way in, on port 2222 by default (disabled until you enable it).</p>
+
+                <table class="data-table">
+                    <tr><th>Property</th><th>Value</th></tr>
+                    <tr><td>Default state</td><td><code>ssh_enabled = false</code> &mdash; opt-in.</td></tr>
+                    <tr><td>Default port</td><td>2222 (<code>ssh_port</code>).</td></tr>
+                    <tr><td>Implementation</td><td>russh server (<code>src/ssh.rs</code>).</td></tr>
+                    <tr><td>Host key</td><td>Ed25519, auto-generated on first run, persisted to <code>ethernet_ssh_host_key</code> (OpenSSH PEM, <code>0o600</code> on Unix).</td></tr>
+                    <tr><td>Authentication</td><td>Password only, against the unified <code>username</code> / <code>password</code> (shared with telnet and the web UI). Constant-time comparison.</td></tr>
+                    <tr><td>Brute-force lockout</td><td>Shared per-IP map with telnet: 3 failures &rarr; 5-minute ban. <code>auth_rejection_time</code> is 1&nbsp;s.</td></tr>
+                    <tr><td>Capacity</td><td>Bounded by <code>max_sessions</code>; connections over the cap are rejected at auth.</td></tr>
+                </table>
+
+                <div class="cat">How a session is served</div>
+                <p class="dim-text">
+                    SSH clients expect a shell, not a raw socket, so the server bridges the
+                    SSH channel into the gateway's ordinary terminal session:
+                </p>
+                <div class="instructions">
+                    <h3>Connection lifecycle</h3>
+                    <ol>
+                        <li>The client connects; the server presents the Ed25519 <strong>host key</strong> so the client can verify it (and pin it in their own <code>~/.ssh/known_hosts</code>).</li>
+                        <li><code>auth_password</code> runs the capacity check, the per-IP lockout check, then a constant-time compare of the username and password. The credentials are <strong>snapshotted at connect time</strong>, so saving a new password mid-session never invalidates an already-authenticated connection.</li>
+                        <li>On a <code>shell_request</code> the server opens <strong>one</strong> shell per connection and builds a <strong>duplex bridge</strong> to a <code>TelnetSession</code> (started in ANSI mode). SSH input is forwarded into the bridge; the session's output is read back out and sent to the client as channel data.</li>
+                        <li>The session writer joins the shared broadcast list, so a server-wide shutdown notice reaches SSH clients too.</li>
+                        <li>Client EOF (or disconnect) tears the bridge down and the session count is released.</li>
+                    </ol>
+                </div>
+
+                <div class="callout callout-warn">
+                    <strong>Server auth is password-only.</strong> Public-key login
+                    <em>into</em> the gateway's SSH server is not offered &mdash; the server
+                    accepts the unified password. (Public keys are used in the
+                    <em>other</em> direction; see <a href="#gateway">the gateway</a>.) This
+                    is a deliberate simplicity choice for the gateway's trusted-user threat
+                    model &mdash; see <a href="#security">Security</a>.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- KEY FILES                                      -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="keyfiles">
+                <div class="section-title">The Three Key Files</div>
+                <p class="intro">SSH touches three on-disk files in the gateway's working directory. They are easy to confuse &mdash; here is exactly what each one is for.</p>
+                <table class="data-table">
+                    <tr><th>File</th><th>Used when</th><th>What it holds</th></tr>
+                    <tr><td><code>ethernet_ssh_host_key</code></td><td>A client connects <strong>to</strong> our SSH server</td><td>The gateway's <em>own</em> SSH server host key (Ed25519 private key). This is the identity remote clients pin.</td></tr>
+                    <tr><td><code>ethernet_gateway_ssh_key</code></td><td>We dial <strong>out</strong> to a remote SSH server in <code>key</code> mode</td><td>The gateway's outgoing client keypair (Ed25519). Put its public half into the remote's <code>authorized_keys</code>.</td></tr>
+                    <tr><td><code>gateway_hosts</code></td><td>We dial <strong>out</strong> and verify the remote</td><td>Trusted remote-server fingerprints &mdash; the gateway's equivalent of OpenSSH's <code>known_hosts</code>. One <code>host:port algorithm base64</code> entry per line.</td></tr>
+                </table>
+                <p class="dim-text">
+                    All three are written atomically and chmod <code>0o600</code> on Unix.
+                    The private keys carry no passphrase &mdash; the gateway process must use
+                    them without interaction, so the file mode is the at-rest protection.
+                    <code>gateway_hosts</code> is locked down too: the stored public keys are
+                    not secret, but the file also reveals the gateway's <em>dial history</em>
+                    (which hosts the operator has connected to), which other local users
+                    shouldn't see.
+                </p>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- GATEWAY                                         -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="gateway">
+                <div class="section-title">Outbound SSH Gateway</div>
+                <p class="intro">Proxy out to a remote shell. Press S from the main menu.</p>
+
+                <div class="instructions">
+                    <h3>Connecting</h3>
+                    <ol>
+                        <li>Press <strong>S</strong> at the main menu. The header shows the active auth mode (<em>password</em> or <em>gateway key</em>).</li>
+                        <li>At the first prompt, press <strong>K</strong> to display the gateway's public key (for pasting into a remote's <code>authorized_keys</code>), or any other key to continue.</li>
+                        <li>Enter the remote <strong>hostname / IP</strong>, the <strong>port</strong> (default 22), and your <strong>username</strong> on the remote.</li>
+                        <li>The gateway connects and verifies the remote's <strong>host key</strong> against <code>gateway_hosts</code> (see <a href="#hostkey">Host-Key Verification</a>).</li>
+                        <li>It authenticates using the <strong>one configured method</strong> &mdash; password <em>or</em> gateway key (see <a href="#auth">Authentication</a>).</li>
+                        <li>On success you get a full interactive shell. ANSI from the remote is stripped for PETSCII / ASCII terminals (see <a href="#ansi">ANSI Filtering</a>).</li>
+                        <li>Press <strong>Esc</strong> twice (PETSCII: the back-arrow key twice) to disconnect and return to the menu.</li>
+                    </ol>
+                </div>
+
+                <p class="dim-text">
+                    The outbound client uses a 600-second inactivity timeout and a bounded
+                    connect timeout, so a dead or unreachable host fails cleanly rather than
+                    hanging the session.
+                </p>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- HOST-KEY VERIFICATION                          -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="hostkey">
+                <div class="section-title">Host-Key Verification (TOFU)</div>
+                <p class="intro">Before authenticating, the gateway checks the remote's host key against gateway_hosts &mdash; trust-on-first-use, just like OpenSSH.</p>
+
+                <p>
+                    On connect, the gateway captures the remote's public host key and looks
+                    up <code>host:port</code> in <code>gateway_hosts</code>. One of three
+                    things happens:
+                </p>
+                <table class="data-table">
+                    <tr><th>Status</th><th>Meaning</th><th>What the gateway does</th></tr>
+                    <tr><td><strong>Known</strong></td><td>Stored key matches the presented key.</td><td>Proceeds silently to authentication.</td></tr>
+                    <tr><td><strong>Unknown</strong></td><td>No entry for this <code>host:port</code>.</td><td>Shows the key <strong>type and SHA-256 fingerprint</strong> and asks <code>Trust this host? (Y/N)</code>. On <strong>Y</strong> it saves the key (a TOFU accept, logged) and continues; on <strong>N</strong> it disconnects.</td></tr>
+                    <tr><td><strong>Changed</strong></td><td>Stored key for this host does <em>not</em> match.</td><td>Prints <span style="color:var(--red);">WARNING: HOST KEY HAS CHANGED!</span> with the new fingerprint and makes you review before accepting &mdash; a possible man-in-the-middle.</td></tr>
+                </table>
+
+                <pre><code><span class="output-text"># gateway_hosts — one entry per host:port</span>
+example.com:22 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...
+192.168.1.10:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...
+<span class="output-text"># blank lines and # comments are ignored</span></code></pre>
+
+                <div class="callout callout-info">
+                    <strong>Independent of your OpenSSH known_hosts.</strong> Trust here is
+                    stored only in the gateway's <code>gateway_hosts</code>; it does not read
+                    or write any <code>~/.ssh/known_hosts</code>. Every trust decision
+                    (first-time accept, change, rejection) is written to the server log for
+                    auditability.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- AUTHENTICATION                                 -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="auth">
+                <div class="section-title">Authentication</div>
+                <p class="intro">Inbound and outbound authenticate differently &mdash; and the outbound gateway uses exactly one method, chosen by config.</p>
+
+                <div class="cat">Into the server (inbound)</div>
+                <p class="dim-text">
+                    Password only, against the unified <code>username</code> /
+                    <code>password</code> shared across telnet, SSH, and the web UI, compared
+                    in constant time, behind the shared per-IP lockout.
+                </p>
+
+                <div class="cat">Out through the gateway (outbound)</div>
+                <p class="dim-text">
+                    The <code>ssh_gateway_auth</code> key selects <strong>one</strong> method
+                    &mdash; there is <strong>no silent fallback</strong>, so the remote sees
+                    exactly one auth attempt and a failure is unambiguous:
+                </p>
+                <table class="data-table">
+                    <tr><th><code>ssh_gateway_auth</code></th><th>Method</th><th>Behavior</th></tr>
+                    <tr><td><code>password</code> <em>(default)</em></td><td>Keyboard password</td><td>The gateway prompts you for the remote password each dial and authenticates with it. Nothing is stored.</td></tr>
+                    <tr><td><code>key</code></td><td>Gateway client key</td><td>The gateway authenticates with its own Ed25519 key (<code>ethernet_gateway_ssh_key</code>, auto-generated on first use). No password is requested and there is no fallback &mdash; the remote must already trust the key.</td></tr>
+                </table>
+
+                <div class="instructions">
+                    <h3>Setting up gateway-key (passwordless) dial-out</h3>
+                    <ol>
+                        <li>Set <code>ssh_gateway_auth = key</code> in config (telnet, web, or GUI).</li>
+                        <li>At the SSH Gateway prompt, press <strong>K</strong> to print the gateway's public key in one-line OpenSSH form (<code>ssh-ed25519 AAAA&hellip;</code>, with no stray comment field).</li>
+                        <li>Append that single line to the remote account's <code>~/.ssh/authorized_keys</code>.</li>
+                        <li>Future dials to that host authenticate with the key and skip the password prompt entirely.</li>
+                    </ol>
+                </div>
+
+                <div class="callout callout-warn">
+                    <strong>This is not pubkey-then-password.</strong> In <code>key</code>
+                    mode the gateway never prompts for a password, and in
+                    <code>password</code> mode it never offers the key. If a
+                    <code>key</code>-mode dial fails, fix the remote's
+                    <code>authorized_keys</code> (or switch the mode back to
+                    <code>password</code>) &mdash; the gateway will not quietly try the other
+                    method.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- ANSI FILTERING                                 -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="ansi">
+                <div class="section-title">ANSI Filtering for Vintage Terminals</div>
+                <p class="intro">A remote shell assumes a VT-style terminal. A Commodore 64 isn't one.</p>
+                <p class="dim-text">
+                    When you reach the SSH gateway from a <strong>PETSCII</strong> or
+                    <strong>ASCII</strong> terminal, the gateway strips ANSI escape sequences
+                    from the remote's output &mdash; CSI, OSC, DCS, PM, APC, and SOS
+                    sequences &mdash; so raw colour and cursor-control codes don't splatter
+                    across a screen that can't interpret them. The escape-state machine is
+                    carried across reads so sequences split over packet boundaries are still
+                    caught. <strong>ANSI</strong> terminals get the stream through unchanged.
+                </p>
+                <div class="callout callout-info">
+                    <strong>See also:</strong> the
+                    <a href="appendix.html#ansi-table">ANSI Escape Sequences</a> appendix for
+                    the exact codes being filtered, and the
+                    <a href="telnetreference.html">Telnet Reference</a> for the same
+                    PETSCII / ASCII / ANSI terminal-type model on the cleartext side.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- SECURITY                                       -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="security">
+                <div class="section-title">Security Model</div>
+                <p class="intro">SSH here is built for a trusted-user / LAN deployment, and the design reflects that.</p>
+                <ul>
+                    <li><strong>Encrypted transport.</strong> russh provides the encrypted channel; the gateway never sends credentials or session data in clear over SSH.</li>
+                    <li><strong>Unified credentials.</strong> One <code>username</code> / <code>password</code> covers telnet, SSH, and the web UI &mdash; fewer secrets to manage. Compared in constant time to avoid timing leaks.</li>
+                    <li><strong>Shared lockout.</strong> The per-IP brute-force map is shared with telnet, so bouncing between protocols doesn't reset an attacker's failure count: 3 failures &rarr; 5-minute ban.</li>
+                    <li><strong>Host-key TOFU outbound.</strong> A changed remote host key is surfaced loudly rather than silently accepted.</li>
+                    <li><strong>Owner-only key files.</strong> Private keys and the dial-history file are <code>0o600</code>, written atomically so they are never briefly world-readable.</li>
+                </ul>
+                <div class="callout callout-info">
+                    <strong>Known limitations (by design).</strong> The inbound server is
+                    password-only (no client-certificate / pubkey login <em>into</em> the
+                    gateway), and private keys are stored without a passphrase because the
+                    process runs unattended. Both are deliberate trade-offs for the
+                    trusted-user / LAN threat model. If you expose the gateway to a hostile
+                    network, front it with a firewall or VPN.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- CONFIG                                         -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="config">
+                <div class="section-title">Configuration Keys</div>
+                <p class="intro">Editable from the telnet Configuration menu, the GUI, the web UI, or egateway.conf directly.</p>
+                <table class="data-table">
+                    <tr><th>Key</th><th>Default</th><th>Meaning</th></tr>
+                    <tr><td><code>ssh_enabled</code></td><td>false</td><td>Enable the inbound SSH server.</td></tr>
+                    <tr><td><code>ssh_port</code></td><td>2222</td><td>Port the SSH server listens on.</td></tr>
+                    <tr><td><code>ssh_gateway_auth</code></td><td>password</td><td>Outbound auth method: <code>password</code> (prompt each dial) or <code>key</code> (gateway client key, no fallback).</td></tr>
+                    <tr><td><code>username</code> / <code>password</code></td><td>admin / changeme</td><td>Unified credentials for telnet, SSH, and the web UI. Change the password before exposing the gateway.</td></tr>
+                    <tr><td><code>max_sessions</code></td><td>50</td><td>Concurrent session cap, shared across telnet and SSH.</td></tr>
+                </table>
+                <div class="callout callout-tip">
+                    <strong>File reminder:</strong> <code>ssh_*</code> config keys control
+                    behavior; the actual keys live in the <code>ethernet_ssh_host_key</code>,
+                    <code>ethernet_gateway_ssh_key</code>, and <code>gateway_hosts</code>
+                    files described under <a href="#keyfiles">Key Files</a>. The legacy
+                    separate <code>ssh_username</code> / <code>ssh_password</code> keys were
+                    removed &mdash; SSH now shares the one credential pair.
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- ══════════════════════════════════════════════ -->
+            <!-- REFERENCES                                     -->
+            <!-- ══════════════════════════════════════════════ -->
+            <div class="section" id="references">
+                <div class="section-title">References</div>
+                <p class="intro">Deep-dive reference pages for every protocol and interface, plus the character-set tables and ANSI escape-sequence reference.</p>
+                <div class="compat-grid">
+                    <div class="compat-card">
+                        <h3><a href="xmodemreference.html">XMODEM</a></h3>
+                        <p>128-byte blocks; CRC-16 / checksum negotiation.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="ymodemreference.html">YMODEM</a></h3>
+                        <p>Block-0 metadata, batch, exact size truncation.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="zmodemreference.html">ZMODEM</a></h3>
+                        <p>Streaming; ZDLE, CRC-32, autostart, resume.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="kermitreference.html">Kermit</a></h3>
+                        <p>Send-Init negotiation; F / A / D / Z / B transfer.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="punterreference.html">Punter</a></h3>
+                        <p>C1 dual checksum, two-phase, GOO/BAD/ACK.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="atcommandreference.html">AT Commands</a></h3>
+                        <p>Hayes command set, S-registers, +++ escape.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="telnetreference.html">Telnet</a></h3>
+                        <p>IAC negotiation, every option, the NVT data phase.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3 style="color: var(--yellow);">SSH <span class="dim-text" style="font-size:0.78em;">(this page)</span></h3>
+                        <p>Server, gateway, host keys, TOFU, auth modes.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="appendix.html">Character Code Tables</a></h3>
+                        <p>Hex tables for every encoding: ASCII, ANSI, PETSCII, ATASCII, Baudot/ITA2, ZX Spectrum, TRS-80.</p>
+                    </div>
+                    <div class="compat-card">
+                        <h3><a href="appendix.html#ansi-table">ANSI Escape Sequences</a></h3>
+                        <p>Cursor, colour/SGR, erase, and screen-mode escape codes, with the raw hex bytes.</p>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- ══════════════════════════════════════════════════ -->
+        <!-- FOOTER                                            -->
+        <!-- ══════════════════════════════════════════════════ -->
+        <footer class="site-footer">
+            Ethernet Gateway v0.6.1 &mdash; &copy; 2026 Ricky Bryce &mdash;
+            Licensed under GPL-3.0-or-later &mdash;
+            <a href="index.html">User Manual</a>
+        </footer>
+    </div>
+</body>
+</html>
