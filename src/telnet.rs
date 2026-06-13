@@ -1479,6 +1479,12 @@ pub(crate) struct TelnetSession {
     // TTYPE result — set once via SB TTYPE IS. Prevents re-requesting
     // and lets detect_terminal_type skip the BACKSPACE prompt.
     ttype_matched: bool,
+    // Raw TERMINAL-TYPE name the client announced via SB TTYPE IS,
+    // recorded even when it isn't one we recognize, so the gateway-debug
+    // terminal diagnostic can show exactly what the client sent (e.g.
+    // minicom's "ansi" or "xterm").  None until the first TTYPE IS, and
+    // always None for serial callers (they skip telnet negotiation).
+    ttype_raw: Option<String>,
     // Set the first time session_read_byte sees an IAC SB or
     // WILL/WONT/DO/DONT from the peer.  Distinguishes a true telnet
     // client (which participates in option negotiation, RFC 854/856)
@@ -1552,6 +1558,7 @@ impl TelnetSession {
             neg_sent_wont: Box::new([false; 256]),
             neg_sent_dont: Box::new([false; 256]),
             ttype_matched: false,
+            ttype_raw: None,
             telnet_negotiated: false,
             window_width: None,
             window_height: None,
@@ -1606,6 +1613,7 @@ impl TelnetSession {
             neg_sent_wont: Box::new([false; 256]),
             neg_sent_dont: Box::new([false; 256]),
             ttype_matched: false,
+            ttype_raw: None,
             telnet_negotiated: false,
             window_width: None,
             window_height: None,
@@ -2077,6 +2085,10 @@ impl TelnetSession {
                         .map(|&b| b as char)
                         .filter(|c| !c.is_control())
                         .collect();
+                    // Record what the client announced even when we don't
+                    // recognize it, so the gateway-debug terminal diagnostic
+                    // can show the exact name that failed to match.
+                    self.ttype_raw = Some(name.clone());
                     if let Some(tt) = match_terminal_name(&name) {
                         self.terminal_type = tt;
                         self.ttype_matched = true;
@@ -2838,11 +2850,18 @@ impl TelnetSession {
         }
 
         // If TTYPE already identified the client, skip the manual prompt.
+        // `detect_method` records how the terminal type was decided, for
+        // the gateway-debug terminal diagnostic emitted below.
+        let detect_method;
         if self.ttype_matched {
             self.erase_char = match self.terminal_type {
                 TerminalType::Petscii => 0x14,
                 _ => 0x7F,
             };
+            detect_method = format!(
+                "telnet TTYPE \"{}\"",
+                self.ttype_raw.as_deref().unwrap_or("?")
+            );
         } else {
             self.send_raw(b"\r\nPress BACKSPACE to detect terminal: ")
                 .await?;
@@ -2874,6 +2893,7 @@ impl TelnetSession {
                 0x08 | 0x7F => TerminalType::Ansi,
                 _ => TerminalType::Ascii,
             };
+            detect_method = format!("BACKSPACE key 0x{:02x}", byte);
         }
 
         let type_name = match self.terminal_type {
@@ -2961,7 +2981,150 @@ impl TelnetSession {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         self.drain_input().await;
 
+        self.log_terminal_diagnostic(&detect_method, Some(accepted));
+
         Ok(())
+    }
+
+    /// Emit a one-shot, human-readable terminal diagnostic to the gateway
+    /// log — but only when gateway-debug tracing is on (the `gateway_debug`
+    /// config flag, toggleable from the GUI / web console / Serial Config
+    /// menu, or the `EGATEWAY_GATEWAY_DEBUG` env var).  This is the single
+    /// place that explains *why a caller did or didn't get color*: the
+    /// detected terminal type and how it was decided, the raw TTYPE the
+    /// client announced (matched or not), the color choice, the NAWS window
+    /// size, the telnet options we advertised, what we'll advertise onward
+    /// to a remote host, and — for serial callers — the dialed port's baud
+    /// and PETSCII-translate state.  PETSCII translate strips ANSI color
+    /// sequences before they reach the caller, which is the most common
+    /// reason ANSI color goes missing on a serial line, so it's called out
+    /// explicitly.  Costs nothing when the flag and env var are both unset.
+    fn log_terminal_diagnostic(&self, detect_method: &str, color_answer: Option<bool>) {
+        if !gw_debug_enabled(config::get_gateway_debug()) {
+            return;
+        }
+
+        let session = if self.is_ssh {
+            "SSH".to_string()
+        } else if self.is_serial {
+            match self.serial_port_id {
+                Some(id) => format!("serial port {}", id.label()),
+                None => "serial".to_string(),
+            }
+        } else {
+            "telnet (TCP)".to_string()
+        };
+
+        let tt = match self.terminal_type {
+            TerminalType::Petscii => "PETSCII",
+            TerminalType::Ansi => "ANSI",
+            TerminalType::Ascii => "ASCII",
+        };
+
+        let color = match (self.terminal_type, color_answer) {
+            (TerminalType::Ascii, _) => "DISABLED — plain text".to_string(),
+            (_, Some(true)) => "ENABLED — caller answered Y".to_string(),
+            (_, Some(false)) => "DISABLED — caller answered N".to_string(),
+            (_, None) => "ENABLED".to_string(),
+        };
+
+        let ttype_line = match &self.ttype_raw {
+            Some(name) => {
+                let matched = match match_terminal_name(name) {
+                    Some(TerminalType::Petscii) => "recognized as PETSCII",
+                    Some(TerminalType::Ansi) => "recognized as ANSI",
+                    Some(TerminalType::Ascii) => "recognized as ASCII",
+                    None => "UNRECOGNIZED -> fell back to BACKSPACE probe",
+                };
+                format!("\"{}\" ({})", name, matched)
+            }
+            None if self.is_serial => {
+                "<none — serial connections skip telnet negotiation>".to_string()
+            }
+            None => "<none — client sent no TERMINAL-TYPE>".to_string(),
+        };
+
+        // What we advertised for each key option, as a will/do summary.
+        // For serial these are all "-" (no telnet negotiation happens).
+        let opt_state = |opt: u8| -> &'static str {
+            let i = opt as usize;
+            let willed = self.neg_sent_will[i] && !self.neg_sent_wont[i];
+            let doed = self.neg_sent_do[i] && !self.neg_sent_dont[i];
+            match (willed, doed) {
+                (true, true) => "will+do",
+                (true, false) => "will",
+                (false, true) => "do",
+                (false, false) => "-",
+            }
+        };
+
+        let window = match (self.window_width, self.window_height) {
+            (Some(w), Some(h)) => format!("{}x{}", w, h),
+            (Some(w), None) => format!("{}x?", w),
+            (None, Some(h)) => format!("?x{}", h),
+            (None, None) => "<not negotiated>".to_string(),
+        };
+
+        let ssh_term = match self.terminal_type {
+            TerminalType::Petscii => "dumb (40x25)",
+            TerminalType::Ascii => "dumb (80x24)",
+            TerminalType::Ansi => "xterm (80x24)",
+        };
+
+        let cfg = config::get_config();
+
+        glog!("[gw-diag] ----- terminal diagnostic ----------------------------");
+        glog!("[gw-diag] session:         {}", session);
+        glog!("[gw-diag] terminal type:   {}  (via {})", tt, detect_method);
+        glog!("[gw-diag] color:           {}", color);
+        glog!("[gw-diag] erase char:      0x{:02x}", self.erase_char);
+        glog!("[gw-diag] TTYPE reported:  {}", ttype_line);
+        glog!(
+            "[gw-diag] telnet opts:     ECHO={} SGA={} TTYPE={} NAWS={}  (peer spoke telnet: {})",
+            opt_state(OPT_ECHO),
+            opt_state(OPT_SGA),
+            opt_state(OPT_TTYPE),
+            opt_state(OPT_NAWS),
+            if self.telnet_negotiated { "yes" } else { "no" },
+        );
+        glog!("[gw-diag] window (NAWS):   {}", window);
+        glog!(
+            "[gw-diag] onward advertise: telnet TTYPE=\"{}\"  |  ssh TERM={}",
+            gateway_terminal_name(self.terminal_type),
+            ssh_term,
+        );
+        glog!(
+            "[gw-diag] config:          telnet_gateway_negotiate={}",
+            cfg.telnet_gateway_negotiate,
+        );
+
+        if self.is_serial
+            && let Some(id) = self.serial_port_id
+        {
+            let p = cfg.port(id);
+            glog!(
+                "[gw-diag] serial port {}:   baud={} petscii_translate={}",
+                id.label(),
+                p.baud,
+                if p.petscii_translate { "ON" } else { "off" },
+            );
+            if p.petscii_translate && self.terminal_type == TerminalType::Ansi {
+                glog!(
+                    "[gw-diag] *** PETSCII translate is ON: ANSI color sequences are STRIPPED"
+                );
+                glog!(
+                    "[gw-diag] *** before reaching the caller — that produces black & white output."
+                );
+                glog!(
+                    "[gw-diag] *** For ANSI color on this port, turn PETSCII translate OFF",
+                );
+                glog!(
+                    "[gw-diag] *** (AT+PETSCII=0, or the Serial Configuration menu)."
+                );
+            }
+        }
+
+        glog!("[gw-diag] ------------------------------------------------------");
     }
 
     // ─── Authentication ─────────────────────────────────────
@@ -13394,6 +13557,7 @@ pub fn start_server(
                                     neg_sent_wont: Box::new([false; 256]),
                                     neg_sent_dont: Box::new([false; 256]),
                                     ttype_matched: false,
+                                    ttype_raw: None,
                                     telnet_negotiated: false,
                                     window_width: None,
                                     window_height: None,
@@ -14029,6 +14193,7 @@ mod tests {
             neg_sent_wont: Box::new([false; 256]),
             neg_sent_dont: Box::new([false; 256]),
             ttype_matched: false,
+            ttype_raw: None,
             telnet_negotiated: false,
             window_width: None,
             window_height: None,
@@ -14078,6 +14243,7 @@ mod tests {
             neg_sent_wont: Box::new([false; 256]),
             neg_sent_dont: Box::new([false; 256]),
             ttype_matched: false,
+            ttype_raw: None,
             telnet_negotiated: false,
             window_width: None,
             window_height: None,
