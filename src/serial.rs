@@ -1464,10 +1464,157 @@ fn parse_one_at_subcommand(
     }
 }
 
+/// Human-readable description of a single AT subcommand token, for the
+/// gateway-debug command log.  Mirrors the dispatch in
+/// `parse_one_at_subcommand` (keep the two in sync), but is read-only and
+/// only ever runs when gateway-debug tracing is on, so it never affects
+/// behavior.  `token_upper` is the uppercased token; `token_orig` is the
+/// same byte range from the original line (preserves dial-string case).
+fn describe_at_token(token_upper: &str, token_orig: &str) -> String {
+    match token_upper {
+        "Z" => "reset to saved settings".to_string(),
+        "H" | "H0" => "hang up".to_string(),
+        "E0" => "command echo OFF".to_string(),
+        "E1" => "command echo ON".to_string(),
+        "V0" => "result codes as numbers".to_string(),
+        "V1" => "result codes as words".to_string(),
+        "Q0" => "result codes shown".to_string(),
+        "Q1" => "result codes suppressed (quiet)".to_string(),
+        "?" => "show AT command help".to_string(),
+        "O" | "O0" => "return to online/data mode".to_string(),
+        "A" => "answer (manual-answer test)".to_string(),
+        "&F" => "restore factory defaults".to_string(),
+        "&W" | "&W0" => "save settings to config".to_string(),
+        "&V" => "view active settings & registers".to_string(),
+        "+PETSCII=0" => "PETSCII translation OFF".to_string(),
+        "+PETSCII=1" => "PETSCII translation ON".to_string(),
+        "DL" => "redial last number".to_string(),
+        "S?" => "show S-register help".to_string(),
+        "I" | "I0" | "I1" | "I2" | "I3" | "I4" | "I5" | "I6" | "I7" => {
+            "modem identification query".to_string()
+        }
+        _ if token_upper.starts_with('X') => {
+            let n = token_upper.get(1..).filter(|s| !s.is_empty()).unwrap_or("0");
+            format!("result-code verbosity level {}", n)
+        }
+        _ if token_upper.starts_with("&C") => {
+            let n = token_upper.get(2..).filter(|s| !s.is_empty()).unwrap_or("0");
+            format!("carrier-detect (DCD) mode {}", n)
+        }
+        _ if token_upper.starts_with("&D") => {
+            let n = token_upper.get(2..).filter(|s| !s.is_empty()).unwrap_or("0");
+            format!("DTR-drop handling mode {}", n)
+        }
+        _ if token_upper.starts_with("&K") => {
+            let n = token_upper.get(2..).filter(|s| !s.is_empty()).unwrap_or("0");
+            format!("flow-control mode {}", n)
+        }
+        _ if token_upper.starts_with("&Z") => match token_upper[2..].find('=') {
+            Some(i) => {
+                let slot = &token_upper[2..2 + i];
+                let value = token_orig.get(2 + i + 1..).unwrap_or("").trim();
+                format!("store dial number in slot {}: {}", slot, value)
+            }
+            None => "store dial number (malformed) -> ERROR".to_string(),
+        },
+        _ if token_upper.starts_with('S') && token_upper.len() > 1 => {
+            let s_rest = &token_upper[1..];
+            if let Some(q) = s_rest.find('?') {
+                format!("query S-register {}", &s_rest[..q])
+            } else if let Some(e) = s_rest.find('=') {
+                format!("set S-register {} = {}", &s_rest[..e], s_rest[e + 1..].trim())
+            } else {
+                "S-register (malformed) -> ERROR".to_string()
+            }
+        }
+        _ if token_upper.starts_with("DS") && {
+            let tail = token_upper[2..].trim();
+            tail.is_empty() || tail.chars().all(|c| c.is_ascii_digit())
+        } =>
+        {
+            let n = token_upper[2..].trim();
+            format!("dial stored number in slot {}", if n.is_empty() { "0" } else { n })
+        }
+        _ if token_upper.starts_with("DT")
+            || token_upper.starts_with("DP")
+            || token_upper.starts_with('D') =>
+        {
+            let target = if token_upper.starts_with("DT") || token_upper.starts_with("DP") {
+                token_orig[2..].trim()
+            } else {
+                token_orig[1..].trim()
+            };
+            if target.is_empty() {
+                "dial (no number) -> ERROR".to_string()
+            } else {
+                format!("dial {}", target)
+            }
+        }
+        _ => format!("{} (accepted, no effect)", token_upper),
+    }
+}
+
+/// Build a one-line, human-readable description of a full AT command line
+/// — including chained subcommands (`ATE0Q1V1` -> "command echo OFF;
+/// result codes suppressed (quiet); result codes as words") — for the
+/// gateway-debug `[cmd]` log.  Tokenizes via the same
+/// `split_at_subcommand` the dispatcher uses, so the split always matches.
+fn describe_at_command(cmd: &str) -> String {
+    if !cmd.is_ascii() {
+        return "malformed (non-ASCII) -> ERROR".to_string();
+    }
+    let upper = cmd.to_ascii_uppercase();
+    if upper == "AT" {
+        return "attention / no-op".to_string();
+    }
+    if !upper.starts_with("AT") {
+        return "not an AT command -> ERROR".to_string();
+    }
+    let rest_upper = &upper[2..];
+    let rest_orig = &cmd[2..];
+    let bytes = rest_upper.as_bytes();
+    let mut parts: Vec<String> = Vec::new();
+    let mut off = 0;
+    while off < bytes.len() {
+        while off < bytes.len() && bytes[off] == b' ' {
+            off += 1;
+        }
+        if off >= bytes.len() {
+            break;
+        }
+        let (consumed, is_terminator) = split_at_subcommand(&rest_upper[off..]);
+        if consumed == 0 {
+            break;
+        }
+        parts.push(describe_at_token(
+            &rest_upper[off..off + consumed],
+            &rest_orig[off..off + consumed],
+        ));
+        if is_terminator {
+            break;
+        }
+        off += consumed;
+    }
+    if parts.is_empty() {
+        return "no-op".to_string();
+    }
+    parts.join("; ")
+}
+
 fn process_at_command(state: &mut ModemState, cmd: &str) {
     // Stash the line for Hayes `A/` repeat.  Real modems skip the A/
     // pseudo-command itself (we never route "A/" through here anyway).
     state.last_command = cmd.to_string();
+    // Gateway-debug: log every AT command the caller issues and a plain
+    // description of what it does, alongside the existing [esc] traces.
+    if escape_trace_enabled() {
+        glog!(
+            "[cmd] Port {}: \"{}\" -> {}",
+            state.port_id.label(),
+            cmd,
+            describe_at_command(cmd),
+        );
+    }
     let results = parse_at_command(
         cmd,
         &mut state.echo,
@@ -3108,6 +3255,30 @@ mod tests {
         // ATB (bell mode) and ATC (carrier on/off) likewise.
         assert_eq!(parse("ATB0", &mut echo), vec![AtResult::Ok]);
         assert_eq!(parse("ATC1", &mut echo), vec![AtResult::Ok]);
+    }
+
+    #[test]
+    fn test_describe_at_command() {
+        // Single verbs.
+        assert_eq!(describe_at_command("ATZ"), "reset to saved settings");
+        assert_eq!(describe_at_command("ATE0"), "command echo OFF");
+        assert_eq!(describe_at_command("AT+PETSCII=1"), "PETSCII translation ON");
+        // Chained line — one description per subcommand, joined.
+        assert_eq!(
+            describe_at_command("ATE0Q1V1"),
+            "command echo OFF; result codes suppressed (quiet); result codes as words"
+        );
+        // Dial preserves the original-case target.
+        assert_eq!(
+            describe_at_command("ATDT BBS.Example.Com:23"),
+            "dial BBS.Example.Com:23"
+        );
+        // Numeric families and S-registers.
+        assert_eq!(describe_at_command("AT&K0"), "flow-control mode 0");
+        assert_eq!(describe_at_command("ATS0=2"), "set S-register 0 = 2");
+        // Non-AT and bare AT.
+        assert_eq!(describe_at_command("HELLO"), "not an AT command -> ERROR");
+        assert_eq!(describe_at_command("AT"), "attention / no-op");
     }
 
     #[test]
