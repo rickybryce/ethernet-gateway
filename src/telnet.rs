@@ -13506,11 +13506,14 @@ pub fn start_server(
                             // window where two threads could both
                             // observe `current < max_sessions` and bust
                             // the cap.  If we end up over the limit, roll
-                            // back the increment before rejecting.  (The
-                            // SSH server shares this counter; it claims a
-                            // slot on a successful login in `auth_password`
-                            // — not at connect — using this same fetch_add +
-                            // rollback pattern, and releases it on disconnect.)
+                            // back the increment before rejecting.  (The SSH
+                            // server enforces the same cap independently, with
+                            // its OWN counter and this same fetch_add +
+                            // rollback pattern — claimed on a successful login
+                            // in `auth_password`, released on disconnect.  Only
+                            // the per-IP lockout map is shared between the two;
+                            // the session counters are separate, so each
+                            // protocol allows up to `max_sessions`.)
                             let prev = session_count.fetch_add(1, Ordering::SeqCst);
                             if prev >= max_sessions {
                                 session_count.fetch_sub(1, Ordering::SeqCst);

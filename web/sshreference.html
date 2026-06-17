@@ -847,7 +847,7 @@ example.com:22 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...
                     <tr><td><code>ssh_port</code></td><td>2222</td><td>Port the SSH server listens on.</td></tr>
                     <tr><td><code>ssh_gateway_auth</code></td><td>password</td><td>Outbound auth method: <code>password</code> (prompt each dial) or <code>key</code> (gateway client key, no fallback).</td></tr>
                     <tr><td><code>username</code> / <code>password</code></td><td>admin / changeme</td><td>Unified credentials for telnet, SSH, and the web UI. Change the password before exposing the gateway.</td></tr>
-                    <tr><td><code>max_sessions</code></td><td>50</td><td>Concurrent session cap, shared across telnet and SSH.</td></tr>
+                    <tr><td><code>max_sessions</code></td><td>50</td><td>Concurrent session cap, applied independently to telnet and SSH (each protocol allows up to this many; only the per-IP lockout map is shared between them).</td></tr>
                 </table>
                 <div class="callout callout-tip">
                     <strong>File reminder:</strong> <code>ssh_*</code> config keys control
