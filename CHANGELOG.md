@@ -24,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 - **Documented ZMODEM `ZCOMMAND` (frame 0x12) as the one optional spec frame deliberately not implemented** — it is recognized but always refused (non-zero `ZCOMPL`), since arbitrary `/bin/sh -c` execution on a shared, long-lived host is an unacceptable default; use SSH for shell access. Noted in the user manual and the ZMODEM web reference.
-- Documented previously-undocumented config keys: `web_enabled`, `web_port`, `gateway_debug`, and `ssh_gateway_auth` in the README config reference, and `punter_max_bad_rounds` / `punter_hangup_on_failure` in the user manual. Added the now-handled `ZFERR` frame to the ZMODEM web reference and completed the CLAUDE.md architecture table (added `kermit.rs`, `serial.rs`, `tnio.rs`, `webserver.rs`, `webbrowser.rs`, `logger.rs`).
+- Documented previously-undocumented config keys: `web_enabled`, `web_port`, `gateway_debug`, and `ssh_gateway_auth` in the README config reference, and `punter_max_bad_rounds` / `punter_hangup_on_failure` in the user manual. Added the now-handled `ZFERR` frame to the ZMODEM web reference, and corrected the SSH reference's `auth_password` lifecycle description to match the new claim-slot-on-successful-login behavior.
 
 ## [0.6.1] - 2026-06-06
 

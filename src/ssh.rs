@@ -691,4 +691,82 @@ mod tests {
         assert_eq!(loaded.algorithm(), russh::keys::Algorithm::Ed25519);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    // ─── Session-slot accounting (claim on successful auth) ───
+
+    /// A session slot is claimed only on a successful login, released only
+    /// if it was claimed, and the cap is enforced at exactly `max_sessions`
+    /// — so an unauthenticated/stalled connection can't exhaust the cap.
+    #[tokio::test]
+    async fn test_auth_password_slot_accounting_and_cap() {
+        use russh::server::{Auth, Handler};
+        let session_count = Arc::new(AtomicUsize::new(0));
+        let make = || SshHandler {
+            shutdown: Arc::new(AtomicBool::new(false)),
+            restart: Arc::new(AtomicBool::new(false)),
+            session_count: session_count.clone(),
+            max_sessions: 2,
+            username: "admin".into(),
+            password: "secret".into(),
+            peer_addr: Some("10.0.0.1".parse().unwrap()),
+            duplex_writer: None,
+            session_writers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            lockouts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            counted: false,
+        };
+
+        // Failed auth must NOT claim a slot, and dropping an uncounted
+        // handler must not change (or underflow) the counter.
+        {
+            let mut h = make();
+            let r = h.auth_password("admin", "wrong").await.unwrap();
+            assert!(matches!(r, Auth::Reject { .. }));
+            assert!(!h.counted);
+            assert_eq!(session_count.load(Ordering::SeqCst), 0);
+        }
+        assert_eq!(session_count.load(Ordering::SeqCst), 0);
+
+        // Successful auth claims exactly one slot; Drop releases it.
+        {
+            let mut h = make();
+            assert!(matches!(
+                h.auth_password("admin", "secret").await.unwrap(),
+                Auth::Accept
+            ));
+            assert!(h.counted);
+            assert_eq!(session_count.load(Ordering::SeqCst), 1);
+        }
+        assert_eq!(session_count.load(Ordering::SeqCst), 0);
+
+        // Cap: hold max_sessions (2) authenticated handlers, then a third
+        // *valid* login is rejected and rolls its increment back.
+        let mut h1 = make();
+        assert!(matches!(
+            h1.auth_password("admin", "secret").await.unwrap(),
+            Auth::Accept
+        ));
+        let mut h2 = make();
+        assert!(matches!(
+            h2.auth_password("admin", "secret").await.unwrap(),
+            Auth::Accept
+        ));
+        assert_eq!(session_count.load(Ordering::SeqCst), 2);
+
+        let mut h3 = make();
+        assert!(matches!(
+            h3.auth_password("admin", "secret").await.unwrap(),
+            Auth::Reject { .. }
+        ));
+        assert!(!h3.counted, "over-cap login must not be counted");
+        assert_eq!(
+            session_count.load(Ordering::SeqCst),
+            2,
+            "over-cap login must roll its increment back"
+        );
+        drop(h3); // uncounted → no change
+        assert_eq!(session_count.load(Ordering::SeqCst), 2);
+        drop(h2);
+        drop(h1);
+        assert_eq!(session_count.load(Ordering::SeqCst), 0);
+    }
 }

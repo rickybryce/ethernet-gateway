@@ -13508,9 +13508,9 @@ pub fn start_server(
                             // the cap.  If we end up over the limit, roll
                             // back the increment before rejecting.  (The
                             // SSH server shares this counter; it claims a
-                            // slot per connection in `SshServer::
-                            // new_client` and rejects over-cap clients in
-                            // `auth_password`.)
+                            // slot on a successful login in `auth_password`
+                            // — not at connect — using this same fetch_add +
+                            // rollback pattern, and releases it on disconnect.)
                             let prev = session_count.fetch_add(1, Ordering::SeqCst);
                             if prev >= max_sessions {
                                 session_count.fetch_sub(1, Ordering::SeqCst);
