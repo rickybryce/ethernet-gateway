@@ -257,14 +257,15 @@ impl russh::server::Server for SshServer {
 
     fn new_client(&mut self, peer_addr: Option<SocketAddr>) -> SshHandler {
         let cfg = config::get_config();
-        let current = self.session_count.fetch_add(1, Ordering::SeqCst);
+        // Do NOT consume a session slot here.  new_client fires for every
+        // inbound TCP connection, before any authentication, so counting at
+        // connect time let an unauthenticated peer that opens many transport
+        // handshakes and stalls exhaust `max_sessions` and lock out real
+        // users.  The slot is claimed in auth_password on a successful login
+        // (atomic fetch_add + rollback, the same pattern the telnet accept
+        // loop uses).
         if let Some(addr) = peer_addr {
-            glog!(
-                "SSH: connection from {} ({}/{})",
-                addr,
-                current + 1,
-                self.max_sessions,
-            );
+            glog!("SSH: connection from {}", addr);
         }
         SshHandler {
             shutdown: self.shutdown.clone(),
@@ -284,6 +285,7 @@ impl russh::server::Server for SshServer {
             duplex_writer: None,
             session_writers: self.session_writers.clone(),
             lockouts: self.lockouts.clone(),
+            counted: false,
         }
     }
 }
@@ -308,11 +310,19 @@ struct SshHandler {
     session_writers: telnet::SessionWriters,
     /// Shared brute-force lockout map (telnet + SSH).
     lockouts: telnet::LockoutMap,
+    /// Whether this connection claimed a session slot (set once auth
+    /// succeeds).  Gates the Drop decrement so an unauthenticated
+    /// connection that never counted can't underflow the shared counter.
+    counted: bool,
 }
 
 impl Drop for SshHandler {
     fn drop(&mut self) {
-        self.session_count.fetch_sub(1, Ordering::SeqCst);
+        // Release a slot only if we actually claimed one (auth succeeded);
+        // unauthenticated connections never incremented the counter.
+        if self.counted {
+            self.session_count.fetch_sub(1, Ordering::SeqCst);
+        }
         if let Some(addr) = self.peer_addr {
             glog!("SSH: {} disconnected", addr);
         }
@@ -339,10 +349,10 @@ impl russh::server::Handler for SshHandler {
         // credentials, and the transport is encrypted.  So the IP guard
         // would be redundant here, not missing.
         //
-        // Reject immediately if at capacity.
-        if self.session_count.load(Ordering::SeqCst) > self.max_sessions {
-            return Ok(russh::server::Auth::reject());
-        }
+        // Capacity is enforced below — atomically, and only once auth
+        // succeeds (see the fetch_add + rollback in the accept branch) — so
+        // an unauthenticated/stalled peer can't occupy a slot.
+        //
         // Reject immediately if this IP is locked out from too many
         // failures (map is shared with the telnet server so bouncing
         // protocols doesn't help an attacker).
@@ -358,9 +368,28 @@ impl russh::server::Handler for SshHandler {
         let pass_ok =
             telnet::constant_time_eq(password.as_bytes(), self.password.as_bytes());
         if user_ok && pass_ok {
+            // Valid credentials reset any failure lockout for this IP.
             if let Some(ip) = self.peer_addr {
                 telnet::clear_lockout(&self.lockouts, ip);
             }
+            // Now claim a session slot.  Atomic fetch_add + rollback (the
+            // same pattern as the telnet accept loop) enforces the cap
+            // exactly here, where a connection becomes a real authenticated
+            // session — accepting sessions 0..max_sessions-1 and rejecting
+            // the rest.
+            let prev = self.session_count.fetch_add(1, Ordering::SeqCst);
+            if prev >= self.max_sessions {
+                self.session_count.fetch_sub(1, Ordering::SeqCst);
+                if let Some(ip) = self.peer_addr {
+                    glog!(
+                        "SSH: {} authenticated but server at capacity ({}); rejecting",
+                        ip,
+                        self.max_sessions,
+                    );
+                }
+                return Ok(russh::server::Auth::reject());
+            }
+            self.counted = true;
             Ok(russh::server::Auth::Accept)
         } else {
             if let Some(ip) = self.peer_addr {

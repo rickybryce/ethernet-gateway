@@ -206,7 +206,13 @@ pub(crate) async fn xmodem_receive(
                         match tokio::time::timeout(
                             std::time::Duration::from_secs(BLOCK_BODY_TIMEOUT_SECS),
                             read_ymodem_block_zero_body(
-                                reader, mode, is_tcp, verbose, state,
+                                // YMODEM block 0 is always CRC-16; never let
+                                // the negotiation's CRC→checksum fallback flip
+                                // its validation.  If block 0 took enough
+                                // retries to cross the fallback point, reading
+                                // a CRC retransmit as a 1-byte checksum would
+                                // mismatch and NAK-loop to exhaustion.
+                                reader, TransferMode::Crc16, is_tcp, verbose, state,
                             ),
                         )
                         .await
@@ -215,6 +221,12 @@ pub(crate) async fn xmodem_receive(
                                 raw_write_byte(writer, ACK, is_tcp).await?;
                                 // Second 'C' starts the data phase.
                                 raw_write_byte(writer, CRC_REQUEST, is_tcp).await?;
+                                // YMODEM is CRC-16 throughout; pin the mode so
+                                // a negotiation fallback to checksum (if block
+                                // 0 took many retries) can't carry into the
+                                // data phase and misread CRC blocks as a 1-byte
+                                // checksum.
+                                mode = TransferMode::Crc16;
                                 ymodem_mode = true;
                                 ymodem_meta = meta;
                                 break;

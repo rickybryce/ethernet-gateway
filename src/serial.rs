@@ -768,12 +768,32 @@ fn run_console_bridge(
         match port.read(&mut buf) {
             Ok(0) => {}
             Ok(n) => {
-                if port_to_session_tx
-                    .blocking_send(buf[..n].to_vec())
-                    .is_err()
-                {
-                    // Async pump dropped its receiver — bridge is over.
-                    break;
+                // Hand the bytes to the async pump, but stay responsive to
+                // shutdown / restart while doing so.  A stalled telnet peer
+                // can fill the bounded channel; an unbounded blocking_send
+                // would park here past the loop's shutdown checks above and
+                // wedge a server shutdown or Port-B restart until the peer
+                // independently tore down.  Poll with try_send + a short
+                // sleep, bailing on shutdown/restart or when the async pump
+                // drops its receiver.
+                let mut chunk = buf[..n].to_vec();
+                loop {
+                    match port_to_session_tx.try_send(chunk) {
+                        Ok(()) => break,
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                            // Async pump dropped its receiver — bridge is over.
+                            break 'outer;
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(returned)) => {
+                            if shutdown.load(Ordering::SeqCst)
+                                || restart_flag.load(Ordering::SeqCst)
+                            {
+                                break 'outer;
+                            }
+                            chunk = returned;
+                            std::thread::sleep(SERIAL_READ_TIMEOUT);
+                        }
+                    }
                 }
             }
             Err(ref e)
@@ -2342,6 +2362,12 @@ fn dial_tcp(state: &mut ModemState, host: &str, port: u16) {
         };
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(SERIAL_READ_TIMEOUT));
+    // Bound writes too: without this, a remote host that stops reading
+    // (its receive window fills) parks online_mode_tcp's write_all forever,
+    // making the loop's shutdown/restart checks unreachable.  5 s matches
+    // the duplex path's write timeout; an expiry is treated as a dropped
+    // carrier (NO CARRIER), same as the duplex bridge.
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
 
     send_result(state, "CONNECT");
     state.mode = ModemMode::Online;

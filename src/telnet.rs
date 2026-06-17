@@ -5172,6 +5172,16 @@ impl TelnetSession {
                         skipped.push((rx.filename.clone(), "invalid filename"));
                         return;
                     }
+                    // Defense-in-depth: re-validate the subdir before joining
+                    // it.  rx.subdir is only ever set after kermit's own
+                    // is_safe_relative_subdir today, but re-checking here
+                    // closes the door on any future kermit-side bypass — the
+                    // same belt-and-suspenders rationale as the filename
+                    // re-check above.
+                    if !crate::kermit::is_safe_relative_subdir(&rx.subdir) {
+                        skipped.push((rx.filename.clone(), "unsafe subdir"));
+                        return;
+                    }
                     // Honor any `remote cwd <subdir>` the peer set —
                     // server-mode stamps `rx.subdir` with its current
                     // working subdir at the moment of receipt.  Without
@@ -13713,6 +13723,17 @@ pub fn start_kermit_server(
                                     |rx| {
                                         if TelnetSession::validate_filename(&rx.filename).is_err() {
                                             skipped.push((rx.filename.clone(), "invalid filename"));
+                                            return;
+                                        }
+                                        // Defense-in-depth: re-validate the
+                                        // subdir before joining.  This
+                                        // standalone listener bypasses auth and
+                                        // the IP allowlist by design, so
+                                        // re-checking matters even though
+                                        // rx.subdir is only set after kermit's
+                                        // own is_safe_relative_subdir today.
+                                        if !crate::kermit::is_safe_relative_subdir(&rx.subdir) {
+                                            skipped.push((rx.filename.clone(), "unsafe subdir"));
                                             return;
                                         }
                                         let dir = if rx.subdir.is_empty() {

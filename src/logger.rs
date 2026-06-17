@@ -26,17 +26,18 @@ pub fn init() {
 /// console poll for recent lines without competing with the GUI.
 pub fn log(msg: String) {
     eprintln!("{}", msg);
-    if let Some(buf) = LOG_BUFFER.get()
-        && let Ok(mut buf) = buf.lock()
-    {
+    // Recover from a poisoned lock rather than dropping the line: if a
+    // thread panicked while holding the log mutex, logging is exactly when
+    // we most want it to keep working.  Matches config.rs / gui.rs.
+    if let Some(buf) = LOG_BUFFER.get() {
+        let mut buf = buf.lock().unwrap_or_else(|e| e.into_inner());
         buf.push_back(msg.clone());
         while buf.len() > MAX_LINES {
             buf.pop_front();
         }
     }
-    if let Some(buf) = HISTORY_BUFFER.get()
-        && let Ok(mut buf) = buf.lock()
-    {
+    if let Some(buf) = HISTORY_BUFFER.get() {
+        let mut buf = buf.lock().unwrap_or_else(|e| e.into_inner());
         buf.push_back(msg);
         while buf.len() > MAX_LINES {
             buf.pop_front();
@@ -46,9 +47,8 @@ pub fn log(msg: String) {
 
 /// Drain all buffered log lines (used by the GUI console each frame).
 pub fn drain() -> Vec<String> {
-    if let Some(buf) = LOG_BUFFER.get()
-        && let Ok(mut buf) = buf.lock()
-    {
+    if let Some(buf) = LOG_BUFFER.get() {
+        let mut buf = buf.lock().unwrap_or_else(|e| e.into_inner());
         return buf.drain(..).collect();
     }
     Vec::new()
@@ -58,9 +58,8 @@ pub fn drain() -> Vec<String> {
 /// them from the history buffer.  Used by the web-config console
 /// poller (the GUI's accumulator continues to drain its own buffer).
 pub fn snapshot(max: usize) -> Vec<String> {
-    if let Some(buf) = HISTORY_BUFFER.get()
-        && let Ok(buf) = buf.lock()
-    {
+    if let Some(buf) = HISTORY_BUFFER.get() {
+        let buf = buf.lock().unwrap_or_else(|e| e.into_inner());
         let len = buf.len();
         let skip = len.saturating_sub(max);
         return buf.iter().skip(skip).cloned().collect();

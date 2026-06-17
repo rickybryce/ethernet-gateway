@@ -371,6 +371,26 @@ async fn handle_connection(
             .await?;
         }
         ("POST", "/save") => {
+            // CSRF defense-in-depth: reject a POST whose Origin/Referer
+            // doesn't match our Host (a forged cross-site submit that would
+            // otherwise ride the operator's cached Basic-auth credentials to
+            // rewrite config — including disabling auth).
+            if !same_origin_ok(&request) {
+                logger::log(
+                    "Web: rejected /save with cross-origin Origin/Referer (possible CSRF).".into(),
+                );
+                let body = b"403 Forbidden: cross-origin request rejected\n";
+                write_response(
+                    &mut stream,
+                    403,
+                    "Forbidden",
+                    "text/plain; charset=utf-8",
+                    body,
+                    false,
+                )
+                .await?;
+                return Ok(());
+            }
             // Apply on a blocking thread — update_config_value reads,
             // mutates, and rewrites egateway.conf, which would otherwise
             // park a tokio worker on filesystem I/O for every save.
@@ -519,6 +539,39 @@ async fn read_request(stream: &mut tokio::net::TcpStream) -> Result<HttpRequest,
 
 fn find_double_crlf(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n")
+}
+
+/// Extract the authority (`host[:port]`) from an `Origin` or `Referer`
+/// value: strip the `scheme://` prefix, then take everything up to the
+/// first path/query/fragment delimiter.
+fn url_authority(url: &str) -> &str {
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme)
+}
+
+/// Same-origin guard for state-changing POSTs (CSRF defense-in-depth).
+/// A browser always sends `Origin` on a cross-site POST, so an `Origin`
+/// (or, failing that, `Referer`) whose authority doesn't match our own
+/// `Host` flags a forged cross-site request — reject it.  When neither
+/// header is present (non-browser clients such as curl, which can't be a
+/// CSRF vector) the request is allowed: HTTP Basic auth still gates it,
+/// and the threat model is trusted-LAN, so this is deliberately
+/// lenient-on-absent rather than a full per-request token scheme.
+fn same_origin_ok(req: &HttpRequest) -> bool {
+    let Some(host) = req.headers.get("host") else {
+        // No Host header to compare against — nothing to verify; allow.
+        return true;
+    };
+    if let Some(origin) = req.headers.get("origin") {
+        return url_authority(origin).eq_ignore_ascii_case(host);
+    }
+    if let Some(referer) = req.headers.get("referer") {
+        return url_authority(referer).eq_ignore_ascii_case(host);
+    }
+    true
 }
 
 /// Whether the request actually presented a credential (an `Authorization`
@@ -1969,6 +2022,38 @@ mod tests {
         assert_eq!(decode_base64("YWJjZGVm"), b"abcdef");
         // Whitespace inside the input is stripped before decoding.
         assert_eq!(decode_base64("YWRt aW46 Y2hh bmdl bWU="), b"admin:changeme");
+    }
+
+    #[test]
+    fn test_same_origin_ok_csrf_guard() {
+        let req = |pairs: &[(&str, &str)]| {
+            let mut headers = HashMap::new();
+            for (k, v) in pairs {
+                headers.insert((*k).to_string(), (*v).to_string());
+            }
+            HttpRequest {
+                method: "POST".into(),
+                path: "/save".into(),
+                query: String::new(),
+                headers,
+                body: Vec::new(),
+            }
+        };
+        // Matching Origin → allowed (the legitimate same-origin form post).
+        assert!(same_origin_ok(&req(&[("host", "gw:8080"), ("origin", "http://gw:8080")])));
+        // Cross-origin Origin → rejected (the forged cross-site submit).
+        assert!(!same_origin_ok(&req(&[("host", "gw:8080"), ("origin", "http://evil.example")])));
+        // Opaque "null" origin (sandboxed iframe / data: URL) → rejected.
+        assert!(!same_origin_ok(&req(&[("host", "gw:8080"), ("origin", "null")])));
+        // No Origin but matching Referer → allowed.
+        assert!(same_origin_ok(&req(&[("host", "gw:8080"), ("referer", "http://gw:8080/")])));
+        // No Origin, cross-site Referer → rejected.
+        assert!(!same_origin_ok(&req(&[("host", "gw:8080"), ("referer", "http://evil.example/x")])));
+        // Neither header (non-browser client like curl) → allowed; Basic
+        // auth still gates, and a script can't be a CSRF vector.
+        assert!(same_origin_ok(&req(&[("host", "gw:8080")])));
+        // No Host header at all → nothing to compare against; allowed.
+        assert!(same_origin_ok(&req(&[("origin", "http://whatever")])));
     }
 
     /// Construct a minimal HttpRequest with just the headers we need
