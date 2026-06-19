@@ -8,7 +8,7 @@
 # Cargo.toml updates them automatically — the doc files below must be matched
 # by hand.
 #
-# Current version: 0.6.1
+# Current version: 0.6.2
 #
 # ── Source of truth ─────────────────────────────────────────────
 Cargo.toml              # package version (line 3 only — NOT the russh/dep "0.60" specs); Cargo.lock follows on build
@@ -40,6 +40,6 @@ CHANGELOG.md            # Pre-release, the next version's notes accumulate under
 #                         Then tag vX.Y.Z and merge dev -> master to trigger the Release workflow.
 #
 # Verify after a bump:
-#   grep -rn '0\.6\.0' web/ README.md   # expect: none
+#   grep -rn '0\.6\.1' web/ README.md   # expect: none
 #   grep -n  '0\.6\.0' usermanual.html  # expect: ONLY the two historical refs
 #   cargo build                          # confirms Cargo.toml parsed + new version compiled

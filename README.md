@@ -251,7 +251,7 @@ ships with:
 ### Verifying the checksum
 
 ```sh
-sha256sum -c ethernet-gateway-v0.6.1-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c ethernet-gateway-v0.6.2-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 ### Verifying the GPG signature (if present)
@@ -259,8 +259,8 @@ sha256sum -c ethernet-gateway-v0.6.1-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```sh
 gpg --keyserver keys.openpgp.org --recv-keys <KEY_FINGERPRINT>
 gpg --verify \
-    ethernet-gateway-v0.6.1-x86_64-unknown-linux-gnu.tar.gz.asc \
-    ethernet-gateway-v0.6.1-x86_64-unknown-linux-gnu.tar.gz
+    ethernet-gateway-v0.6.2-x86_64-unknown-linux-gnu.tar.gz.asc \
+    ethernet-gateway-v0.6.2-x86_64-unknown-linux-gnu.tar.gz
 ```
 
 ### Verifying the Sigstore signature
@@ -270,11 +270,11 @@ free):
 
 ```sh
 cosign verify-blob \
-    --certificate ethernet-gateway-v0.6.1-x86_64-unknown-linux-gnu.tar.gz.pem \
-    --signature   ethernet-gateway-v0.6.1-x86_64-unknown-linux-gnu.tar.gz.sig \
+    --certificate ethernet-gateway-v0.6.2-x86_64-unknown-linux-gnu.tar.gz.pem \
+    --signature   ethernet-gateway-v0.6.2-x86_64-unknown-linux-gnu.tar.gz.sig \
     --certificate-identity-regexp "https://github.com/rickybryce/ethernet-gateway/.*" \
     --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-    ethernet-gateway-v0.6.1-x86_64-unknown-linux-gnu.tar.gz
+    ethernet-gateway-v0.6.2-x86_64-unknown-linux-gnu.tar.gz
 ```
 
 This ties the binary to a specific GitHub Actions workflow run on
@@ -433,9 +433,10 @@ Most settings can be changed from within a telnet or SSH session using the
   control, AT-state, dialup mapping, and ring emulator.  Each port's
   settings are fully independent and persist under separate
   `serial_a_*` / `serial_b_*` keys in `egateway.conf`.
-- **S** Server Configuration -- enable/disable telnet and SSH, set ports,
-  session cap, idle timeout, and the network-safety opt-out
-  (`disable_ip_safety`)
+- **S** Server Configuration -- enable/disable the telnet, SSH, Kermit, and
+  web listeners and set each one's port, set the session cap (**C**) and idle
+  timeout (**D**, `0` disables it), toggle the network-safety opt-out
+  (`disable_ip_safety`), and restart the server.
 - **F** File Transfer -- submenu with shared transfer directory and
   per-protocol settings pages:
   - **X** XMODEM settings -- negotiation timeout, retry interval
@@ -458,7 +459,7 @@ Most settings can be changed from within a telnet or SSH session using the
     and the hang-up-on-failure toggle (drops carrier on give-up, since
     C1 has no in-band abort to free a stranded C64)
 - **O** Other Settings -- AI API key, browser homepage, weather zip, verbose
-  logging, GUI on startup
+  logging, GUI on startup, gateway debug trace
 - **R** Reset Defaults -- restore all settings to factory defaults
 
 All settings are persisted to `egateway.conf` automatically. You can also edit
@@ -487,6 +488,14 @@ enable_console = true
 
 # Security: set to true to require username/password login
 security_enabled = false
+
+# Disable the IP-safety allowlist.  When security_enabled is false, the
+# telnet listener normally rejects non-private source IPs and *.*.*.1
+# gateway addresses; set true to accept connections from any source.
+# No effect when security_enabled = true.  The GUI Security frame and the
+# telnet Server Configuration menu gate the off->on transition behind a
+# security-warning confirmation.
+disable_ip_safety = false
 
 # Credentials (only used when security_enabled = true)
 username = admin
@@ -677,6 +686,8 @@ serial_a_stored_0 =
 serial_a_stored_1 =
 serial_a_stored_2 =
 serial_a_stored_3 =
+# PETSCII<->ASCII translation on direct-TCP dials (AT+PETSCII); per port
+serial_a_petscii_translate = false
 
 # Serial Port B
 serial_b_enabled = false
@@ -699,6 +710,7 @@ serial_b_stored_0 =
 serial_b_stored_1 =
 serial_b_stored_2 =
 serial_b_stored_3 =
+serial_b_petscii_translate = false
 
 # SSH server interface (encrypted access to the gateway)
 # Set ssh_enabled = true to activate. Uses its own credentials.

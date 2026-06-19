@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-06-19
+
+### Added
+- **Session cap and idle timeout are now editable from the telnet Server
+  Configuration menu** (the `C` and `D` keys), matching the desktop GUI and the
+  web configuration page that already exposed `max_sessions` /
+  `idle_timeout_secs` — completing three-UI parity for both settings. Idle
+  timeout accepts `0` to disable the idle disconnect. The screen's detected-IP
+  hint list is now capped so the new row keeps the PETSCII menu within its
+  22-row budget even on a multi-homed host (it previously overflowed at three or
+  more private addresses).
+
 ### Security
 - **Fixed an SSRF-guard bypass for IPv6-literal URLs in the text-mode web browser.** `guard_public_url` classified IP literals with `IpAddr::parse`, but `url::Url::host_str()` returns IPv6 literals *bracketed* (e.g. `[::1]`), which fails that parse and fell through to the resolver path — allowing `http://[::1]/`, `http://[::ffff:127.0.0.1]/`, and the like to reach loopback / link-local / internal IPv6 services (initial request and every redirect hop). The guard now strips the brackets before classifying, blocking the entire internal IPv6 space. Regression test added. IPv4 literals and DNS names were already handled correctly.
 - **SSH: an unauthenticated connection no longer consumes a session slot.** `new_client` incremented the session counter for every inbound TCP connection, before authentication, so a peer that opened many transport handshakes and stalled could exhaust `max_sessions` and lock out real users. The slot is now claimed only on a successful login (atomic `fetch_add` + rollback, mirroring the telnet accept loop) and released only if it was claimed — and the cap is now exactly `max_sessions` (was off-by-one, `max_sessions + 1`).
@@ -25,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Documentation
 - **Documented ZMODEM `ZCOMMAND` (frame 0x12) as the one optional spec frame deliberately not implemented** — it is recognized but always refused (non-zero `ZCOMPL`), since arbitrary `/bin/sh -c` execution on a shared, long-lived host is an unacceptable default; use SSH for shell access. Noted in the user manual and the ZMODEM web reference.
 - Documented previously-undocumented config keys: `web_enabled`, `web_port`, `gateway_debug`, and `ssh_gateway_auth` in the README config reference, and `punter_max_bad_rounds` / `punter_hangup_on_failure` in the user manual. Added the now-handled `ZFERR` frame to the ZMODEM web reference, and corrected the SSH reference's `auth_password` lifecycle description to match the new claim-slot-on-successful-login behavior.
+- README config-reference completeness pass: the "All options" `egateway.conf` sample now lists `disable_ip_safety` and the per-port `serial_a_petscii_translate` / `serial_b_petscii_translate` keys (all three are written by the config saver), the telnet Server-Configuration menu walkthrough documents the new session-cap / idle-timeout keys, and the Other Settings list now includes the gateway debug-trace toggle.
 
 ## [0.6.1] - 2026-06-06
 
@@ -1149,7 +1162,8 @@ Otherwise the gateway will create fresh files and SSH clients will see a
 - Windows build fix for `GetDiskFreeSpaceExW`.
 - S-register persistence via `AT&W`.
 
-[Unreleased]: https://github.com/rickybryce/ethernet-gateway/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/rickybryce/ethernet-gateway/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.6.2
 [0.6.1]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.6.1
 [0.5.4]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.5.4
 [0.5.3]: https://github.com/rickybryce/ethernet-gateway/releases/tag/v0.5.3

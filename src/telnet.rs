@@ -104,6 +104,11 @@ const PETSCII_DEFAULT: u8 = PETSCII_LIGHT_GRAY;
 
 const PETSCII_WIDTH: usize = 40;
 const MAX_INPUT_LENGTH: usize = 1024;
+/// Max server addresses listed on the Server Configuration screen.  The
+/// detected-IP list is otherwise unbounded, which on a multi-homed host
+/// pushed the PETSCII menu past the 22-row C64 budget; capping it keeps
+/// the screen bounded (see `test_server_config_menu_row_count`).
+const SERVER_ADDR_DISPLAY_CAP: usize = 3;
 const MAX_AUTH_ATTEMPTS: u32 = 3;
 const LOCKOUT_DURATION: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
@@ -9685,7 +9690,6 @@ impl TelnetSession {
             self.send_line(&format!("  {}", self.yellow("SERVER CONFIGURATION")))
                 .await?;
             self.send_line(&sep).await?;
-            self.send_line("").await?;
 
             let telnet_status = if cfg.telnet_enabled {
                 self.green("ENABLED")
@@ -9752,7 +9756,7 @@ impl TelnetSession {
                 } else {
                     52 // 56 - 4 chars indent
                 };
-                for addr in &addrs {
+                for addr in addrs.iter().take(SERVER_ADDR_DISPLAY_CAP) {
                     let display = truncate_to_width(addr, max_w);
                     self.send_line(&format!("    {}", display)).await?;
                 }
@@ -9767,7 +9771,6 @@ impl TelnetSession {
                     self.send_line(&format!("  {}", self.amber(&example)))
                         .await?;
                 }
-                self.send_line("").await?;
             }
 
             self.send_line(&format!(
@@ -9798,6 +9801,12 @@ impl TelnetSession {
                 "  {}  IP safety        {}  Restart server",
                 self.cyan("I"),
                 self.cyan("R")
+            ))
+            .await?;
+            self.send_line(&format!(
+                "  {}  Session cap      {}  Idle timeout",
+                self.cyan("C"),
+                self.cyan("D")
             ))
             .await?;
             self.send_line(&format!(
@@ -9869,6 +9878,26 @@ impl TelnetSession {
                 }
                 "i" => {
                     self.disable_ip_safety_toggle(cfg.disable_ip_safety).await?;
+                }
+                "c" => {
+                    self.config_set_count(
+                        "session cap",
+                        "max_sessions",
+                        cfg.max_sessions as u64,
+                        1,
+                        "New session cap (1 or more)",
+                    )
+                    .await?;
+                }
+                "d" => {
+                    self.config_set_count(
+                        "idle timeout",
+                        "idle_timeout_secs",
+                        cfg.idle_timeout_secs,
+                        0,
+                        "New idle timeout in seconds (0 = off)",
+                    )
+                    .await?;
                 }
                 "r" => {
                     self.config_restart_server().await?;
@@ -10405,6 +10434,56 @@ impl TelnetSession {
         Ok(())
     }
 
+    /// Prompt for an integer server setting (session cap / idle timeout)
+    /// and persist it.  Shows the current value, reads a line, and accepts
+    /// values `>= min` — `min = 1` floors the session cap, `min = 0` lets
+    /// the idle timeout be disabled (and renders the current `0` as
+    /// "0 (disabled)").  Non-numeric or out-of-range input is rejected.
+    /// Like `config_set_port`, the change needs a server restart, so it
+    /// ends on the shared restart notice.
+    async fn config_set_count(
+        &mut self,
+        label: &str,
+        key: &str,
+        current: u64,
+        min: u64,
+        prompt: &str,
+    ) -> Result<(), std::io::Error> {
+        self.send_line("").await?;
+        let shown = if current == 0 && min == 0 {
+            "0 (disabled)".to_string()
+        } else {
+            current.to_string()
+        };
+        self.send_line(&format!("  Current {}: {}", label, self.amber(&shown)))
+            .await?;
+        self.send(&format!("  {}: ", prompt)).await?;
+        self.flush().await?;
+
+        let input = match self.get_line_input().await? {
+            Some(s) if !s.is_empty() => s,
+            _ => return Ok(()),
+        };
+
+        if let Ok(v) = input.parse::<u64>() {
+            if v >= min {
+                let k = key.to_string();
+                let val = v.to_string();
+                tokio::task::spawn_blocking(move || {
+                    config::update_config_value(&k, &val);
+                })
+                .await
+                .ok();
+                self.config_restart_notice().await?;
+            } else {
+                self.show_error("Value out of range.").await?;
+            }
+        } else {
+            self.show_error("Enter a whole number.").await?;
+        }
+        Ok(())
+    }
+
     async fn config_restart_notice(&mut self) -> Result<(), std::io::Error> {
         self.send_line("").await?;
         self.send_line(&format!(
@@ -10534,6 +10613,11 @@ impl TelnetSession {
                 "     IP (no private-IP filter).",
                 "     Effective immediately.",
                 "  R  Restart the server",
+                "  C  Set the max concurrent",
+                "     sessions (1 or more)",
+                "  D  Set the idle-disconnect",
+                "     timeout in seconds; 0 keeps",
+                "     sessions open indefinitely",
                 "",
                 "  Most changes are saved at once",
                 "  but require a server restart;",
@@ -10562,6 +10646,10 @@ impl TelnetSession {
                 "     source IP is accepted. Takes effect on the",
                 "     next inbound connection (no restart needed).",
                 "  R  Restart the server now",
+                "  C  Set the maximum number of concurrent sessions",
+                "     (1 or more)",
+                "  D  Set the idle-disconnect timeout in seconds; 0",
+                "     keeps idle sessions connected indefinitely",
                 "",
                 "  Most changes are saved to the config file",
                 "  immediately but require a server restart to",
@@ -14946,14 +15034,17 @@ mod tests {
             "  B  Set Web port",
             "  I  IP safety",
             "  R  Restart server",
+            "  C  Session cap",
+            "  D  Idle timeout",
             // The two-key rows the server menu actually renders.
             // We test the full formatted strings (key letter included)
-            // because the new W/B row is the tightest fit at 37 chars.
+            // because the W/B and C/D rows are the tightest fit at 37 chars.
             "  T  Toggle telnet    P  Set telnet port",
             "  S  Toggle SSH       O  Set SSH port",
             "  K  Toggle Kermit    J  Set Kermit port",
             "  W  Toggle Web       B  Set Web port",
             "  I  IP safety        R  Restart server",
+            "  C  Session cap      D  Idle timeout",
             // Dialup mapping menu
             "  A  Add mapping",
             "  D  Delete mapping",
@@ -15218,22 +15309,20 @@ mod tests {
         // block was removed — it's shown under Serial Configuration (M).
         let submenu_rows = 3 + 1 + 7 + 1 + 1 + 1; // 14
         assert!(submenu_rows <= 22, "config submenu is {} rows, exceeds 22", submenu_rows);
-        // Server configuration: header(3) + blank + 5 status (telnet,
-        // ssh, kermit, web, ip-safety) + blank + 5 items (T/P, S/O,
-        // K/J, W/B, I/R) + Q/H + prompt = 17.  The blank line between
-        // the menu and the Q/H footer was dropped when the web row
-        // was added so the screen still fits PETSCII's 22-row cap
-        // when a typical host has 1–3 server addresses.
-        let static_rows = 3 + 1 + 5 + 1 + 5 + 1 + 1; // 17
+        // Server configuration: header(3) + 5 status (telnet, ssh,
+        // kermit, web, ip-safety) + blank + 6 items (T/P, S/O, K/J,
+        // W/B, I/R, C/D) + Q/H + prompt = 17.  The leading blank after
+        // the header was dropped to make room for the new C/D
+        // (session-cap / idle-timeout) row without growing the screen.
+        let static_rows = 3 + 5 + 1 + 6 + 1 + 1; // 17
         assert!(static_rows <= 22, "server config menu static is {} rows, exceeds 22", static_rows);
-        // With telnet-enabled address block: +1 label + N addrs + 1
-        // example + 1 trailing blank.  For N=3 that's 6 extra rows →
-        // 23 total, one over the PETSCII cap, so the address list
-        // scrolls on hardware-PETSCII terminals with 3+ private IPs.
-        // Modern ANSI/ASCII clients (24+ rows) are unaffected.  N=2
-        // remains within the cap on every terminal type.
-        let with_addrs = static_rows + 1 + 2 + 1 + 1; // 22 (N=2, telnet on)
-        assert!(with_addrs <= 22, "server config menu with 2 addrs is {} rows, exceeds 22", with_addrs);
+        // Address block (telnet on): label(1) + N addrs + ATD example(1),
+        // with N capped at SERVER_ADDR_DISPLAY_CAP and the old trailing
+        // blank removed.  Worst case (N = cap) is exactly 22, so the menu
+        // now fits PETSCII's 22-row budget even on a multi-homed host —
+        // it previously hit 23 (and scrolled) at 3+ private IPs.
+        let with_addrs = static_rows + 1 + SERVER_ADDR_DISPLAY_CAP + 1; // 22
+        assert!(with_addrs <= 22, "server config menu with capped addrs is {} rows, exceeds 22", with_addrs);
     }
 
     /// Configuration help screen (ANSI): header(3) + blank + 15 content lines +
