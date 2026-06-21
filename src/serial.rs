@@ -2329,22 +2329,39 @@ fn dial_tcp(state: &mut ModemState, host: &str, port: u16) {
     use std::net::ToSocketAddrs;
 
     let addr_str = format!("{}:{}", host, port);
-    let socket_addr = match addr_str.to_socket_addrs() {
-        Ok(mut addrs) => match addrs.next() {
-            Some(a) => a,
-            None => {
-                send_result(state, "NO CARRIER");
-                return;
-            }
-        },
-        Err(_) => {
+    let label = state.port_id.label();
+
+    // Resolve ALL candidate addresses, not just the first.  A name can
+    // resolve to several A/AAAA records (or both an IPv4 and an IPv6
+    // address); connecting to only the first strands the dial whenever
+    // that one address is dead or unreachable from this host — e.g. an
+    // IPv6 record on a network with no working IPv6 route — even though
+    // a perfectly good address sits later in the list.  The shell
+    // `telnet`/`nc` clients try every address, which is why they
+    // "just work" where this dial used to fail.
+    let addrs: Vec<std::net::SocketAddr> = match addr_str.to_socket_addrs() {
+        Ok(it) => it.collect(),
+        Err(e) => {
+            glog!(
+                "Serial modem (Port {}): dial {} — DNS resolution failed: {}",
+                label, addr_str, e
+            );
             send_result(state, "NO CARRIER");
             return;
         }
     };
+    if addrs.is_empty() {
+        glog!(
+            "Serial modem (Port {}): dial {} — name resolved to no addresses",
+            label, addr_str
+        );
+        send_result(state, "NO CARRIER");
+        return;
+    }
 
-    // S7 controls the carrier-wait timeout.  Capped at MAX_CONNECT_TIMEOUT
-    // so a mistyped S7 can't tie up the serial thread for minutes.
+    // S7 controls the carrier-wait timeout, applied per address attempt.
+    // Capped at MAX_CONNECT_TIMEOUT so a mistyped S7 can't tie up the
+    // serial thread for minutes.
     let mut s7_timeout = Duration::from_secs(state.s_regs[7] as u64);
     if s7_timeout.is_zero() {
         s7_timeout = Duration::from_secs(1);
@@ -2352,14 +2369,47 @@ fn dial_tcp(state: &mut ModemState, host: &str, port: u16) {
     if s7_timeout > MAX_CONNECT_TIMEOUT {
         s7_timeout = MAX_CONNECT_TIMEOUT;
     }
-    let mut stream =
-        match std::net::TcpStream::connect_timeout(&socket_addr, s7_timeout) {
-            Ok(s) => s,
-            Err(_) => {
-                send_result(state, "NO CARRIER");
-                return;
+
+    // Try each resolved address in turn; the first to connect wins.
+    let mut connected = None;
+    let mut last_err: Option<std::io::Error> = None;
+    for addr in &addrs {
+        match std::net::TcpStream::connect_timeout(addr, s7_timeout) {
+            Ok(s) => {
+                if escape_trace_enabled() {
+                    glog!(
+                        "Serial modem (Port {}): dial {} connected via {}",
+                        label, addr_str, addr
+                    );
+                }
+                connected = Some(s);
+                break;
             }
-        };
+            Err(e) => {
+                if escape_trace_enabled() {
+                    glog!(
+                        "Serial modem (Port {}): dial {} — connect to {} failed: {}",
+                        label, addr_str, addr, e
+                    );
+                }
+                last_err = Some(e);
+            }
+        }
+    }
+    let mut stream = match connected {
+        Some(s) => s,
+        None => {
+            let detail = last_err
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "no addresses reachable".to_string());
+            glog!(
+                "Serial modem (Port {}): dial {} failed: {}",
+                label, addr_str, detail
+            );
+            send_result(state, "NO CARRIER");
+            return;
+        }
+    };
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(SERIAL_READ_TIMEOUT));
     // Bound writes too: without this, a remote host that stops reading
