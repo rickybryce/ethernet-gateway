@@ -3982,7 +3982,7 @@ pub(crate) async fn kermit_receive_with_init(
                     && let Some(last) = received.last_mut()
                 {
                     let path = std::path::Path::new(&cfg.transfer_dir).join(&last.filename);
-                    match std::fs::read(&path) {
+                    match tokio::fs::read(&path).await {
                         Ok(mut bytes) => {
                             // If the file grew between F-packet stat and
                             // now, truncate to the advertised offset so
@@ -4863,7 +4863,13 @@ pub(crate) async fn kermit_server_with_outcome(
                         // through I-G-S sequence" — there's no Y in
                         // between G and S for long replies.
                         let dir_path = effective_transfer_path(&cfg, &subdir);
-                        let listing = format_dir_listing(&dir_path);
+                        // Directory enumeration is blocking (std::fs::read_dir
+                        // + per-entry stat); offload it so a large transfer
+                        // dir can't stall a runtime worker.
+                        let listing =
+                            tokio::task::spawn_blocking(move || format_dir_listing(&dir_path))
+                                .await
+                                .unwrap_or_default();
                         send_g_inverse_file_response(
                             reader,
                             writer,
@@ -4963,7 +4969,7 @@ pub(crate) async fn kermit_server_with_outcome(
                             continue;
                         }
                         let path = effective_transfer_path(&cfg, &subdir).join(&fname);
-                        match std::fs::remove_file(&path) {
+                        match tokio::fs::remove_file(&path).await {
                             Ok(()) => {
                                 send_ack(writer, pkt.seq, b'1', 0, 0, CR, is_tcp).await?;
                                 if verbose {
@@ -5039,7 +5045,7 @@ pub(crate) async fn kermit_server_with_outcome(
                             }
                             continue;
                         }
-                        match std::fs::rename(&old_path, &new_path) {
+                        match tokio::fs::rename(&old_path, &new_path).await {
                             Ok(()) => {
                                 send_ack(writer, pkt.seq, b'1', 0, 0, CR, is_tcp).await?;
                                 if verbose {
@@ -5092,7 +5098,7 @@ pub(crate) async fn kermit_server_with_outcome(
                             continue;
                         }
                         let path = effective_transfer_path(&cfg, &subdir).join(&fname);
-                        let bytes = match std::fs::read(&path) {
+                        let bytes = match tokio::fs::read(&path).await {
                             Ok(b) => b,
                             Err(e) => {
                                 let msg = if e.kind() == std::io::ErrorKind::NotFound {
@@ -5154,7 +5160,7 @@ pub(crate) async fn kermit_server_with_outcome(
                             continue;
                         }
                         let path = effective_transfer_path(&cfg, &subdir).join(&dname);
-                        match std::fs::create_dir(&path) {
+                        match tokio::fs::create_dir(&path).await {
                             Ok(()) => {
                                 send_ack(writer, pkt.seq, b'1', 0, 0, CR, is_tcp).await?;
                                 if verbose {
@@ -5205,7 +5211,7 @@ pub(crate) async fn kermit_server_with_outcome(
                             continue;
                         }
                         let path = effective_transfer_path(&cfg, &subdir).join(&dname);
-                        match std::fs::remove_dir(&path) {
+                        match tokio::fs::remove_dir(&path).await {
                             Ok(()) => {
                                 send_ack(writer, pkt.seq, b'1', 0, 0, CR, is_tcp).await?;
                                 if verbose {
@@ -5349,7 +5355,7 @@ pub(crate) async fn kermit_server_with_outcome(
                     continue;
                 }
                 let path = effective_transfer_path(&cfg, &subdir).join(&fname);
-                let bytes = match std::fs::read(&path) {
+                let bytes = match tokio::fs::read(&path).await {
                     Ok(b) => b,
                     Err(_) => {
                         send_error(
@@ -5388,7 +5394,8 @@ pub(crate) async fn kermit_server_with_outcome(
                     // Stay idle for the next command per spec.
                     continue;
                 }
-                let modtime = std::fs::metadata(&path)
+                let modtime = tokio::fs::metadata(&path)
+                    .await
                     .ok()
                     .and_then(|m| m.modified().ok())
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())

@@ -101,6 +101,14 @@ const TESC8: u8 = 0x80;         // sender wants the 8th-bit duals escaped too
 use crate::tnio::MAX_FILE_SIZE;
 const SUBPACKET_DATA_SIZE: usize = 1024;
 const MAX_SUBPACKET_DATA: usize = 8192;
+
+/// Cap on consecutive zero-length data subpackets tolerated during the data
+/// phase.  A conformant sender always makes forward progress; a peer that
+/// streams CRC-valid but empty `ZCRCG` subpackets would otherwise spin
+/// forever — no bytes are appended (so `MAX_FILE_SIZE` never trips) and each
+/// "good" subpacket resets the error budget.  64 is far beyond any
+/// legitimate run of empty frame boundaries.
+const MAX_EMPTY_SUBPACKETS: u32 = 64;
 /// Free-space figure (bytes) reported in answer to a ZFREECNT query.
 /// Uploads are buffered in memory and not quota-checked here, so we
 /// advertise a generous ~2 GiB rather than a real disk-free value; a
@@ -1290,6 +1298,10 @@ where
     // per-subpacket logs the same way `xmodem.rs` throttles block
     // logs (first few + on any error).
     let mut subpackets_seen: u32 = 0;
+    // Guard against an empty-subpacket tar-pit: a peer streaming CRC-valid
+    // zero-data subpackets makes no forward progress yet resets `errors`
+    // each round.  Reset on any subpacket that carries data.
+    let mut empty_subpackets: u32 = 0;
 
     // Ask for data starting at offset 0.
     send_zrpos(writer, is_tcp, expected_pos, verbose).await?;
@@ -1374,6 +1386,20 @@ where
                     // budget so a long transfer over a noisy link isn't capped
                     // by cumulative (vs. consecutive) errors.
                     errors = 0;
+                    // ...but a "good" subpacket that carries no data is not
+                    // real progress; cap a run of them so a peer can't pin us
+                    // in this loop indefinitely (see MAX_EMPTY_SUBPACKETS).
+                    if sub.data.is_empty() {
+                        empty_subpackets += 1;
+                        if empty_subpackets > MAX_EMPTY_SUBPACKETS {
+                            send_cancel(writer, is_tcp).await.ok();
+                            return Err(
+                                "ZMODEM: too many empty subpackets (no forward progress)".into(),
+                            );
+                        }
+                    } else {
+                        empty_subpackets = 0;
+                    }
                     if verbose && subpackets_seen <= 3 {
                         glog!(
                             "ZMODEM recv: subpacket #{} OK ({} bytes, marker=0x{:02X}, pos={})",

@@ -650,13 +650,17 @@ pub fn get_gateway_debug() -> bool {
 pub fn load_or_create_config() -> Config {
     let cfg = if Path::new(CONFIG_FILE).exists() {
         let cfg = read_config_file(CONFIG_FILE);
-        // Rewrite to ensure all keys are present
-        write_config_file(CONFIG_FILE, &cfg);
+        // Rewrite to ensure all keys are present.
+        if let Err(e) = write_config_file(CONFIG_FILE, &cfg) {
+            glog!("Warning: {}", e);
+        }
         cfg
     } else {
         let cfg = Config::default();
-        write_config_file(CONFIG_FILE, &cfg);
-        glog!("Created default configuration: {}", CONFIG_FILE);
+        match write_config_file(CONFIG_FILE, &cfg) {
+            Ok(()) => glog!("Created default configuration: {}", CONFIG_FILE),
+            Err(e) => glog!("Warning: {}", e),
+        }
         cfg
     };
 
@@ -1031,6 +1035,7 @@ fn read_serial_port_config(
             .filter(|&v: &u8| matches!(v, 5..=8))
             .unwrap_or(DEFAULT_SERIAL_DATABITS),
         parity: lookup("parity", "serial_parity")
+            .map(|v| v.trim().to_ascii_lowercase())
             .filter(|v| matches!(v.as_str(), "none" | "odd" | "even"))
             .unwrap_or_else(|| DEFAULT_SERIAL_PARITY.into()),
         stopbits: lookup("stopbits", "serial_stopbits")
@@ -1038,6 +1043,7 @@ fn read_serial_port_config(
             .filter(|&v: &u8| v == 1 || v == 2)
             .unwrap_or(DEFAULT_SERIAL_STOPBITS),
         flowcontrol: lookup("flowcontrol", "serial_flowcontrol")
+            .map(|v| v.trim().to_ascii_lowercase())
             .filter(|v| matches!(v.as_str(), "none" | "hardware" | "software"))
             .unwrap_or_else(|| DEFAULT_SERIAL_FLOWCONTROL.into()),
         echo: lookup("echo", "serial_echo")
@@ -1091,10 +1097,21 @@ fn sanitize_value(s: &str) -> String {
 /// `update_config_values` (from a session-side toggle, e.g. the Telnet
 /// Gateway's raw-mode toggle) can't race and clobber our write with its
 /// own re-read-then-write.
-pub fn save_config(cfg: &Config) {
+/// Persist `cfg` to disk and refresh the in-memory singleton.
+///
+/// Returns `Err` with a human-readable reason if the file write failed, so
+/// an explicit "Save" action can tell the user the change was not persisted
+/// instead of silently reporting success.  The in-memory cache is updated
+/// regardless so the running process reflects the requested settings even
+/// when persistence fails.
+pub fn save_config(cfg: &Config) -> Result<(), String> {
     let mut guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
-    write_config_file(CONFIG_FILE, cfg);
+    let result = write_config_file(CONFIG_FILE, cfg);
+    if let Err(ref e) = result {
+        glog!("Warning: {}", e);
+    }
     *guard = Some(cfg.clone());
+    result
 }
 
 /// Write `key = value` to `out`, applying `Display` formatting to the
@@ -1155,7 +1172,7 @@ fn write_serial_port_section(
 /// Replacing the original 60-positional-arg `format!()` template
 /// closes the misalignment footgun where missing one slot mid-template
 /// would silently shift every subsequent field onto the wrong line.
-fn write_config_file(path: &str, cfg: &Config) {
+fn write_config_file(path: &str, cfg: &Config) -> Result<(), String> {
     let mut content = String::with_capacity(8192);
 
     content.push_str("\
@@ -1509,9 +1526,10 @@ fn write_config_file(path: &str, cfg: &Config) {
         .and_then(|()| std::fs::rename(&tmp, path));
 
     if let Err(e) = write_result {
-        glog!("Warning: could not write {}: {}", path, e);
         let _ = std::fs::remove_file(&tmp);
+        return Err(format!("could not write {}: {}", path, e));
     }
+    Ok(())
 }
 
 /// Update a single key in the config file and the in-memory singleton.
@@ -1534,7 +1552,12 @@ pub fn update_config_values(pairs: &[(&str, &str)]) {
     for &(key, value) in pairs {
         apply_config_key(&mut cfg, key, value);
     }
-    write_config_file(CONFIG_FILE, &cfg);
+    // High-frequency runtime persistence (setting toggles, AT&W, etc.):
+    // best-effort with a logged warning rather than propagating to every
+    // call site.  The explicit save_config path returns the error instead.
+    if let Err(e) = write_config_file(CONFIG_FILE, &cfg) {
+        glog!("Warning: {}", e);
+    }
     *guard = Some(cfg);
 }
 
@@ -1564,8 +1587,9 @@ fn apply_serial_port_key(port: &mut SerialPortConfig, suffix: &str, value: &str)
             }
         }
         "parity" => {
-            if matches!(value, "none" | "odd" | "even") {
-                port.parity = value.to_string();
+            let lower = value.trim().to_ascii_lowercase();
+            if matches!(lower.as_str(), "none" | "odd" | "even") {
+                port.parity = lower;
             }
         }
         "stopbits" => {
@@ -1574,8 +1598,9 @@ fn apply_serial_port_key(port: &mut SerialPortConfig, suffix: &str, value: &str)
             }
         }
         "flowcontrol" => {
-            if matches!(value, "none" | "hardware" | "software") {
-                port.flowcontrol = value.to_string();
+            let lower = value.trim().to_ascii_lowercase();
+            if matches!(lower.as_str(), "none" | "hardware" | "software") {
+                port.flowcontrol = lower;
             }
         }
         "echo" => port.echo = value.eq_ignore_ascii_case("true"),
@@ -2305,7 +2330,7 @@ mod tests {
             ssh_port: 2222,
             ssh_gateway_auth: "password".into(),
         };
-        write_config_file(path.to_str().unwrap(), &original);
+        write_config_file(path.to_str().unwrap(), &original).unwrap();
         let loaded = read_config_file(path.to_str().unwrap());
 
         assert_eq!(loaded.telnet_enabled, original.telnet_enabled);
@@ -2446,7 +2471,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("presence.conf");
 
-        write_config_file(path.to_str().unwrap(), &Config::default());
+        write_config_file(path.to_str().unwrap(), &Config::default()).unwrap();
         let written = std::fs::read_to_string(&path).unwrap();
 
         // Every key the reader's `apply_config_key` matches must
@@ -2687,6 +2712,54 @@ mod tests {
         assert_eq!(cfg.serial_a.dcd_mode, 1, "dcd_mode > 1 must be rejected");
     }
 
+    /// parity/flowcontrol are normalized (trim + lowercase) on the apply
+    /// path, consistent with `mode`, while genuinely invalid values are
+    /// still rejected.
+    #[test]
+    fn test_apply_serial_parity_flowcontrol_normalized() {
+        let mut cfg = Config::default();
+        apply_config_key(&mut cfg, "serial_a_parity", "  Even ");
+        assert_eq!(cfg.serial_a.parity, "even");
+        apply_config_key(&mut cfg, "serial_a_flowcontrol", "HARDWARE");
+        assert_eq!(cfg.serial_a.flowcontrol, "hardware");
+        // Invalid value is still rejected (prior value kept).
+        apply_config_key(&mut cfg, "serial_a_parity", "bogus");
+        assert_eq!(cfg.serial_a.parity, "even");
+    }
+
+    /// The file reader normalizes parity/flowcontrol case the same way,
+    /// so a hand-edited `serial_a_parity = Even` is honored rather than
+    /// silently reverting to the default.
+    #[test]
+    fn test_read_serial_parity_flowcontrol_normalized() {
+        let dir = std::env::temp_dir().join("egw_test_parity_norm");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test.conf");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "serial_a_parity = Even").unwrap();
+        writeln!(f, "serial_a_flowcontrol = Hardware").unwrap();
+        drop(f);
+
+        let cfg = read_config_file(path.to_str().unwrap());
+        assert_eq!(cfg.serial_a.parity, "even");
+        assert_eq!(cfg.serial_a.flowcontrol, "hardware");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A failed file write is reported (not silently swallowed), so an
+    /// explicit Save can tell the user persistence did not happen.
+    #[test]
+    fn test_write_config_file_reports_failure() {
+        let cfg = Config::default();
+        // Parent directory does not exist → the atomic tmp open/rename fails.
+        let bad = "/nonexistent-egw-dir-xyz/egateway.conf";
+        assert!(
+            write_config_file(bad, &cfg).is_err(),
+            "writing under a non-existent directory must return Err"
+        );
+    }
+
     /// Reading a config file with `serial_a_mode = console` (case-
     /// insensitive, with surrounding whitespace) loads to the
     /// canonical lowercase value.  Reading without the key falls back
@@ -2753,7 +2826,7 @@ mod tests {
                 },
                 ..Config::default()
             };
-            write_config_file(path.to_str().unwrap(), &cfg);
+            write_config_file(path.to_str().unwrap(), &cfg).unwrap();
             let loaded = read_config_file(path.to_str().unwrap());
             assert_eq!(loaded.serial_a.mode, value);
             assert_eq!(loaded.serial_b.mode, value);
@@ -2862,7 +2935,7 @@ mod tests {
         let dir = std::env::temp_dir().join("xmodem_test_ssh_drop_legacy");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("written.conf");
-        write_config_file(path.to_str().unwrap(), &Config::default());
+        write_config_file(path.to_str().unwrap(), &Config::default()).unwrap();
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(
             !written.contains("ssh_username"),
@@ -3495,7 +3568,7 @@ mod tests {
             },
             ..Config::default()
         };
-        write_config_file(path.to_str().unwrap(), &original);
+        write_config_file(path.to_str().unwrap(), &original).unwrap();
         let loaded = read_config_file(path.to_str().unwrap());
 
         assert_eq!(loaded.serial_b, original.serial_b);
@@ -3624,7 +3697,7 @@ mod tests {
             },
             ..Config::default()
         };
-        write_config_file(path.to_str().unwrap(), &original);
+        write_config_file(path.to_str().unwrap(), &original).unwrap();
 
         // Simulate Port A's AT&W changing only Port A's saved fields.
         // We bypass the global singleton by mutating a fresh in-memory
@@ -3642,7 +3715,7 @@ mod tests {
         ] {
             apply_config_key(&mut after_a_atw, &serial_key(SerialPortId::A, suffix), value);
         }
-        write_config_file(path.to_str().unwrap(), &after_a_atw);
+        write_config_file(path.to_str().unwrap(), &after_a_atw).unwrap();
 
         let reloaded = read_config_file(path.to_str().unwrap());
 

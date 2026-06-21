@@ -61,6 +61,15 @@ const LINE_ERASE_BYTE: u8 = 0x15;
 /// `IAC SE` so it doesn't desync.
 const MAX_SB_BODY_BYTES: usize = 8192;
 
+/// Maximum time to wait for the next byte *once a subnegotiation has begun*.
+/// A peer that sends `IAC SB` and then dribbles bytes slowly (or never sends
+/// the terminating `IAC SE`) would otherwise pin the reader task
+/// indefinitely — a slowloris-style stall.  Real subnegotiations arrive in a
+/// single burst, so 15s is a generous ceiling.  This bounds only the in-SB
+/// reads; the outer wait for the next command/data byte stays unbounded so a
+/// legitimately idle interactive session is never disconnected here.
+const SB_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 // Telnet options
 const OPT_ECHO: u8 = 0x01;
 const OPT_SGA: u8 = 0x03;
@@ -472,12 +481,21 @@ async fn read_byte_iac_filtered(
                                 return Ok(Some(0xFF));
                             }
                             if cmd == 0xFA {
-                                // Subnegotiation — consume until IAC SE
+                                // Subnegotiation — consume until IAC SE.  Bound
+                                // each in-SB read so a peer can't pin us by
+                                // dribbling an SB that never terminates; a
+                                // stalled SB is treated as a closed connection.
                                 let mut in_iac = false;
                                 loop {
-                                    match reader.read(&mut buf).await {
-                                        Ok(0) => return Ok(None),
-                                        Ok(_) => {
+                                    match tokio::time::timeout(
+                                        SB_DRAIN_TIMEOUT,
+                                        reader.read(&mut buf),
+                                    )
+                                    .await
+                                    {
+                                        Err(_) => return Ok(None),
+                                        Ok(Ok(0)) => return Ok(None),
+                                        Ok(Ok(_)) => {
                                             if in_iac {
                                                 if buf[0] == 0xF0 {
                                                     break;
@@ -487,7 +505,7 @@ async fn read_byte_iac_filtered(
                                                 in_iac = true;
                                             }
                                         }
-                                        Err(e) => return Err(e),
+                                        Ok(Err(e)) => return Err(e),
                                     }
                                 }
                                 continue;
@@ -569,10 +587,13 @@ async fn read_gateway_event(
                 let mut body: Vec<u8> = Vec::new();
                 let mut in_iac = false;
                 loop {
-                    match reader.read(&mut buf).await {
-                        Ok(0) => return Ok(GatewayInboundEvent::Eof),
-                        Ok(_) => {}
-                        Err(e) => return Err(e),
+                    // Bound in-SB reads (slowloris guard); a stalled
+                    // subnegotiation is treated as a closed connection.
+                    match tokio::time::timeout(SB_DRAIN_TIMEOUT, reader.read(&mut buf)).await {
+                        Err(_) => return Ok(GatewayInboundEvent::Eof),
+                        Ok(Ok(0)) => return Ok(GatewayInboundEvent::Eof),
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => return Err(e),
                     }
                     let b = buf[0];
                     if in_iac {
@@ -10566,17 +10587,26 @@ impl TelnetSession {
 
         if input == "y" {
             let defaults = config::Config::default();
-            tokio::task::spawn_blocking(move || {
-                config::save_config(&defaults);
-            })
-            .await
-            .ok();
+            let saved = tokio::task::spawn_blocking(move || config::save_config(&defaults))
+                .await
+                .unwrap_or_else(|e| Err(format!("save task panicked: {e}")));
             self.send_line("").await?;
-            self.send_line(&format!(
-                "  {}",
-                self.green("All settings reset to defaults.")
-            ))
-            .await?;
+            match saved {
+                Ok(()) => {
+                    self.send_line(&format!(
+                        "  {}",
+                        self.green("All settings reset to defaults.")
+                    ))
+                    .await?;
+                }
+                Err(e) => {
+                    self.send_line(&format!(
+                        "  {}",
+                        self.amber(&format!("Reset applied in memory but NOT saved: {}", e))
+                    ))
+                    .await?;
+                }
+            }
             self.config_restart_notice().await?;
         }
         Ok(())
@@ -18778,5 +18808,45 @@ mod tests {
         let actual = std::fs::metadata(&tmp).unwrap().permissions().mode() & 0o7777;
         assert_eq!(actual, 0o755, "setuid bit must be stripped, perms preserved");
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    /// A subnegotiation that begins (`IAC SB <opt>`) but then stalls — the
+    /// peer sends no further bytes and never the terminating `IAC SE` — must
+    /// not pin the reader.  The in-SB read is bounded by `SB_DRAIN_TIMEOUT`,
+    /// after which the event reader reports `Eof` instead of blocking forever
+    /// (the slowloris guard).
+    #[tokio::test(start_paused = true)]
+    async fn test_read_gateway_event_sb_stall_times_out() {
+        use std::pin::Pin;
+        use std::task::{Context, Poll};
+
+        // Yields its queued bytes, then stalls (Poll::Pending) forever —
+        // modelling an open-but-silent connection (not EOF).
+        struct StallReader {
+            data: std::io::Cursor<Vec<u8>>,
+        }
+        impl tokio::io::AsyncRead for StallReader {
+            fn poll_read(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                buf: &mut tokio::io::ReadBuf<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                if self.data.position() < self.data.get_ref().len() as u64 {
+                    Pin::new(&mut self.data).poll_read(cx, buf)
+                } else {
+                    Poll::Pending
+                }
+            }
+        }
+
+        // IAC SB NAWS, then silence — the body read stalls.
+        let mut reader = StallReader {
+            data: std::io::Cursor::new(vec![IAC, SB, OPT_NAWS]),
+        };
+        // Time is paused; tokio auto-advances to the SB_DRAIN_TIMEOUT deadline
+        // once the stalled read is the only pending work, so this resolves
+        // promptly instead of waiting the real 15s.
+        let ev = read_gateway_event(&mut reader).await.unwrap();
+        assert_eq!(ev, GatewayInboundEvent::Eof);
     }
 }

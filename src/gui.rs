@@ -1289,26 +1289,33 @@ impl App {
     /// the sync snapshot, and clear the dirty flag.  Shared prefix for
     /// every Save action; callers follow it with a log line and any
     /// restart signals they need.
-    fn persist_config(&mut self) {
+    fn persist_config(&mut self) -> Result<(), String> {
         self.sync_numeric_fields();
-        config::save_config(&self.cfg);
+        let result = config::save_config(&self.cfg);
         self.last_synced_cfg = self.cfg.clone();
         self.dirty = false;
+        result
     }
 
     /// Persist config; leaves the server running (no restart).  Used by
     /// the popup Save buttons and the per-frame Save buttons on frames
     /// whose fields are all runtime-safe.
     fn save_config_now(&mut self) {
-        self.persist_config();
-        logger::log("Configuration saved.".into());
+        match self.persist_config() {
+            Ok(()) => logger::log("Configuration saved.".into()),
+            Err(e) => logger::log(format!("Configuration NOT saved: {}", e)),
+        }
     }
 
     /// Persist config and trigger a full server restart.  Used by the
     /// Server frame's Save and Restart button.
     fn save_and_restart_all(&mut self) {
-        self.persist_config();
-        logger::log("Configuration saved — restarting server...".into());
+        match self.persist_config() {
+            Ok(()) => logger::log("Configuration saved — restarting server...".into()),
+            Err(e) => {
+                logger::log(format!("Configuration NOT saved: {} — restarting anyway...", e))
+            }
+        }
         // Set restart BEFORE shutdown so the main loop sees the intent to
         // restart when it checks after join().
         self.restart.store(true, Ordering::SeqCst);
@@ -1322,9 +1329,15 @@ impl App {
     /// cheaper than diffing config slices and avoids the bug where a
     /// saved change is silently ignored.
     fn save_and_restart_serial(&mut self) {
-        self.persist_config();
+        let saved = self.persist_config();
         crate::serial::restart_all_serial();
-        logger::log("Configuration saved — serial ports reconfigured.".into());
+        match saved {
+            Ok(()) => logger::log("Configuration saved — serial ports reconfigured.".into()),
+            Err(e) => logger::log(format!(
+                "Configuration NOT saved ({}) — serial ports reconfigured.",
+                e
+            )),
+        }
     }
 
     /// Render the console panel as a single read-only multiline `TextEdit`.

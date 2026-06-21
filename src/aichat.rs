@@ -74,10 +74,12 @@ pub(crate) fn sanitize_for_terminal(s: &str) -> String {
     s.chars()
         .filter(|&c| {
             let b = c as u32;
-            // Allow tab and printable bytes; drop C0 controls, DEL, 0xFF,
-            // and the C1 control range (U+0080–U+009F) which some 8-bit
-            // terminals interpret as CSI/OSC introducers.
-            c == '\t' || (b >= 0x20 && b != 0x7F && b != 0xFF && !(0x80..=0x9F).contains(&b))
+            // Allow tab and printable characters; drop C0 controls, DEL, and
+            // the C1 control range (U+0080–U+009F) which some 8-bit terminals
+            // interpret as CSI/OSC introducers.  A real telnet IAC is a raw
+            // 0xFF *byte* — it cannot exist as a char in a &str, so IAC
+            // escaping is handled on the wire in tnio, not by filtering here.
+            c == '\t' || (b >= 0x20 && b != 0x7F && !(0x80..=0x9F).contains(&b))
         })
         .collect()
 }
@@ -175,8 +177,11 @@ mod tests {
     }
 
     #[test]
-    fn test_sanitize_strips_iac() {
-        assert_eq!(sanitize_for_terminal("ok\u{00ff}done"), "okdone");
+    fn test_sanitize_keeps_printable_latin1() {
+        // U+00FF (ÿ) is a printable Latin-1 character and must be preserved.
+        // The real telnet IAC (a wire 0xFF byte) can never reach here as a
+        // char, so it is handled downstream in tnio, not by char filtering.
+        assert_eq!(sanitize_for_terminal("ok\u{00ff}done"), "ok\u{00ff}done");
     }
 
     #[test]
