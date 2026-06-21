@@ -1085,9 +1085,17 @@ fn read_serial_port_config(
     }
 }
 
-/// Sanitize a config value by stripping newlines and carriage returns.
+/// Sanitize a config value for writing: strip newlines/carriage returns
+/// (which would corrupt the line-based file framing) and trim surrounding
+/// whitespace.  The reader trims values too (see `read_config_file`), so
+/// trimming on write keeps a load→save→load round-trip stable instead of
+/// silently mutating a value's surrounding whitespace across one save.
 fn sanitize_value(s: &str) -> String {
-    s.chars().filter(|&c| c != '\n' && c != '\r').collect()
+    s.chars()
+        .filter(|&c| c != '\n' && c != '\r')
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 /// Save a full `Config` to disk and update the global singleton.
@@ -1947,7 +1955,14 @@ pub fn save_dialup_mappings(entries: &[DialupEntry]) {
          \n",
     );
     for entry in entries {
-        content.push_str(&format!("{} = {}:{}\n", entry.number, entry.host, entry.port));
+        // Sanitize number/host so an embedded newline can't corrupt the
+        // line-based framing (matches write_config_file's write_kv_str).
+        content.push_str(&format!(
+            "{} = {}:{}\n",
+            sanitize_value(&entry.number),
+            sanitize_value(&entry.host),
+            entry.port
+        ));
     }
     // Same atomic + owner-only-from-creation pattern as
     // `write_config_file` above.  Setting mode 0o600 *before* rename
@@ -3210,6 +3225,72 @@ mod tests {
     #[test]
     fn test_sanitize_value_empty() {
         assert_eq!(sanitize_value(""), "");
+    }
+
+    #[test]
+    fn test_sanitize_value_trims_surrounding_whitespace() {
+        assert_eq!(sanitize_value("  pw  "), "pw");
+        assert_eq!(sanitize_value("\t spaced \t"), "spaced");
+        // Newlines are stripped first, then surrounding whitespace trimmed.
+        assert_eq!(sanitize_value("  a\nb  "), "ab");
+        // Interior whitespace is preserved.
+        assert_eq!(sanitize_value("hello world"), "hello world");
+    }
+
+    /// A string value with surrounding whitespace round-trips to its trimmed
+    /// form consistently: write trims (sanitize_value) to match the read-side
+    /// trim, so load→save→load is stable instead of silently mutating across
+    /// one save cycle.
+    #[test]
+    fn test_string_value_roundtrip_is_stable() {
+        let dir = std::env::temp_dir().join("egw_test_ws_roundtrip");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test.conf");
+        let p = path.to_str().unwrap();
+
+        let cfg = Config {
+            password: "secret ".to_string(),
+            username: "  admin".to_string(),
+            ..Config::default()
+        };
+        write_config_file(p, &cfg).unwrap();
+
+        let loaded = read_config_file(p);
+        assert_eq!(loaded.password, "secret");
+        assert_eq!(loaded.username, "admin");
+
+        // Re-saving the loaded config and reloading yields identical values.
+        write_config_file(p, &loaded).unwrap();
+        let reloaded = read_config_file(p);
+        assert_eq!(reloaded.password, "secret");
+        assert_eq!(reloaded.username, "admin");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A dialup host containing a newline must not corrupt the line-based
+    /// framing: `save_dialup_mappings` sanitizes number/host the same way
+    /// `write_config_file` sanitizes values, keeping each entry on one line
+    /// and parsing back cleanly.
+    #[test]
+    fn test_dialup_host_sanitized_keeps_framing() {
+        let nasty = "evil\nhost";
+        // Reconstruct the exact line save_dialup_mappings builds.
+        let line = format!(
+            "{} = {}:{}\n",
+            sanitize_value("5551234"),
+            sanitize_value(nasty),
+            23u16
+        );
+        assert!(
+            !line.trim_end_matches('\n').contains('\n'),
+            "sanitized entry must stay on a single line"
+        );
+        let parsed = parse_dialup_mappings(&line);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].number, "5551234");
+        assert_eq!(parsed[0].host, "evilhost");
+        assert_eq!(parsed[0].port, 23);
     }
 
     // ─── Dialup mapping tests ─────────────────────────────
