@@ -554,7 +554,67 @@ fn serial_manager(
             if port.mode == "console" {
                 console_manager_tick(id, port, handle.clone(), shutdown.clone());
             } else {
-                serial_thread(id, port, handle.clone(), shutdown.clone(), restart.clone());
+                // Modem mode: keep the port open, reopening it if the
+                // underlying device disappears (e.g. a socat or USB-serial
+                // bridge that exits when the attached DOS terminal closes).
+                // Loop until a config-change restart or a server shutdown.
+                let mut reported_down = false;
+                while !shutdown.load(Ordering::SeqCst)
+                    && !SERIAL_RESTART[idx].load(Ordering::SeqCst)
+                {
+                    match open_serial_port(&port) {
+                        Ok(p) => {
+                            reported_down = false;
+                            glog!(
+                                "Serial modem (Port {}): opened {} at {} baud",
+                                id.label(),
+                                port.port,
+                                port.baud
+                            );
+                            let lost = serial_thread(
+                                id,
+                                &port,
+                                p,
+                                handle.clone(),
+                                shutdown.clone(),
+                                restart.clone(),
+                            );
+                            if !lost {
+                                break; // clean end: shutdown or config restart
+                            }
+                            glog!(
+                                "Serial modem (Port {}): {} closed; reopening when it returns",
+                                id.label(),
+                                port.port
+                            );
+                        }
+                        Err(e) => {
+                            // Log the outage once, then stay quiet until the
+                            // device returns so a missing bridge can't spam.
+                            if !reported_down {
+                                glog!(
+                                    "Serial modem (Port {}): {} unavailable: {} — retrying until it returns",
+                                    id.label(),
+                                    port.port,
+                                    e
+                                );
+                                reported_down = true;
+                            }
+                        }
+                    }
+                    // Back off before the next (re)open attempt, staying
+                    // responsive to shutdown / restart.
+                    let backoff = Duration::from_millis(1000);
+                    let step = Duration::from_millis(100);
+                    let mut waited = Duration::ZERO;
+                    while waited < backoff
+                        && !shutdown.load(Ordering::SeqCst)
+                        && !SERIAL_RESTART[idx].load(Ordering::SeqCst)
+                    {
+                        std::thread::sleep(step);
+                        waited += step;
+                    }
+                }
             }
         }
         if shutdown.load(Ordering::SeqCst) {
@@ -839,32 +899,18 @@ fn run_console_bridge(
 
 // ─── Serial thread ─────────────────────────────────────────
 
+/// Run a single modem-emulator session on an already-open port.  Returns
+/// `true` if the session ended because the port hit a fatal I/O error
+/// (the caller should reopen and retry), or `false` for a clean end —
+/// server shutdown or a config-change restart.
 fn serial_thread(
     id: SerialPortId,
-    port_cfg: SerialPortConfig,
+    port_cfg: &SerialPortConfig,
+    port: Box<dyn serialport::SerialPort>,
     handle: tokio::runtime::Handle,
     shutdown: Arc<AtomicBool>,
     restart: Arc<AtomicBool>,
-) {
-    let port = match open_serial_port(&port_cfg) {
-        Ok(p) => p,
-        Err(e) => {
-            glog!(
-                "Serial modem (Port {}): failed to open {}: {}",
-                id.label(),
-                port_cfg.port,
-                e
-            );
-            return;
-        }
-    };
-    glog!(
-        "Serial modem (Port {}): opened {} at {} baud",
-        id.label(),
-        port_cfg.port,
-        port_cfg.baud
-    );
-
+) -> bool {
     let now = Instant::now();
     let mut state = ModemState {
         port_id: id,
@@ -897,6 +943,7 @@ fn serial_thread(
     send_response(&mut state, "OK");
 
     let restart_flag = &SERIAL_RESTART[id.index()];
+    let mut port_lost = false;
     while !state.shutdown.load(Ordering::SeqCst) && !restart_flag.load(Ordering::SeqCst) {
         // Check for a pending ring request.
         if state.mode == ModemMode::Command
@@ -906,13 +953,24 @@ fn serial_thread(
             continue;
         }
         match state.mode {
-            ModemMode::Command => command_mode_tick(&mut state),
+            ModemMode::Command => {
+                if !command_mode_tick(&mut state) {
+                    // Port died under us — bail so the manager reopens it.
+                    port_lost = true;
+                    break;
+                }
+            }
             ModemMode::Online => {
                 // Online mode is entered and exits within the dial functions.
                 // If we somehow end up here, reset to command mode.
                 state.mode = ModemMode::Command;
             }
         }
+    }
+    if port_lost {
+        // Don't write a goodbye to a dead port; just report so the caller
+        // reopens.  The error was already logged in command_mode_tick.
+        return true;
     }
     if restart_flag.load(Ordering::SeqCst) {
         glog!("Serial modem (Port {}): restarting with new config", id.label());
@@ -921,6 +979,7 @@ fn serial_thread(
         let _ = state.port.flush();
         glog!("Serial modem (Port {}): shutting down", id.label());
     }
+    false
 }
 
 // ─── Command mode ──────────────────────────────────────────
@@ -958,7 +1017,10 @@ fn is_paired_eol(byte: u8, prev: u8, cr: u8, lf: u8) -> bool {
     (byte_is_lf && prev_is_cr) || (byte_is_cr && prev_is_lf)
 }
 
-fn command_mode_tick(state: &mut ModemState) {
+/// Run one command-mode read.  Returns `false` if the port hit a fatal
+/// I/O error (e.g. the underlying device/bridge disappeared) so the
+/// caller can drop the session and reopen; `true` to keep polling.
+fn command_mode_tick(state: &mut ModemState) -> bool {
     let mut buf = [0u8; 1];
     match state.port.read(&mut buf) {
         Ok(1) => {
@@ -986,7 +1048,7 @@ fn command_mode_tick(state: &mut ModemState) {
                 // separate lines rather than collapsing the whole run.
                 if is_paired_eol(byte, prev, cr, lf) {
                     state.prev_cmd_byte = 0;
-                    return;
+                    return true;
                 }
                 if state.echo {
                     let _ = state.port.write_all(&[cr, lf]);
@@ -1040,12 +1102,18 @@ fn command_mode_tick(state: &mut ModemState) {
         Ok(_) => {}
         Err(ref e)
             if e.kind() == std::io::ErrorKind::TimedOut
-                || e.kind() == std::io::ErrorKind::WouldBlock => {}
+                || e.kind() == std::io::ErrorKind::WouldBlock
+                || e.kind() == std::io::ErrorKind::Interrupted => {}
         Err(e) => {
-            glog!("Serial modem: read error: {}", e);
-            std::thread::sleep(Duration::from_millis(500));
+            // A hard error (Broken pipe / Input-output error) means the
+            // device is gone — e.g. the socat/USB bridge exited when the
+            // DOS terminal closed.  Signal the caller to drop this session
+            // and reopen rather than busy-logging the same error forever.
+            glog!("Serial modem (Port {}): read error: {} — closing port", state.port_id.label(), e);
+            return false;
         }
     }
+    true
 }
 
 // ─── AT command processing ─────────────────────────────────
