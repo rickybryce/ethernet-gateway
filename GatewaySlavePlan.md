@@ -447,7 +447,10 @@ Surfaced in the 2026-06-28 design review. Some now decided; the rest flagged.
   (a) the slave reuses the master's *human-login* credentials, so a compromised slave config grants
   master login — keep the slave's `egateway.conf` protected (`0600`); (b) since the creds are full
   master credentials, the relay gate (`master_accept_relays`) + channel-type routing are what keep
-  a relay connection from also opening a shell.
+  a relay connection from also opening a shell; (c) **rotating the master's password breaks every
+  slave at once** — each slave's stored `slave_master_password` goes stale, so they fail auth and
+  (per #14) risk tripping the per-IP lockout. Operationally: when you change the master's password,
+  update every slave's stored credential too.
 
 ### Required behaviors (correctness — not optional)
 - **#2 Relay streams are RAW serial (`is_tcp = false`).** The far end is a real UART device that
@@ -467,11 +470,11 @@ Surfaced in the 2026-06-28 design review. Some now decided; the rest flagged.
   socket only as fast as it can write the wire, so the fast master/relay can't overrun the slow
   UART (critical for file transfers). TCP backpressure handles this *if* the slave doesn't
   pre-drain the socket.
-- **#14 Reconnect policy — keep trying, but distinguish network vs auth failure.** Yes, the slave
-  keeps trying. Reuse the proven serial-reconnect pattern (commit `4cfad87`): **log the outage
-  once** (no ~2/sec spam), **honor the shutdown/role-change flag** (no spin; exits cleanly), and
-  reconnect automatically when the master returns. Applies to both the **initial** connect (master
-  not up yet) and a **mid-session** drop. Two refinements:
+- **#14 Reconnect policy — keep trying, but distinguish network vs auth vs relay-refused failure.**
+  Yes, the slave keeps trying. Reuse the proven serial-reconnect pattern (commit `4cfad87`): **log
+  the outage once** (no ~2/sec spam), **honor the shutdown/role-change flag** (no spin; exits
+  cleanly), and reconnect automatically when the master returns. Applies to both the **initial**
+  connect (master not up yet) and a **mid-session** drop. Three refinements:
   - **On a mid-session drop, signal the local device first** (§9 #3): drop DCD/DTR so the attached
     machine sees `NO CARRIER`, *then* retry — don't silently stall.
   - **Network/transport failure vs auth rejection are different.** A transport failure (master
@@ -482,6 +485,12 @@ Surfaced in the 2026-06-28 design review. Some now decided; the rest flagged.
     On auth rejection, back off hard (minutes) or pause and surface the reason, reflected as the
     "not connected" state in the main-menu warning (#13: e.g. "master 192.168.1.10 — auth
     rejected").
+  - **Authenticated-but-relay-refused is a *third* mode, distinct from both.** If login succeeds
+    but the master refuses the relay channel — it's in `standalone`, `master_accept_relays` is off,
+    or it's an older build with no relay handler — the slave must **not** treat that like a
+    reconnectable outage and hammer it. Back off hard (like auth rejection) and surface a config-
+    level message ("master is not accepting relays"), since the target is reachable and authenticating
+    fine; only the relay request is being declined.
   - Each relayed port/channel retries independently.
 - **#15 Dead-link / half-open detection (keepalive).** There is **no keepalive anywhere** in the
   codebase today. A *silently* dropped relay link (master powered off, cable pulled, NAT
@@ -499,6 +508,16 @@ Surfaced in the 2026-06-28 design review. Some now decided; the rest flagged.
   for a `(slave-ip, port)` slot still marked active (e.g. the old link half-died, #15 hasn't fired
   yet), the new one should **take over** (displace + tear down the stale slot) rather than be
   rejected — otherwise a reconnecting slave is locked out by its own ghost until keepalive expires.
+- **#21 Master-as-dial-proxy egress surface (Model B).** Because the master dials on a slave's
+  behalf (§3 Dialing), an **authenticated** slave can make the **master** open a TCP connection to
+  *any* `host:port` it asks for — `dial_tcp` has no egress guard (dialing arbitrary hosts is a
+  modem's whole job), so Model B effectively turns the master into an authenticated outbound proxy.
+  Acceptable under the trusted-LAN / authenticated-slave threat model, but it is a **new attack
+  surface** worth stating: a compromised or hostile slave could probe/reach internal services on the
+  *master's* network. **Deferrable knob** (implementation time): default **accept any target** (matches
+  today's modem behavior); add an optional **egress allowlist** only if a master sits on a more-trusted
+  network than its slaves. Note the master's web browser already has an SSRF guard — the dial path
+  deliberately does not, so this is a conscious choice, not an oversight.
 
 ### Resolved by the §3 model
 - **#17 `AT&W` from a modem-mode device — RESOLVED.** Because the modem emulator runs on the
