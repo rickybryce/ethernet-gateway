@@ -3971,8 +3971,12 @@ mod tests {
     // short/CTRLZ-padded block is exercised.  CRC-16 is the negotiated mode in
     // both directions (CCGMS recv opens with 'C'; our recv requests 'C').
 
+    // Gated `#[cfg(unix)]` like the interop tests that consume them — otherwise
+    // they are dead code on Windows and trip `-D warnings` (dead_code) in CI.
+    #[cfg(unix)]
     const CCGMS_XFER_SIZE: usize = 1000;
 
+    #[cfg(unix)]
     fn ccgms_pattern() -> Vec<u8> {
         (0..CCGMS_XFER_SIZE).map(|i| (i * 7 + 1) as u8).collect()
     }
@@ -3985,6 +3989,7 @@ mod tests {
     /// 0x00 run (and must not: real binaries legitimately end in 0x00).  The
     /// payload bytes are intact; the test trims `{0x1A,0x00}` from the end and
     /// compares.  Safe because our pattern's last byte (0x52) is neither.
+    #[cfg(unix)]
     fn trim_xmodem_padding(mut v: Vec<u8>) -> Vec<u8> {
         while matches!(v.last(), Some(0x1A) | Some(0x00)) {
             v.pop();
