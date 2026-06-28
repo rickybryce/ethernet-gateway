@@ -21,6 +21,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   strand). Validated against the genuine CCGMS Punter reference
   (`ccgmsterm/test/punter.c`) in both directions, including through a
   telnet-bridge emulation. IAC escaping (the **I** toggle) is unchanged.
+- **GUI: external changes to the Kermit idle-timeout are no longer reverted on
+  save.** `kermit_idle_timeout` was rendered and saved in the desktop config
+  editor but missing from its refresh-from-global and dirty-detection paths, so
+  a value changed via the web/telnet UI while the GUI was open could be silently
+  overwritten by the GUI's stale field on the next Save.
+
+### Security
+- **SSH: warn when a pre-existing host/client private key is group- or
+  world-readable.** New keys are written `0600`; a key restored from a backup or
+  created by an older build could be more permissive. The gateway now logs a
+  `chmod 600` recommendation on load (warn-only — it does not refuse the key,
+  matching the trusted-LAN threat model).
 
 ## [0.6.2] - 2026-06-19
 

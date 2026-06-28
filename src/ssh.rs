@@ -128,11 +128,36 @@ fn atomic_write_private_key(path: &str, contents: &[u8]) -> std::io::Result<()> 
     })
 }
 
+/// On Unix, warn (but do not refuse) if a *pre-existing* private-key file is
+/// group- or world-accessible.  New keys are written `0o600` by
+/// `atomic_write_private_key`, but a key restored from a backup or created by
+/// an older build could be more permissive.  `sshd` refuses such keys
+/// outright; we only warn, because the gateway's threat model is a trusted
+/// LAN/operator and refusing would strand an existing deployment that still
+/// works.  No-op off Unix (file modes don't apply).
+#[cfg(unix)]
+fn warn_if_key_perms_insecure(path: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(meta) = std::fs::metadata(path) {
+        let mode = meta.permissions().mode();
+        if mode & 0o077 != 0 {
+            glog!(
+                "SSH: warning: private key {} is group/world accessible (mode {:o}); recommend chmod 600",
+                path,
+                mode & 0o777
+            );
+        }
+    }
+}
+#[cfg(not(unix))]
+fn warn_if_key_perms_insecure(_path: &str) {}
+
 fn load_or_generate_host_key() -> Result<russh::keys::PrivateKey, String> {
     use russh::keys::ssh_key::LineEnding;
 
     // Try to load existing key
     if std::path::Path::new(SSH_HOST_KEY_FILE).exists() {
+        warn_if_key_perms_insecure(SSH_HOST_KEY_FILE);
         match russh::keys::load_secret_key(SSH_HOST_KEY_FILE, None) {
             Ok(key) => {
                 glog!("SSH server: loaded host key from {}", SSH_HOST_KEY_FILE);
@@ -185,6 +210,7 @@ pub(crate) fn load_or_generate_client_key() -> Result<russh::keys::PrivateKey, S
     use russh::keys::ssh_key::LineEnding;
 
     if std::path::Path::new(GATEWAY_CLIENT_KEY_FILE).exists() {
+        warn_if_key_perms_insecure(GATEWAY_CLIENT_KEY_FILE);
         match russh::keys::load_secret_key(GATEWAY_CLIENT_KEY_FILE, None) {
             Ok(key) => {
                 return Ok(key);
@@ -551,6 +577,32 @@ mod tests {
     #[test]
     fn test_host_key_file_constant() {
         assert_eq!(SSH_HOST_KEY_FILE, "ethernet_ssh_host_key");
+    }
+
+    // The key-permission warning is a warn-only helper; verify it runs without
+    // panicking for a secure (0600) mode, an insecure (0644) mode, and a
+    // nonexistent path. Unix-only (file modes don't apply elsewhere).
+    #[cfg(unix)]
+    #[test]
+    fn test_warn_if_key_perms_insecure_no_panic() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("egw_ssh_perm_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+
+        let secure = dir.join("secure_key");
+        std::fs::write(&secure, b"x").unwrap();
+        std::fs::set_permissions(&secure, std::fs::Permissions::from_mode(0o600)).unwrap();
+        warn_if_key_perms_insecure(secure.to_str().unwrap()); // no warning, no panic
+
+        let insecure = dir.join("insecure_key");
+        std::fs::write(&insecure, b"x").unwrap();
+        std::fs::set_permissions(&insecure, std::fs::Permissions::from_mode(0o644)).unwrap();
+        warn_if_key_perms_insecure(insecure.to_str().unwrap()); // warns, no panic
+
+        // Nonexistent path: metadata() fails, helper silently returns.
+        warn_if_key_perms_insecure(dir.join("missing").to_str().unwrap());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

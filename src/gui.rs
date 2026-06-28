@@ -1441,6 +1441,7 @@ impl App {
         self.kermit_negotiation_timeout_buf =
             self.cfg.kermit_negotiation_timeout.to_string();
         self.kermit_packet_timeout_buf = self.cfg.kermit_packet_timeout.to_string();
+        self.kermit_idle_timeout_buf = self.cfg.kermit_idle_timeout.to_string();
         self.kermit_max_retries_buf = self.cfg.kermit_max_retries.to_string();
         self.kermit_resume_max_age_hours_buf =
             self.cfg.kermit_resume_max_age_hours.to_string();
@@ -2426,6 +2427,7 @@ impl eframe::App for App {
                 || self.zmodem_negotiation_retry_interval_buf != self.last_synced_cfg.zmodem_negotiation_retry_interval.to_string()
                 || self.kermit_negotiation_timeout_buf != self.last_synced_cfg.kermit_negotiation_timeout.to_string()
                 || self.kermit_packet_timeout_buf != self.last_synced_cfg.kermit_packet_timeout.to_string()
+                || self.kermit_idle_timeout_buf != self.last_synced_cfg.kermit_idle_timeout.to_string()
                 || self.kermit_max_retries_buf != self.last_synced_cfg.kermit_max_retries.to_string()
                 || self.kermit_resume_max_age_hours_buf != self.last_synced_cfg.kermit_resume_max_age_hours.to_string()
                 || self.kermit_max_packet_length_buf != self.last_synced_cfg.kermit_max_packet_length.to_string()
@@ -2496,6 +2498,10 @@ mod tests {
         assert_eq!(
             app.kermit_packet_timeout_buf,
             app.cfg.kermit_packet_timeout.to_string()
+        );
+        assert_eq!(
+            app.kermit_idle_timeout_buf,
+            app.cfg.kermit_idle_timeout.to_string()
         );
         assert_eq!(
             app.kermit_max_retries_buf,
