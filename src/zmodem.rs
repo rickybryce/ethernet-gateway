@@ -15,8 +15,9 @@
 //! - ZFILE info per Forsberg §11 carries length, mtime, mode — we
 //!   parse all three and propagate mtime/mode to the saved file via
 //!   apply_ymodem_meta in telnet.rs.
-//! - Telnet NVT awareness matches `xmodem.rs`: tnio.rs handles IAC
-//!   escaping and CR-NUL stuffing; ZDLE escaping layers above.
+//! - Telnet awareness matches `xmodem.rs`: tnio.rs doubles IAC and passes
+//!   every other byte through literally (RFC 856 binary semantics — no NVT
+//!   CR-NUL stuffing); ZDLE escaping layers above.
 //!
 //! Public surface (used by `telnet.rs`):
 //! - [`zmodem_receive`] — receive one or more files from the peer
@@ -382,8 +383,8 @@ impl ZHeader {
     }
 }
 
-// Raw I/O (telnet IAC + NVT CR-NUL stripping) lives in `crate::tnio`,
-// shared with xmodem.rs and kermit.rs.
+// Raw I/O (telnet IAC escaping; no NVT CR-NUL stuffing) lives in
+// `crate::tnio`, shared with xmodem.rs and kermit.rs.
 
 // =============================================================================
 // Header decoder

@@ -668,15 +668,14 @@ async fn receive_phase(
 ///
 /// Cancel-safety: the `byte_wait` timeout drops the in-flight `nvt_read_byte`
 /// future on expiry.  That is safe for `ReadState` — `pushback` is read
-/// synchronously at entry and only written after both reads succeed, so a
-/// dropped future never tears it, and a 1-byte `read_exact` can't lose a
-/// partial prefix.  The one residual is TCP-only: `nvt_read_byte` /
-/// `raw_read_byte` make two sequential reads for an `IAC IAC` escape or a
-/// CR-NUL lookahead, so a timeout landing *between* those two reads consumes
-/// but loses the first byte (the `IAC`, or the `0x0D`).  This requires a
-/// multi-second gap *inside* a single escape pair — both bytes are emitted by
-/// one `raw_write_bytes`/`write_all`, so TCP effectively never splits them
-/// that long.  Even if it did, the lost/stale byte mis-frames the block → the
+/// synchronously at entry, so a dropped future never tears it, and a 1-byte
+/// `read_exact` can't lose a partial prefix.  The one residual is TCP-only:
+/// `raw_read_byte` makes two sequential reads for an `IAC IAC` escape, so a
+/// timeout landing *between* those two reads consumes but loses the first
+/// byte (the `IAC`).  This requires a multi-second gap *inside* a single
+/// escape pair — both bytes are emitted by one `raw_write_bytes`/`write_all`,
+/// so TCP effectively never splits them that long.  Even if it did, the
+/// lost/stale byte mis-frames the block → the
 /// dual checksum fails → BAD → full resend; a persistent desync trips
 /// `max_bad_rounds` and aborts loudly.  A misframed block coincidentally
 /// passing both the additive and cyclic checksums is astronomically unlikely,
@@ -1378,9 +1377,10 @@ mod tests {
     }
 
     /// As `round_trip`, but with `is_tcp` controllable so the telnet IAC
-    /// escaping + CR-NUL stuffing path (`tnio::raw_write_bytes`/`nvt_read_byte`)
-    /// is exercised end to end — every transfer's final block carries index
-    /// 0xFFFF (two 0xFF/IAC bytes), so the TCP path must survive that.
+    /// escaping path (`tnio::raw_write_bytes`/`nvt_read_byte`) is exercised
+    /// end to end — every transfer's final block carries index 0xFFFF (two
+    /// 0xFF/IAC bytes), so the TCP path must double-and-collapse those, while
+    /// CR (0x0D) bytes pass through literally (no NVT CR-NUL stuffing).
     async fn round_trip_opts(
         data: &[u8],
         ftype: PunterFileType,
@@ -1464,11 +1464,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn round_trip_over_tcp_escapes_iac_and_cr() {
+    async fn round_trip_over_tcp_escapes_iac_passes_cr() {
         // is_tcp=true routes blocks through raw_write_bytes/nvt_read_byte, so
-        // 0xFF (IAC) is doubled and 0x0D (CR) is NUL-stuffed on the wire and
-        // collapsed on read. Pack the payload with both, plus runs that would
-        // desync if either transform were one-sided.
+        // 0xFF (IAC) is doubled on the wire and collapsed on read, while 0x0D
+        // (CR) — and any 0x00 after it — passes through literally (no NVT
+        // CR-NUL stuffing). Pack the payload with both, plus runs that would
+        // desync if IAC escaping were one-sided or if CR were still stuffed.
         let data: Vec<u8> = vec![
             0xFF, 0xFF, 0x0D, 0x00, 0x0D, 0x0A, 0xFF, 0x0D, 0xFF, 0x00, 0x18, 0x1B, 0x5F,
         ];

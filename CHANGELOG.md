@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **File transfers over telnet no longer apply NVT CR-NUL stuffing**, which
+  corrupted binary transfers through telnet↔serial bridges (e.g. tcpser) and
+  telnet-aware WiFi modems that don't symmetrically un-stuff. The shared
+  transfer I/O layer (`tnio`, used by XMODEM/YMODEM/ZMODEM/Kermit/Punter) now
+  escapes only IAC (`0xFF` → `IAC IAC`) and passes every other byte —
+  including CR (`0x0D`) — through literally, matching RFC 856 binary-transmission
+  semantics that 8-bit file transfer requires. CR-NUL stuffing (RFC 854 §2.2)
+  is a text-mode rule and was inserting/deleting `0x00` bytes around `0x0D`,
+  which manifested as endless mid-transfer checksum failures and a hung peer
+  (a Commodore Punter sender, whose `S/B` wait loops are unbounded, would
+  strand). Validated against the genuine CCGMS Punter reference
+  (`ccgmsterm/test/punter.c`) in both directions, including through a
+  telnet-bridge emulation. IAC escaping (the **I** toggle) is unchanged.
+
 ## [0.6.2] - 2026-06-19
 
 ### Added

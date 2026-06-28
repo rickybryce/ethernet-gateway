@@ -802,8 +802,9 @@
                     Terminal)</strong>: a canonical, lowest-common-denominator terminal that
                     both ends agree to emulate so neither needs to know the other's real
                     hardware. The NVT is a 7-bit ASCII device with a printer and a keyboard,
-                    and it imposes three wire conventions on ordinary data &mdash; the same
-                    three the gateway's raw I/O layer applies on every byte:
+                    and it imposes three wire conventions on ordinary data (the gateway honours
+                    the <code>IAC IAC</code> escape always, and the line-ending rules for
+                    interactive text; file transfers run 8-bit transparent &mdash; see below):
                 </p>
                 <table class="data-table">
                     <tr><th>Convention</th><th>On the wire</th><th>Why</th></tr>
@@ -812,26 +813,29 @@
                     <tr><td>Literal 0xFF</td><td><code>IAC IAC</code> (0xFF 0xFF)</td><td>Since <code>0xFF</code> is the command escape, a real <code>0xFF</code> data byte is doubled and collapsed back on receipt.</td></tr>
                 </table>
                 <p class="dim-text">
-                    The gateway implements all three: outbound writes stuff <code>CR</code>
-                    &rarr; <code>CR NUL</code> and escape <code>0xFF</code> &rarr;
-                    <code>IAC IAC</code>; inbound reads strip the <code>NUL</code> and
-                    un-double the <code>IAC</code>. SSH and serial links skip them &mdash; SSH
-                    has no in-band command byte, and a serial wire isn't an NVT.
+                    The gateway escapes <code>0xFF</code> &rarr; <code>IAC IAC</code> on the
+                    wire and un-doubles it on receipt. For <strong>file transfers</strong> it
+                    otherwise keeps the channel 8-bit transparent &mdash; <code>CR</code> (and
+                    every other byte) passes through literally, the way RFC&nbsp;856 binary
+                    transmission specifies &mdash; because XMODEM/YMODEM/ZMODEM/Kermit/Punter
+                    payloads are binary and NVT <code>CR NUL</code> stuffing would corrupt them.
+                    SSH and serial links skip IAC escaping too &mdash; SSH has no in-band
+                    command byte, and a serial wire isn't an NVT.
                 </p>
 
                 <div class="cat">Why not BINARY mode?</div>
                 <p class="dim-text">
-                    The <strong>BINARY</strong> option (0, RFC&nbsp;856) exists to <em>suspend</em>
-                    these NVT rules so all 256 byte values pass literally &mdash; the &ldquo;clean
-                    8-bit pipe&rdquo; you'd want for a file transfer. The gateway deliberately
-                    does <strong>not</strong> negotiate BINARY (it refuses
-                    <code>DO BINARY</code> with <code>WONT</code>). Instead it stays in NVT
-                    mode and relies on <code>IAC IAC</code> escaping and <code>CR NUL</code>
-                    stuffing to carry arbitrary bytes safely. That keeps one consistent code
-                    path for every client &mdash; including the many retro clients that don't
-                    implement BINARY &mdash; and it is exactly the transform that
-                    XMODEM/YMODEM transfers over telnet must respect (the <strong>I</strong>
-                    toggle on the File Transfer menu). See the
+                    The <strong>BINARY</strong> option (0, RFC&nbsp;856) formally <em>suspends</em>
+                    the NVT text rules so all 256 byte values pass literally &mdash; the
+                    &ldquo;clean 8-bit pipe&rdquo; a file transfer wants. The gateway doesn't
+                    negotiate it (it refuses <code>DO BINARY</code> with <code>WONT</code>;
+                    many retro clients don't implement BINARY), but it applies the same
+                    substance on the transfer path: escape <code>IAC</code>, pass everything
+                    else &mdash; including <code>CR</code> &mdash; literally. Earlier builds also
+                    stuffed <code>CR NUL</code> there; that NVT <em>text</em> rule corrupted
+                    binary transfers through telnet&harr;serial bridges (e.g. tcpser) that don't
+                    un-stuff, so it was removed. The <strong>I</strong> toggle on the File
+                    Transfer menu controls the <code>IAC</code> escaping for XMODEM/YMODEM. See the
                     <a href="xmodemreference.html">XMODEM Protocol Reference</a> for how that
                     interacts with binary file data.
                 </p>
@@ -954,7 +958,7 @@ IAC DO   NAWS     <span class="output-text">"tell me your window size"</span></c
                         <li><strong>Fallback detection.</strong> If <code>TTYPE</code> didn't identify the terminal, the gateway prints <em>&ldquo;Press BACKSPACE to detect terminal&rdquo;</em> and classifies by the byte received (0x14 = PETSCII, 0x08/0x7F = ANSI, else ASCII).</li>
                         <li><strong>Colour prompt.</strong> The gateway asks whether to use colour (no default &mdash; Y or N).</li>
                         <li><strong>Authentication.</strong> If <code>security_enabled</code>, the login prompt runs (with the shared per-IP lockout).</li>
-                        <li><strong>Interactive use.</strong> The main menu and all features run in the data phase as NVT bytes &mdash; <code>CR NUL</code> stuffing and <code>IAC IAC</code> escaping applied throughout, echo handled by the gateway.</li>
+                        <li><strong>Interactive use.</strong> The main menu and all features run in the data phase as NVT bytes &mdash; <code>CR LF</code> line endings and <code>IAC IAC</code> escaping applied, with <code>CR NUL</code> from clients accepted on input, echo handled by the gateway.</li>
                         <li><strong>File transfer (if any).</strong> XMODEM/YMODEM honour the IAC / CR-NUL transforms per the <strong>I</strong> toggle; ZMODEM and Kermit layer their own escaping on top.</li>
                         <li><strong>Disconnect.</strong> On exit (or idle timeout) the gateway closes the session and the TCP socket drops.</li>
                     </ol>
@@ -1027,8 +1031,8 @@ IAC DO   NAWS     <span class="output-text">"tell me your window size"</span></c
                     The <a href="index.html#terminals">Terminals</a> and
                     <a href="index.html#gateways">Gateways</a> sections of the User Manual
                     cover terminal detection and the outbound telnet/SSH proxy. For the
-                    file-transfer-over-telnet byte transforms (IAC escaping and CR-NUL
-                    stuffing during XMODEM/YMODEM), see the
+                    file-transfer-over-telnet byte transform (IAC escaping during
+                    XMODEM/YMODEM; the stream is otherwise 8-bit transparent), see the
                     <a href="xmodemreference.html">XMODEM Protocol Reference</a>.
                 </div>
             </div>

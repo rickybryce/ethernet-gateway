@@ -925,19 +925,21 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                     <a href="punterreference.html"><strong>Punter C1 Protocol Reference page</strong></a>.
                 </div>
 
-                <div class="cat">IAC &amp; CR-NUL Transforms</div>
+                <div class="cat">IAC Escaping</div>
                 <p class="dim-text">
-                    Telnet NVT (RFC 854) reserves byte 0xFF as the IAC command marker
-                    and requires bare CR (0x0D) to be sent as CR-NUL. Strict clients
-                    (PuTTY / ExtraPuTTY, Tera Term, C-Kermit) follow these rules; many
-                    retro clients (IMP8, CCGMS, StrikeTerm, AltairDuino firmware) just
-                    blast raw bytes. We can't tell for sure which one you're running,
-                    so the default is set from the detected terminal type &mdash; ASCII
-                    and PETSCII get escaping off, ANSI gets it on. That's right for
-                    the overwhelming majority of real-world combinations, but if a
-                    transfer fails repeatedly with bad-block / CRC errors, press
-                    <strong>I</strong> in the File Transfer menu to flip it the other
-                    way and retry.
+                    Telnet reserves byte 0xFF as the IAC command marker, so a literal
+                    0xFF in file data must be doubled (<code>IAC IAC</code>) and collapsed
+                    back on receipt. File transfers are otherwise 8-bit transparent &mdash;
+                    CR (0x0D) and every other byte pass through literally. (We do
+                    <em>not</em> apply NVT CR-NUL stuffing: that's a text-mode rule and it
+                    corrupts binary transfers through telnet&harr;serial bridges like tcpser
+                    that don't un-stuff it.) Real telnet clients (PuTTY / ExtraPuTTY, Tera
+                    Term, C-Kermit) negotiate the protocol and need IAC escaping; raw retro
+                    clients (IMP8, CCGMS, StrikeTerm, AltairDuino firmware) blast raw bytes
+                    and don't. The default follows that: escaping turns on only if the
+                    client actually negotiated telnet, off otherwise. If a transfer fails
+                    repeatedly with bad-block / CRC errors, press <strong>I</strong> in the
+                    File Transfer menu to flip it and retry.
                 </p>
                 <div class="callout callout-tip">
                     <strong>Quick check:</strong> if you see consistent block-CRC
@@ -1760,7 +1762,7 @@ ssh_gateway_auth = password</span></code></pre>
                     </tr>
                     <tr>
                         <td>Consistent block-CRC failures in the same direction</td>
-                        <td>The two sides disagree on IAC / CR-NUL escaping. Press <strong>I</strong> in the File Transfer menu to flip and retry. Not a concern on SSH.</td>
+                        <td>The two sides disagree on IAC escaping. Press <strong>I</strong> in the File Transfer menu to flip and retry. Not a concern on SSH.</td>
                     </tr>
                     <tr>
                         <td>File exceeds size limit</td>

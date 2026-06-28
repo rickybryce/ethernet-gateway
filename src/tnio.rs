@@ -9,9 +9,15 @@
 //!   silently consumed so option-negotiation traffic doesn't show up
 //!   as data.
 //!
-//! - **NVT CR-NUL stripping (RFC 854).**  A bare CR on the wire
-//!   appears as `CR NUL`; we drop the trailing NUL so byte counts at
-//!   the protocol layer stay aligned with what the sender intended.
+//! - **8-bit transparency (RFC 856 binary semantics).**  File-transfer
+//!   payloads are 8-bit binary (or, for Kermit, self-quoting), so the
+//!   transport must pass every non-IAC byte — *including CR (0x0D)* —
+//!   through literally.  We deliberately do NOT apply RFC 854 NVT CR-NUL
+//!   stuffing/stripping: that is a text-mode rule, and inserting (or
+//!   swallowing) a 0x00 around a 0x0D corrupts binary data for any peer
+//!   that doesn't mirror it — which manifested as endless mid-transfer
+//!   checksum failures against real Punter/XMODEM peers and telnet↔serial
+//!   bridges (e.g. tcpser).
 //!
 //! - **Forsberg's CAN×2 abort rule.**  Two consecutive 0x18 bytes mean
 //!   "user pressed Ctrl-X to bail."  XMODEM and Kermit both honor it
@@ -55,13 +61,14 @@ pub(crate) const MAX_FILE_SIZE: u64 = 8 * 1024 * 1024;
 
 // ─── Per-stream read state ───────────────────────────────────
 
-/// State threaded through the byte readers so they can implement
-/// CR-NUL collapse and CAN×2 detection without losing context across
+/// State threaded through the byte readers so the protocols can implement
+/// one-byte lookahead and CAN×2 detection without losing context across
 /// calls.
 ///
-/// - `pushback` holds a byte the CR-NUL lookahead consumed but turned
-///   out not to be a NUL; the next read returns it before pulling
-///   fresh bytes.
+/// - `pushback` holds a byte a protocol's own lookahead consumed but wants
+///   returned on the next read (XMODEM checksum-under-CRC auto-detect,
+///   ZMODEM ZDLE peek, Kermit's pre-MARK hunt); the next `nvt_read_byte`
+///   returns it before pulling fresh bytes.
 /// - `pending_can` records that the most-recent abort-relevant byte
 ///   was a CAN.  The next CAN aborts; any non-CAN clears the flag.
 ///   ZMODEM doesn't use this field (its own CANCAN logic handles
@@ -99,9 +106,14 @@ pub(crate) fn is_can_abort(byte: u8, state: &mut ReadState) -> bool {
 
 // ─── Byte readers ────────────────────────────────────────────
 
-/// Read one logical byte, applying NVT CR-NUL stripping and pushback.
-/// After returning a CR (0x0D) we look one byte ahead; if it's NUL we
-/// swallow it, otherwise we stash it in `state` for the next call.
+/// Read one logical byte from the transfer stream.  Returns any byte a
+/// protocol stashed via `state.pushback` first, otherwise reads from the
+/// wire (with telnet IAC unescaping in `raw_read_byte`).
+///
+/// No RFC 854 CR-NUL stripping: file-transfer payloads are 8-bit binary
+/// (RFC 856 binary semantics), so a 0x00 following a 0x0D is real data,
+/// not NVT padding — swallowing it would corrupt the stream and desync
+/// the block.
 pub(crate) async fn nvt_read_byte(
     reader: &mut (impl AsyncRead + Unpin),
     is_tcp: bool,
@@ -110,14 +122,7 @@ pub(crate) async fn nvt_read_byte(
     if let Some(b) = state.pushback.take() {
         return Ok(b);
     }
-    let byte = raw_read_byte(reader, is_tcp).await?;
-    if is_tcp && byte == 0x0D {
-        let next = raw_read_byte(reader, is_tcp).await?;
-        if next != 0x00 {
-            state.pushback = Some(next);
-        }
-    }
-    Ok(byte)
+    raw_read_byte(reader, is_tcp).await
 }
 
 /// Read one byte from the wire, transparently consuming any telnet
@@ -198,11 +203,18 @@ pub(crate) async fn consume_telnet_command(
 
 // ─── Byte writer ─────────────────────────────────────────────
 
-/// Write a buffer of bytes to the wire, applying telnet IAC escaping
-/// (`0xFF` → `IAC IAC`) and NVT CR-NUL stuffing (`0x0D` → `0x0D 0x00`)
-/// when `is_tcp` is true.  Both transforms are required by RFC 854 for
-/// transparent transmission of 8-bit data over telnet — skipping
-/// either causes mid-block desync at the first 0xFF or 0x0D byte.
+/// Write a buffer of bytes to the wire, doubling telnet IAC (`0xFF` →
+/// `IAC IAC`) when `is_tcp` is true so a literal 0xFF data byte isn't
+/// mistaken for a telnet command.  This is the RFC 856 (Telnet Binary
+/// Transmission) transport model: IAC is the only reserved byte, and every
+/// other byte — *including CR (0x0D)* — passes through literally so the
+/// 8-bit file-transfer stream stays transparent.
+///
+/// We deliberately do NOT apply RFC 854 CR-NUL stuffing.  That is an NVT
+/// *text-mode* rule; inserting a 0x00 after every 0x0D corrupts binary
+/// payloads for any peer that doesn't strip it back out (real C64/CP-M
+/// Punter/XMODEM peers and telnet↔serial bridges like tcpser do not), which
+/// surfaced as endless mid-transfer checksum failures.
 pub(crate) async fn raw_write_bytes(
     writer: &mut (impl AsyncWrite + Unpin),
     data: &[u8],
@@ -214,9 +226,6 @@ pub(crate) async fn raw_write_bytes(
             if b == IAC {
                 buf.push(IAC);
                 buf.push(IAC);
-            } else if b == 0x0D {
-                buf.push(0x0D);
-                buf.push(0x00);
             } else {
                 buf.push(b);
             }
@@ -257,10 +266,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_raw_write_bytes_cr_null_stuffs() {
+    async fn test_raw_write_bytes_passes_cr_through_literally() {
+        // CR (0x0D) is binary data here, NOT NVT text: it must pass through
+        // untouched (no RFC 854 CR-NUL stuffing) so the 8-bit stream stays
+        // transparent for the file-transfer protocols.
         let mut buf: Vec<u8> = Vec::new();
         raw_write_bytes(&mut buf, &[0x41, 0x0D, 0x42], true).await.unwrap();
-        assert_eq!(buf, &[0x41, 0x0D, 0x00, 0x42]);
+        assert_eq!(buf, &[0x41, 0x0D, 0x42]);
+        // A CR immediately followed by a real NUL data byte is preserved too.
+        let mut buf2: Vec<u8> = Vec::new();
+        raw_write_bytes(&mut buf2, &[0x0D, 0x00, 0x0D, 0x0A], true).await.unwrap();
+        assert_eq!(buf2, &[0x0D, 0x00, 0x0D, 0x0A]);
     }
 
     #[tokio::test]
@@ -271,21 +287,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_nvt_read_byte_strips_cr_null() {
+    async fn test_nvt_read_byte_keeps_cr_null_as_data() {
+        // The 0x00 after a 0x0D is real binary data, not NVT padding, so it
+        // must be returned, not swallowed.
         let data = vec![0x41, 0x0D, 0x00, 0x42];
         let mut cur = std::io::Cursor::new(data);
         let mut s = ReadState::default();
         assert_eq!(nvt_read_byte(&mut cur, true, &mut s).await.unwrap(), 0x41);
         assert_eq!(nvt_read_byte(&mut cur, true, &mut s).await.unwrap(), 0x0D);
+        assert_eq!(nvt_read_byte(&mut cur, true, &mut s).await.unwrap(), 0x00);
         assert_eq!(nvt_read_byte(&mut cur, true, &mut s).await.unwrap(), 0x42);
     }
 
     #[tokio::test]
-    async fn test_nvt_read_byte_pushes_back_non_null_after_cr() {
-        let data = vec![0x0D, 0x42];
+    async fn test_nvt_read_byte_returns_pushback_first() {
+        // A protocol's own lookahead (xmodem/zmodem/kermit) stashes a byte in
+        // state.pushback; the next read must return it before touching the wire.
+        let data = vec![0x42];
         let mut cur = std::io::Cursor::new(data);
-        let mut s = ReadState::default();
-        assert_eq!(nvt_read_byte(&mut cur, true, &mut s).await.unwrap(), 0x0D);
+        let mut s = ReadState { pushback: Some(0x99), pending_can: false };
+        assert_eq!(nvt_read_byte(&mut cur, true, &mut s).await.unwrap(), 0x99);
         assert_eq!(nvt_read_byte(&mut cur, true, &mut s).await.unwrap(), 0x42);
     }
 

@@ -3284,7 +3284,7 @@ impl TelnetSession {
         if !self.is_ssh {
             self.detect_terminal_type().await?;
 
-            // Auto-set the IAC/CR-NUL transform default based on
+            // Auto-set the IAC-escaping default based on
             // whether the client actually speaks the telnet protocol
             // (RFC 854/856).  detect_terminal_type() has already sent
             // our opening WILL/DO batch and drained the reply window,

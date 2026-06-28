@@ -1392,8 +1392,8 @@ fn crc16_xmodem(data: &[u8]) -> u16 {
 // SINGLE-BYTE WRITER (multi-byte raw_write_bytes lives in tnio.rs)
 // =============================================================================
 
-/// Write a single raw byte through the telnet IAC + CR-NUL escaping
-/// layer.  Thin wrapper over `tnio::raw_write_bytes` for the XMODEM
+/// Write a single raw byte through the telnet IAC-escaping layer (no NVT
+/// CR-NUL stuffing).  Thin wrapper over `tnio::raw_write_bytes` for the XMODEM
 /// control-byte sites (sending ACK / NAK / CAN / 'C' singletons) so
 /// each call site stays at one statement.
 async fn raw_write_byte(
@@ -3955,6 +3955,151 @@ mod tests {
     // sender/receiver against it through stdin/stdout, reaps the child
     // before unwrapping, and verifies the file bytes round-trip
     // unchanged.  Unix-only because lrzsz is.
+
+    // ─── CCGMS XMODEM interop (env-gated, real CCGMS reference) ─────
+    //
+    // Drives our XMODEM sender/receiver against the genuine CCGMS XMODEM
+    // reference (ccgmsterm/test/xmodem.c — the Georges Menie codec CCGMS
+    // ships), via the combined harness in ~/claude/punter-ccgms-interop.
+    // Build it with:
+    //   cc -O2 -o ccgms-xfer harness.c \
+    //      ~/ccgmsterm/test/{punter,xmodem,crc16}.c
+    // then point CCGMS_XFER_BIN at it.  Skipped (not failed) when unset, so
+    // CI without the binary stays green — same convention as the Punter
+    // CCGMS tests in punter.rs.  Both sides build the same i*7+1, XFER_SIZE
+    // (default 1000) byte pattern; 1000 is not a block multiple, so the final
+    // short/CTRLZ-padded block is exercised.  CRC-16 is the negotiated mode in
+    // both directions (CCGMS recv opens with 'C'; our recv requests 'C').
+
+    const CCGMS_XFER_SIZE: usize = 1000;
+
+    fn ccgms_pattern() -> Vec<u8> {
+        (0..CCGMS_XFER_SIZE).map(|i| (i * 7 + 1) as u8).collect()
+    }
+
+    /// Trim the trailing XMODEM final-block padding CCGMS's sender leaves.
+    /// XMODEM carries no length field, so a non-block-aligned file is padded to
+    /// the block boundary.  CCGMS's `xmodemTransmit` (the Georges Menie codec)
+    /// pads with a *single* `CTRLZ` (0x1A) then `NUL` (0x00) fill — so a
+    /// standard receiver (ours) that strips only trailing 0x1A can't remove the
+    /// 0x00 run (and must not: real binaries legitimately end in 0x00).  The
+    /// payload bytes are intact; the test trims `{0x1A,0x00}` from the end and
+    /// compares.  Safe because our pattern's last byte (0x52) is neither.
+    fn trim_xmodem_padding(mut v: Vec<u8>) -> Vec<u8> {
+        while matches!(v.last(), Some(0x1A) | Some(0x00)) {
+            v.pop();
+        }
+        v
+    }
+
+    /// Spawn the CCGMS harness in `mode`, returning the child (or None to skip).
+    #[cfg(unix)]
+    fn spawn_ccgms_xfer(mode: &str) -> Option<tokio::process::Child> {
+        let bin = std::env::var("CCGMS_XFER_BIN").ok()?;
+        use tokio::process::Command;
+        Some(
+            Command::new(&bin)
+                .arg(mode)
+                .env("XFER_SIZE", CCGMS_XFER_SIZE.to_string())
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::inherit())
+                .spawn()
+                .expect("spawn ccgms-xfer harness"),
+        )
+    }
+
+    /// Our XMODEM sender → real CCGMS `xmodemReceive` (CRC, 128-byte blocks).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ccgms_xmodem_us_send_128() {
+        let mut child = match spawn_ccgms_xfer("xrecv-crc") {
+            Some(c) => c,
+            None => { eprintln!("CCGMS_XFER_BIN not set; skipping"); return; }
+        };
+        let mut to_child = child.stdin.take().unwrap();
+        let mut from_child = child.stdout.take().unwrap();
+        let data = ccgms_pattern();
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            xmodem_send(&mut from_child, &mut to_child, &data, false, false, false, false, None),
+        )
+        .await;
+        let status = child.wait().await;
+        eprintln!("us_send_128: send={:?} child={:?}", res, status);
+        res.expect("timed out").expect("our XMODEM send to CCGMS failed");
+        assert!(status.unwrap().success(), "CCGMS receiver reported a mismatch");
+    }
+
+    /// Our XMODEM-1K sender → real CCGMS `xmodemReceive` (CRC, STX 1024 blocks).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ccgms_xmodem_us_send_1k() {
+        let mut child = match spawn_ccgms_xfer("xrecv-crc") {
+            Some(c) => c,
+            None => { eprintln!("CCGMS_XFER_BIN not set; skipping"); return; }
+        };
+        let mut to_child = child.stdin.take().unwrap();
+        let mut from_child = child.stdout.take().unwrap();
+        let data = ccgms_pattern();
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            xmodem_send(&mut from_child, &mut to_child, &data, false, false, false, true, None),
+        )
+        .await;
+        let status = child.wait().await;
+        eprintln!("us_send_1k: send={:?} child={:?}", res, status);
+        res.expect("timed out").expect("our XMODEM-1K send to CCGMS failed");
+        assert!(status.unwrap().success(), "CCGMS receiver reported a mismatch");
+    }
+
+    /// Real CCGMS `xmodemTransmit` (128-byte blocks) → our XMODEM receiver.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ccgms_xmodem_us_recv_from_128() {
+        let mut child = match spawn_ccgms_xfer("xsend-128") {
+            Some(c) => c,
+            None => { eprintln!("CCGMS_XFER_BIN not set; skipping"); return; }
+        };
+        let mut to_child = child.stdin.take().unwrap();
+        let mut from_child = child.stdout.take().unwrap();
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            xmodem_receive(&mut from_child, &mut to_child, false, false, false),
+        )
+        .await;
+        let _ = child.wait().await;
+        let (data, _meta) = res.expect("timed out").expect("our XMODEM recv from CCGMS failed");
+        assert_eq!(
+            trim_xmodem_padding(data),
+            ccgms_pattern(),
+            "received data must match CCGMS sender after trimming final-block padding"
+        );
+    }
+
+    /// Real CCGMS `xmodemTransmit` (STX 1024 blocks) → our XMODEM receiver.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ccgms_xmodem_us_recv_from_1k() {
+        let mut child = match spawn_ccgms_xfer("xsend-1k") {
+            Some(c) => c,
+            None => { eprintln!("CCGMS_XFER_BIN not set; skipping"); return; }
+        };
+        let mut to_child = child.stdin.take().unwrap();
+        let mut from_child = child.stdout.take().unwrap();
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            xmodem_receive(&mut from_child, &mut to_child, false, false, false),
+        )
+        .await;
+        let _ = child.wait().await;
+        let (data, _meta) = res.expect("timed out").expect("our XMODEM recv from CCGMS failed");
+        assert_eq!(
+            trim_xmodem_padding(data),
+            ccgms_pattern(),
+            "received data must match CCGMS 1K sender after trimming final-block padding"
+        );
+    }
 
     // ─── XMODEM: our sender → real `rx` ──────────────────────
 

@@ -21,8 +21,10 @@
 //!   request), G (DIR / SPACE / KERMIT / HELP / finish / cwd / ...), I
 //!   (re-init), B (clean EOT), E (peer abort).  Refuses C (host commands)
 //!   by design.
-//! - Telnet NVT awareness matches `xmodem.rs` / `zmodem.rs`: the raw I/O
-//!   layer handles IAC escaping and CR-NUL stuffing.
+//! - Telnet awareness matches `xmodem.rs` / `zmodem.rs`: the raw I/O layer
+//!   doubles IAC and otherwise passes bytes through transparently (RFC 856
+//!   binary semantics — no NVT CR-NUL stuffing).  Kermit re-syncs on the
+//!   SOH/MARK and counts LEN, so a literal CR terminator needs no stuffing.
 //!
 //! Public surface (used by `telnet.rs`):
 //! - [`kermit_receive`] — read one or more files from the peer (upload).
@@ -832,8 +834,8 @@ fn check_encoded_fits(
     }
 }
 
-/// Read one packet from the wire, performing telnet IAC unescaping and
-/// CR-NUL stripping along the way.  Skips pre-MARK bytes (pad
+/// Read one packet from the wire, performing telnet IAC unescaping along
+/// the way.  Skips pre-MARK bytes (pad
 /// characters, line noise, leftover EOL from the previous packet).
 ///
 /// On bad block check, returns Err with a diagnostic; the caller decides
@@ -11608,7 +11610,7 @@ mod tests {
         let (sock, _addr) = accept;
         let (mut r, mut w) = tokio::io::split(sock);
 
-        // is_tcp=true so the IAC/CR-NUL layer is active — kermit -j
+        // is_tcp=true so the IAC-escaping layer is active — kermit -j
         // opens a telnet-protocol connection and may negotiate
         // options on the wire.
         let result = tokio::time::timeout(
@@ -11891,7 +11893,7 @@ mod tests {
         .expect("accept");
         let (mut r, mut w) = tokio::io::split(sock);
 
-        // is_tcp=true so the IAC/CR-NUL layer is active for the
+        // is_tcp=true so the IAC-escaping layer is active for the
         // telnet-mode connection ckermit -j establishes.
         let server_result = tokio::time::timeout(
             tokio::time::Duration::from_secs(30),
