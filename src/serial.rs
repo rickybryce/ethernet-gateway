@@ -346,16 +346,6 @@ pub fn check_console_bridge_eligible(
     Ok(())
 }
 
-/// True if any configured port is eligible to host a console bridge.
-/// Used by the telnet main menu to decide whether to display the
-/// `Serial Gateway` entry at all — without this gate the menu would
-/// surface a dead-end choice on a single-port-only deployment.
-pub fn any_port_console_eligible(cfg: &config::Config) -> bool {
-    SERIAL_PORT_IDS
-        .iter()
-        .any(|&id| check_console_bridge_eligible(cfg, id).is_ok())
-}
-
 /// Combined gate for `request_console_bridge`: eligibility first
 /// (so a misconfigured port produces a specific error), then the
 /// "another session" check.  Pure function — exercised by tests
@@ -3996,21 +3986,6 @@ mod tests {
         let cfg = cfg_with_serial(SerialPortId::A, true, "console", "/dev/ttyUSB0");
         assert!(check_console_bridge_eligible(&cfg, SerialPortId::A).is_ok());
         assert!(check_console_bridge_eligible(&cfg, SerialPortId::B).is_err());
-    }
-
-    /// `any_port_console_eligible` is the OR of the per-port checks —
-    /// drives whether the telnet main menu shows the Serial Gateway
-    /// item at all.
-    #[test]
-    fn test_any_port_console_eligible_dispatch() {
-        let none_cfg = config::Config::default();
-        assert!(!any_port_console_eligible(&none_cfg));
-
-        let a_only = cfg_with_serial(SerialPortId::A, true, "console", "/dev/ttyUSB0");
-        assert!(any_port_console_eligible(&a_only));
-
-        let b_only = cfg_with_serial(SerialPortId::B, true, "console", "/dev/ttyUSB1");
-        assert!(any_port_console_eligible(&b_only));
     }
 
     /// The console-request slot starts empty, accepts a sender, and

@@ -3409,21 +3409,20 @@ impl TelnetSession {
             self.cyan("F")
         ))
         .await?;
-        // Bridging the modem-emulator's own port back into a session
-        // that arrived over that port would loop the user's terminal
-        // to itself.  gateway_serial() also rejects this with an
-        // explanation, but hiding the menu item is the cleaner UX.
-        // Also hidden when neither port is in console mode — without
-        // an eligible target, the entry would dead-end at the picker.
-        if !self.is_serial
-            && crate::serial::any_port_console_eligible(&config::get_config())
-        {
-            self.send_line(&format!(
-                "  {}  Serial Gateway",
-                self.cyan("G")
-            ))
-            .await?;
-        }
+        // Always shown.  Eligibility — and the own-port loopback reject
+        // for a serial-arrived session — is enforced by the picker, the
+        // single source of truth, which explains *why* a port is
+        // unavailable rather than silently hiding the entry.  A
+        // serial-arrived user can still legitimately bridge to a
+        // *different* port (e.g. Port A's device to Port B's), so the
+        // item must not be hidden for them.  Keeping it always-present
+        // also avoids a menu that flickers as console targets come and
+        // go (relevant once remote ports register at runtime).
+        self.send_line(&format!(
+            "  {}  Serial Gateway",
+            self.cyan("G")
+        ))
+        .await?;
         self.send_line(&format!(
             "  {}  Troubleshooting",
             self.cyan("R")
@@ -6635,6 +6634,16 @@ impl TelnetSession {
 
     // ─── SERIAL GATEWAY ─────────────────────────────────────
 
+    /// True when `id` is the very port this session arrived on.
+    /// Bridging that port back into itself would loop the user's
+    /// terminal, so the picker marks it ineligible and `gateway_serial`
+    /// rejects a stale pick of it.  A non-serial session (telnet/SSH)
+    /// never owns a serial port, so this is always false for them — they
+    /// may bridge to any eligible port.
+    fn is_own_arrival_port(&self, id: crate::config::SerialPortId) -> bool {
+        self.is_serial && self.serial_port_id == Some(id)
+    }
+
     /// Render the Serial Gateway port picker.  Returns `Ok(Some(id))`
     /// if the user picked an eligible port, `Ok(None)` if they backed
     /// out (or every port was ineligible and they pressed any key).
@@ -6659,7 +6668,12 @@ impl TelnetSession {
             let mut any_eligible = false;
             for id in SERIAL_PORT_IDS {
                 let port = cfg.port(id);
-                let ok = crate::serial::check_console_bridge_eligible(&cfg, id).is_ok();
+                // A serial-arrived session must not bridge its own
+                // arrival port back into itself, so exclude only that
+                // port — every other port stays selectable.
+                let own_port = self.is_own_arrival_port(id);
+                let ok = !own_port
+                    && crate::serial::check_console_bridge_eligible(&cfg, id).is_ok();
                 any_eligible |= ok;
                 // Two-line per-port entry so the device path + baud
                 // never overflow the 40-col PETSCII budget.  Line 1 is
@@ -6668,7 +6682,9 @@ impl TelnetSession {
                 // role label.  ASCII-only — no em-dash so .len() and
                 // display width agree.
                 let label = format!("[{}] Port {}", id.label(), id.label());
-                let role = if !port.enabled {
+                let role = if own_port {
+                    "Your port"
+                } else if !port.enabled {
                     "Disabled"
                 } else if port.mode != "console" {
                     "Modem mode"
@@ -6677,7 +6693,9 @@ impl TelnetSession {
                 } else {
                     "Console mode"
                 };
-                let role_colored = if !port.enabled {
+                let role_colored = if own_port {
+                    self.amber(role)
+                } else if !port.enabled {
                     self.red(role)
                 } else if port.mode != "console" {
                     self.amber(role)
@@ -6708,12 +6726,12 @@ impl TelnetSession {
             if !any_eligible {
                 self.send_line(&format!(
                     "  {}",
-                    self.red("No port is in console mode.")
+                    self.red("No port is available to bridge.")
                 ))
                 .await?;
                 self.send_line(&format!(
                     "  {}",
-                    self.dim("Set one via Config > M.")
+                    self.dim("Enable console mode via Config > M.")
                 ))
                 .await?;
                 self.send_line("").await?;
@@ -6754,18 +6772,6 @@ impl TelnetSession {
     /// after one read cycle, so editors that need ESC (vi, ed) keep
     /// working as long as the user types a normal key after each ESC.
     async fn gateway_serial(&mut self) -> Result<(), std::io::Error> {
-        // The same pumping loop is reachable from a serial-side login,
-        // but bridging the modem-emulator's own port back into itself
-        // is a footgun — block it.
-        if self.is_serial {
-            self.show_error_lines(&[
-                "Serial Gateway is not available",
-                "from a serial-side session.",
-            ])
-            .await?;
-            return Ok(());
-        }
-
         // Always render a picker — even if only one port is eligible
         // — so the user can see both ports' status side-by-side and
         // the menu structure stays consistent regardless of config.
@@ -6773,6 +6779,21 @@ impl TelnetSession {
             Some(id) => id,
             None => return Ok(()),
         };
+
+        // Bridging the modem-emulator's own port back into the session
+        // that arrived over that very port would loop the user's
+        // terminal to itself — a footgun.  Reject *only* that case: a
+        // serial-arrived user may still bridge to a different port.
+        // (The picker already marks the arrival port ineligible, so this
+        // is the belt-and-braces guard against a stale pick.)
+        if self.is_own_arrival_port(id) {
+            self.show_error_lines(&[
+                "Cannot bridge a serial port to",
+                "itself.  Pick a different port.",
+            ])
+            .await?;
+            return Ok(());
+        }
 
         let cfg = config::get_config();
         // Re-validate under the picked id.  Eligibility might have
@@ -15863,8 +15884,8 @@ mod tests {
 
         // No-eligible-port fallback lines.
         for line in &[
-            "  No port is in console mode.",
-            "  Set one via Config > M.",
+            "  No port is available to bridge.",
+            "  Enable console mode via Config > M.",
         ] {
             assert!(
                 line.len() <= PETSCII_WIDTH,
@@ -15995,6 +16016,43 @@ mod tests {
             lockouts,
         );
         assert_eq!(session_b.serial_port_id, Some(SerialPortId::B));
+
+        // is_own_arrival_port: a serial session owns ONLY its arrival
+        // port (so the Serial Gateway picker excludes just that one and
+        // the user can still bridge to the other port).
+        assert!(session_a.is_own_arrival_port(SerialPortId::A));
+        assert!(!session_a.is_own_arrival_port(SerialPortId::B));
+        assert!(session_b.is_own_arrival_port(SerialPortId::B));
+        assert!(!session_b.is_own_arrival_port(SerialPortId::A));
+    }
+
+    /// A non-serial (telnet/SSH) session never owns a serial port, so
+    /// `is_own_arrival_port` is false for every port — it may bridge to
+    /// any eligible port and the picker excludes none.
+    #[test]
+    fn test_non_serial_session_owns_no_port() {
+        use crate::config::SerialPortId;
+        use std::collections::HashMap;
+        use std::sync::Mutex as StdMutex;
+        let (_w, reader) = tokio::io::duplex(1);
+        let (_, writer_inner) = tokio::io::duplex(1);
+        let writer: SharedWriter = std::sync::Arc::new(tokio::sync::Mutex::new(
+            Box::new(writer_inner),
+        ));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let restart = Arc::new(AtomicBool::new(false));
+        let lockouts: LockoutMap = std::sync::Arc::new(StdMutex::new(HashMap::new()));
+        let session = TelnetSession::new_ssh(
+            Box::new(reader),
+            writer,
+            shutdown,
+            restart,
+            None,
+            lockouts,
+        );
+        assert!(!session.is_serial);
+        assert!(!session.is_own_arrival_port(SerialPortId::A));
+        assert!(!session.is_own_arrival_port(SerialPortId::B));
     }
 
     /// New Serial Gateway picker (always shown, even when only one

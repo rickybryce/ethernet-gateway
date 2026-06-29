@@ -392,18 +392,49 @@ Surfaced in the 2026-06-28 design review. Some now decided; the rest flagged.
     `check_console_bridge_eligible` from the fixed `SERIAL_PORT_IDS = [A, B]` enum to "local A/B +
     connected remote ports" keyed by `(slave IP, port)` (#4) — the picker is a consumer of #1's
     data model;
-  - **The main-menu item visibility is gated by the same `any_port_console_eligible`** (telnet.rs:
-    3418-3420), so once generalized, the **Serial Gateway item appears with *no local* console port
-    as long as a remote one is registered** (and disappears when the last slave drops). Note that
-    function takes only `&config` today; remote registrations are **runtime state**, so it must also
-    read the **live remote-port registry** — and the item becomes dynamically visible.
-  - **Relax the loopback guard from blanket to per-port.** Today the item is also gated by
-    `!self.is_serial`, which hides Serial Gateway entirely for *any* serial-arrived user (e.g. a
-    local device that did `ATDT ethernet-gateway`). That over-hides: it blocks reaching a *different*
-    local port or a *remote* slave port (validation scenario **V2** is exactly this path). Change it
-    to **exclude only the arrival port** from the picker, not hide the whole item — the precise
-    own-port loopback rejection already exists in `gateway_serial()`; it's just the menu gate that's
-    too blunt.
+  - **Never hide the Serial Gateway item — make the picker the single eligibility authority
+    (decided 2026-06-29).** Today the menu item is gated by **two** conditions at telnet.rs:3418-3420
+    — `!self.is_serial` AND `any_port_console_eligible(&config)` — plus a **third** blanket reject
+    inside `gateway_serial()` (telnet.rs:6760: `if self.is_serial { …not available… }`). **Drop all
+    three blanket gates** and always render `G Serial Gateway`:
+    - The `!self.is_serial` gate over-hides: it blocks a serial-arrived user (e.g. a local device
+      that did `ATDT ethernet-gateway`) from reaching a *different* local port or a *remote* slave
+      port — validation scenario **V2** is exactly this path. Replace the function-level blanket
+      reject with a **per-port own-port reject** (refuse only when the picked id equals the arrival
+      port); the picker **excludes only the arrival port** so a serial user still can't loop to
+      itself.
+    - The `any_port_console_eligible` gate was there to avoid dead-ending at the picker. But the
+      picker already reports unavailability gracefully ("No port is in console mode — set one via
+      Config > M", telnet.rs:6708), so an always-present item never truly dead-ends. **Dropping this
+      gate is the bigger win under master/slave:** eligible targets become live runtime state
+      (slaves connect/disconnect), so keeping the gate would make the menu item **flicker in and out**
+      as slaves come and go — surprising UX. A **stable** item that sometimes says "nothing available
+      right now" is clearer, and it collapses the eligibility logic into one place (the picker)
+      instead of splitting it between a menu gate and the picker.
+    - Net effect: **less conditional logic than the old "relax to per-port but keep the eligibility
+      gate" plan**, a stable menu, and the picker as the single source of truth. The picker still
+      reads the **live remote-port registry** (runtime state, not just `&config`) to list registered
+      remote console ports alongside local A/B.
+    - **Standalone-shippable precursor — DONE 2026-06-29 (uncommitted on `dev`).** Dropping the
+      `is_serial` gates is independent of master/slave: it lets a serial-arrived user bridge to the
+      *other local* port today (e.g. Port A's C64 ↔ Port B's device). Implemented as a small,
+      separately-testable change ahead of the relay feature:
+      - **telnet.rs ~3414** — Serial Gateway menu item is now **always rendered** (both the
+        `!self.is_serial` and `any_port_console_eligible` conditions removed).
+      - **telnet.rs `gateway_serial()`** — blanket `if self.is_serial { reject }` replaced by a
+        **per-port own-port reject** keyed off the new `is_own_arrival_port(id)` helper (rejects only
+        when the picked port == the arrival port).
+      - **telnet.rs `gateway_serial_picker()`** — marks **only the arrival port** ineligible
+        ("Your port", dim) for a serial session; reworded the no-eligible-target fallback to
+        "No port is available to bridge. / Enable console mode via Config > M." (no longer falsely
+        claims no console port when the user's own port is the only console one).
+      - **serial.rs** — removed the now-unused `any_port_console_eligible` helper + its test (would
+        be dead code → clippy failure in this binary crate).
+      - Tests: added `test_non_serial_session_owns_no_port` + an `is_own_arrival_port` block in
+        `test_telnet_session_new_serial_stores_port_id`; updated the picker fallback-string fit test.
+        Full suite **1242 lib + 1 e2e green, clippy clean**. The remaining master/slave work
+        (remote-port registry in the picker, paging/cap, live-registry visibility) is unchanged and
+        still pending.
   - the picker uses **two lines per entry**, so against the 22-row PETSCII budget many slaves
     (× 2 ports) overflow → add **paging or a cap** (like the detected-IP cap);
   - the existing one-user-per-port active-bridge flag extends to remote ports.
@@ -589,13 +620,14 @@ Sanity checks traced end-to-end through the plan. Each must hold for the design 
 Flow: master-local device does `ATDT ethernet-gateway` → master's menu → **Serial Gateway** → picks
 the **slave's console-mode port** → bridged. Path: `terminal ↔ master ↔ relay ↔ slave ↔ device`.
 Relies on:
-- **#12** — the master's Serial Gateway picker lists local A/B **+ registered remote console ports**,
-  and the **main-menu item appears with no local console port** as long as a remote one is registered
-  (generalized `any_port_console_eligible` + live remote registry);
-- **#12 loopback-guard relaxation (critical for this path)** — V2 arrives via `ATDT ethernet-gateway`
-  (a local serial device → `is_serial == true`), so the *current* blanket `!self.is_serial` gate
-  would hide Serial Gateway entirely. V2 requires the guard relaxed to **exclude only the arrival
-  port**, so the slave's remote console port is still reachable;
+- **#12** — the master's Serial Gateway picker lists local A/B **+ registered remote console ports**
+  (live remote registry, not just `&config`); the **main-menu item is always shown** (never hidden),
+  so it's reachable whether or not a local console port exists;
+- **#12 never-hide + per-port loopback reject (critical for this path)** — V2 arrives via
+  `ATDT ethernet-gateway` (a local serial device → `is_serial == true`), so the *current* blanket
+  `!self.is_serial` menu gate AND the `gateway_serial()` blanket reject would block it entirely. V2
+  requires both blanket gates dropped — the menu item always shows, and the picker **excludes only
+  the arrival port** (own-port reject), so the slave's remote console port is still reachable;
 - **#12 persistent registration** — the slave keeps an idle relay channel open so the console port
   is "available" for the master to bridge on pick (consumes a session-cap slot, #8);
 - **#13** — that same console port shows **busy** in the *slave's own* picker (it's owned by the
