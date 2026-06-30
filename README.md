@@ -64,6 +64,28 @@ password. Even with security enabled, running this software on a public network
 is **not recommended** — telnet credentials are transmitted in cleartext and can
 be intercepted. Use the SSH interface for any non-local access.
 
+### Outbound Connections (Dial-Out)
+
+The above guards apply to **inbound** connections. The gateway's **outbound**
+features — the modem emulator's `ATDT` dial-out, the **Telnet Gateway** and
+**SSH Gateway** menu options, and the master/slave relay's onward dial — connect
+to whatever host and port you ask for, with **no internal-address filtering**.
+This is by design: a modem (and a gateway) dials anywhere, including loopback
+(`127.0.0.1`), link-local, and other hosts on the gateway's own LAN.
+
+One implication for **master/slave** mode: a serial device on a *slave* can, via
+the slave's modem dial-out, cause the *master* to open a connection on the
+master's own network — including the master's loopback and LAN — and pipe the
+bytes back to the device. The slave authenticates to the master with the
+master's credentials, so treat a slave (and the devices attached to it) as
+trusted to reach the master's network, exactly as you would a device attached
+directly to the master. Only enable `master_accept_relays` for slaves you trust
+at that level.
+
+The text-mode **web browser** is the one exception: it *does* refuse internal
+addresses (an SSRF guard), because web fetches and HTTP redirects make that a
+sharper risk. That guard is lifted by `disable_ip_safety`.
+
 ## Standards Compliance
 
 ### Telnet RFCs
