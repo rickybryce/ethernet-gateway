@@ -713,3 +713,29 @@ Relies on:
 → **master dials** (Model B) → `device ↔ slave ↔ master ↔ BBS`. File transfers here are end-to-end
 with the BBS (V1 scope note). Confirms Model-B dialing + raw framing (#2) + backpressure (#7) across
 two hops.
+
+## Review follow-ups (dev TODOs, deferred — not user-facing)
+
+Surfaced by the 2026-06-30 quality/stability review passes (after the feature
+shipped to `dev` as `b18fc79..f11589e`; fixes landed as `75058ea` + `d7e7797`).
+These two were **intentionally deferred** — neither is a hang or data loss, both
+are pre-existing architecture or cosmetic, and a fix costs more than it's worth
+under the trusted-LAN threat model. Revisit only if the cost/benefit changes.
+
+- **(P2) Shutdown "Goodbye" broadcast is telnet-coupled.** The `session_writers`
+  shutdown broadcast loop lives inside the *telnet* accept task, so on an
+  SSH-only deployment (`telnet_enabled = false`) it never runs — no goodbye for
+  SSH shells *or* relay sessions. Not a hang: sessions still tear down via
+  russh's disconnect cascade when the server future drops. A proper fix means
+  hoisting the broadcast out of the telnet accept task into a transport-neutral
+  shutdown step. (Related: the broadcast's `shutdown()` on a relay's gateway-side
+  write half doesn't directly EOF the parked read either — see the corrected doc
+  comment in `relay.rs::run_master_relay_session`.)
+- **(P3, cosmetic) Slave connect `block_on` can race runtime drop on shutdown.**
+  The slave serial thread is a detached `std::thread`; its master-connect
+  `block_on` is bounded by `RELAY_CONNECT_TIMEOUT` (15 s) but doesn't re-check
+  `shutdown` mid-handshake. If shutdown fires while connecting to a master that
+  accepted TCP but stalls, `main.rs` force-drops the runtime at ~2.5 s and that
+  thread's `block_on` can print a "runtime is shutting down" panic line on exit.
+  Process still exits cleanly. Fix options: a shutdown-poll inside the connect
+  `block_on`, or a shorter connect timeout.

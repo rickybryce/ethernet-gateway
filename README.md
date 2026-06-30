@@ -1055,7 +1055,8 @@ Each serial port relays according to its own mode:
   device dials (e.g. `ATDT ethernet-gateway`, or a number in the slave's *local*
   dial map), the slave bridges the call to the master, which serves its menu or
   dials the resolved `host:port` onward (the slave's local phonebook resolves;
-  the master dials). `+++`/`ATO` work normally.
+  the master dials). `+++`/`ATO` work (see **Relay limitations** below for the
+  menu-relay idle-timeout caveat).
 - **Console-mode port** — the slave registers the port with the master and a
   master user reaches it from the master's **Serial Gateway** menu, which lists
   local ports plus registered remote ports. (A slave's *own* Serial Gateway menu
@@ -1065,6 +1066,24 @@ In slave mode the gateway still serves its own telnet/SSH, and the main menu
 shows a "SLAVE mode: ports relay to master" notice with the master's address.
 The slave reconnects automatically if the link drops. Only the SSH transport is
 implemented (`relay_transport = ssh`).
+
+### Relay limitations
+
+A few relay behaviors are worth knowing:
+
+- **SSH is the only implemented transport.** `relay_transport = raw` is
+  accepted in the config (reserved for a future raw-serial transport) but
+  always falls back to SSH, and startup logs a warning if you set it. No UI
+  exposes the key.
+- **`+++`/`ATO` on a *menu* relay is bounded by the master's idle timeout.**
+  When a device escapes a relayed *menu* call with `+++`, the SSH connection is
+  kept alive so `ATO` can resume it — but the master-side session still obeys
+  `idle_timeout_secs`, so an `ATO` issued after the master session has idled out
+  returns `NO CARRIER` (just redial). An onward *dial* relay (`host:port`) is a
+  transparent pipe with no such timeout.
+- **Onward-dial targets must be a hostname or IPv4 address.** A bracketed IPv6
+  literal (e.g. `[2001:db8::1]:23`) is not supported as a relay onward-dial
+  destination.
 
 ## Telnet Gateway
 
