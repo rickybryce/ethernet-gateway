@@ -255,6 +255,46 @@ pub type RelayReadHalf = tokio::io::ReadHalf<russh::ChannelStream<russh::client:
 /// Write half of a preserved relay channel stream.
 pub type RelayWriteHalf = tokio::io::WriteHalf<russh::ChannelStream<russh::client::Msg>>;
 
+/// Why a slave→master relay connect attempt failed.  The slave's reconnect
+/// loop (§9 #14) backs off differently per class: a transient `Network`
+/// error retries briskly (capped), while `Auth` / `Refused` back off hard —
+/// hammering bad credentials trips the master's shared per-IP lockout
+/// (3 failures → 5-minute ban) and would lock the slave's *own* IP out of
+/// telnet/SSH/web, and hammering a master that is declining relays is
+/// pointless until its config changes.
+#[derive(Debug)]
+pub enum RelayConnectError {
+    /// Transport/network problem — master unreachable, link dropped, or the
+    /// connect/handshake timed out.  Retry briskly with a capped backoff.
+    Network(String),
+    /// The master rejected our identity: wrong `slave_master_username` /
+    /// `slave_master_password`, or a host-key problem (the *changed* /
+    /// *missing* case — an unknown key is pinned and is not an error).
+    /// Back off hard.
+    Auth(String),
+    /// Authenticated, but the master declined the relay channel — it is
+    /// `standalone`, `master_accept_relays` is off, or it is an older build
+    /// with no relay handler.  Back off hard; surface as a config issue.
+    Refused(String),
+}
+
+impl RelayConnectError {
+    /// The human-readable detail message.
+    pub fn message(&self) -> &str {
+        match self {
+            RelayConnectError::Network(m)
+            | RelayConnectError::Auth(m)
+            | RelayConnectError::Refused(m) => m,
+        }
+    }
+}
+
+impl std::fmt::Display for RelayConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message())
+    }
+}
+
 /// Connect to the master's SSH server, authenticate with the slave's
 /// stored master credentials, open a channel, and request the relay
 /// `exec`.  On success the returned [`MasterRelay`] carries the channel
@@ -268,7 +308,7 @@ pub async fn connect_master_relay(
     password: &str,
     target: &RelayTarget,
     port_label: &str,
-) -> Result<MasterRelay, String> {
+) -> Result<MasterRelay, RelayConnectError> {
     connect_relay_exec(host, port, username, password, &target.exec_command(port_label)).await
 }
 
@@ -283,7 +323,7 @@ pub async fn connect_master_register(
     username: &str,
     password: &str,
     port_label: &str,
-) -> Result<MasterRelay, String> {
+) -> Result<MasterRelay, RelayConnectError> {
     connect_relay_exec(
         host,
         port,
@@ -302,7 +342,7 @@ async fn connect_relay_exec(
     username: &str,
     password: &str,
     exec_command: &str,
-) -> Result<MasterRelay, String> {
+) -> Result<MasterRelay, RelayConnectError> {
     match tokio::time::timeout(
         RELAY_CONNECT_TIMEOUT,
         connect_master_relay_inner(host, port, username, password, exec_command),
@@ -310,12 +350,14 @@ async fn connect_relay_exec(
     .await
     {
         Ok(result) => result,
-        Err(_) => Err(format!(
+        // A handshake/auth stall is a transport problem, not a credential
+        // one — classify as Network so the slave retries briskly.
+        Err(_) => Err(RelayConnectError::Network(format!(
             "timed out after {}s connecting to master {}:{}",
             RELAY_CONNECT_TIMEOUT.as_secs(),
             host,
             port
-        )),
+        ))),
     }
 }
 
@@ -325,15 +367,25 @@ async fn connect_master_relay_inner(
     username: &str,
     password: &str,
     exec_command: &str,
-) -> Result<MasterRelay, String> {
-    let config = Arc::new(russh::client::Config::default());
+) -> Result<MasterRelay, RelayConnectError> {
+    // Keepalive (§9 #15): without it a silently-dropped relay link (master
+    // powered off, cable pulled, NAT idle-eviction) isn't noticed until the
+    // next write fails — leaving an idle console registration wedged.  Ping
+    // every 30s and give up after 3 unanswered, so a dead link is detected
+    // in ~2 min and the slave's reconnect loop (#14) re-establishes.  No
+    // `inactivity_timeout` — an idle-but-alive registration must stay up.
+    let config = Arc::new(russh::client::Config {
+        keepalive_interval: Some(std::time::Duration::from_secs(30)),
+        keepalive_max: 3,
+        ..Default::default()
+    });
     let server_key = std::sync::Arc::new(std::sync::Mutex::new(None));
     let handler = SlaveRelayHandler {
         server_key: server_key.clone(),
     };
     let mut session = russh::client::connect(config, (host, port), handler)
         .await
-        .map_err(|e| format!("connect failed: {}", e))?;
+        .map_err(|e| RelayConnectError::Network(format!("connect failed: {}", e)))?;
 
     // Verify the master's host key against known-hosts (TOFU): pin on
     // first contact, reject on a changed key (the slave is about to send
@@ -356,18 +408,22 @@ async fn connect_master_relay_inner(
                 let _ = session
                     .disconnect(russh::Disconnect::ByApplication, "host key changed", "")
                     .await;
-                return Err(format!(
+                // A changed key won't fix itself and may be a MITM — back
+                // off hard (Auth class) rather than hammer.
+                return Err(RelayConnectError::Auth(format!(
                     "master {}:{} host key CHANGED — refusing (possible MITM); \
                      remove the stale gateway_hosts entry if the master was reinstalled",
                     host, port
-                ));
+                )));
             }
         },
         None => {
             let _ = session
                 .disconnect(russh::Disconnect::ByApplication, "no host key", "")
                 .await;
-            return Err("master presented no host key".to_string());
+            return Err(RelayConnectError::Auth(
+                "master presented no host key".to_string(),
+            ));
         }
     }
 
@@ -377,19 +433,25 @@ async fn connect_master_relay_inner(
             let _ = session
                 .disconnect(russh::Disconnect::ByApplication, "auth failed", "")
                 .await;
-            return Err("authentication rejected by master".to_string());
+            return Err(RelayConnectError::Auth(
+                "authentication rejected by master".to_string(),
+            ));
         }
-        Err(e) => return Err(format!("auth error: {}", e)),
+        // A transport error mid-auth is network, not a credential rejection.
+        Err(e) => return Err(RelayConnectError::Network(format!("auth error: {}", e))),
     }
 
     let channel = session
         .channel_open_session()
         .await
-        .map_err(|e| format!("channel open failed: {}", e))?;
+        .map_err(|e| RelayConnectError::Network(format!("channel open failed: {}", e)))?;
+    // The master sends channel_failure to a non-master / relays-off / older
+    // build, surfacing here as an exec error — that's a *refusal* (config),
+    // not a transient network fault, so back off hard rather than hammer.
     channel
         .exec(true, exec_command.as_bytes())
         .await
-        .map_err(|e| format!("relay exec failed: {}", e))?;
+        .map_err(|e| RelayConnectError::Refused(format!("relay declined by master: {}", e)))?;
 
     let stream = channel.into_stream();
     Ok(MasterRelay {

@@ -119,7 +119,12 @@ const MAX_INPUT_LENGTH: usize = 1024;
 /// the screen bounded (see `test_server_config_menu_row_count`).
 const SERVER_ADDR_DISPLAY_CAP: usize = 3;
 const MAX_AUTH_ATTEMPTS: u32 = 3;
-const LOCKOUT_DURATION: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+/// Per-IP ban window after `MAX_AUTH_ATTEMPTS` failures.  `pub(crate)` so the
+/// slave reconnect loop's auth-backoff (serial.rs §9 #14) can be tested to
+/// exceed it — a shorter backoff would let a wrong-credential slave lock its
+/// own IP out.
+pub(crate) const LOCKOUT_DURATION: std::time::Duration =
+    std::time::Duration::from_secs(5 * 60);
 
 // ─── Terminal Type ──────────────────────────────────────────
 #[derive(Debug, Clone, Copy, PartialEq)]

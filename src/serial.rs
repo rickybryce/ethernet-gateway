@@ -709,12 +709,72 @@ fn console_manager_tick(
     }
 }
 
+// ─── Slave reconnect backoff policy (§9 #14) ──────────────────────
+//
+// A misconfigured slave must not hammer the master: tight-looping bad
+// credentials trips the master's shared per-IP lockout (3 failures →
+// 5-minute ban, telnet.rs), which would lock the slave's *own* IP out of
+// telnet/SSH/web too.  So the reconnect loop classifies the failure
+// (`relay::RelayConnectError`) and waits accordingly.
+
+/// First/brisk retry delay for a transient (network) failure.
+const RECONNECT_BACKOFF_MIN: Duration = Duration::from_secs(1);
+/// Cap for the exponential network-retry backoff.
+const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(30);
+/// Auth-rejection backoff.  Longer than the master's 5-minute lockout
+/// window so repeated wrong-credential attempts never accumulate to the
+/// 3-strike ban (each attempt is the only one in its window → never banned).
+const RECONNECT_BACKOFF_AUTH: Duration = Duration::from_secs(6 * 60);
+/// Relay-refused backoff.  The master is reachable and our login works; it
+/// is just declining relays (config) — re-check periodically for a fix.
+const RECONNECT_BACKOFF_REFUSED: Duration = Duration::from_secs(60);
+
+/// Next network-retry delay: exponential, capped at `RECONNECT_BACKOFF_MAX`.
+fn next_network_backoff(current: Duration) -> Duration {
+    (current.saturating_mul(2)).min(RECONNECT_BACKOFF_MAX)
+}
+
+/// Choose the delay before the next reconnect attempt given the failure
+/// class, and advance/reset the running network backoff accordingly.
+/// `Network` consumes the current (then-advanced) capped-exponential delay;
+/// `Auth` / `Refused` use their fixed hard delay and reset the network
+/// backoff so a later transient outage starts brisk again.
+fn relay_reconnect_delay(
+    err: &crate::relay::RelayConnectError,
+    net_backoff: &mut Duration,
+) -> Duration {
+    use crate::relay::RelayConnectError as E;
+    match err {
+        E::Network(_) => {
+            let d = *net_backoff;
+            *net_backoff = next_network_backoff(*net_backoff);
+            d
+        }
+        E::Auth(_) => {
+            *net_backoff = RECONNECT_BACKOFF_MIN;
+            RECONNECT_BACKOFF_AUTH
+        }
+        E::Refused(_) => {
+            *net_backoff = RECONNECT_BACKOFF_MIN;
+            RECONNECT_BACKOFF_REFUSED
+        }
+    }
+}
+
+/// "Log the outage once" (§9 #14): true only when `msg` differs from the
+/// last-logged outage, so a persistent failure produces one line, not a
+/// flood every retry.  The caller updates `last` when this returns true.
+fn should_log_outage(last: &Option<String>, msg: &str) -> bool {
+    last.as_deref() != Some(msg)
+}
+
 /// Slave-role console-mode loop (§9 #12).  Registers the port with the
 /// master over SSH and keeps the registration idle; when a master user
 /// picks the port, the master sends one activate byte and we bridge the
 /// local UART to the relay channel.  Reconnects/re-registers after each
-/// bridge ends or if the link drops.  The port is dedicated to the master
-/// (not offered in the slave's own local Serial Gateway picker).
+/// bridge ends or if the link drops, with a failure-class-aware backoff
+/// (§9 #14).  The port is dedicated to the master (not offered in the
+/// slave's own local Serial Gateway picker).
 fn console_slave_register_tick(
     id: SerialPortId,
     port_cfg: SerialPortConfig,
@@ -742,12 +802,19 @@ fn console_slave_register_tick(
     let mport = cfg.slave_master_port;
     let user = cfg.slave_master_username.clone();
     let pass = cfg.slave_master_password.clone();
+    let label = id.label();
     glog!(
         "Serial console (Port {}): slave mode — registering with master {}:{}",
-        id.label(),
+        label,
         host,
         mport
     );
+
+    // Reconnect state (§9 #14): a capped exponential network backoff and a
+    // "log the outage once" dedupe so a persistent failure neither hammers
+    // the master nor floods the log.
+    let mut net_backoff = RECONNECT_BACKOFF_MIN;
+    let mut last_outage: Option<String> = None;
 
     loop {
         if aborted(idx) {
@@ -757,30 +824,69 @@ fn console_slave_register_tick(
         let port = match open_serial_port(&port_cfg) {
             Ok(p) => p,
             Err(e) => {
-                glog!(
-                    "Serial console (Port {}): cannot open {}: {} — retrying",
-                    id.label(),
-                    port_cfg.port,
-                    e
-                );
-                slave_backoff(idx, &shutdown);
+                // Local UART unavailable (busy / unplugged) is transient —
+                // capped network-class backoff, logged once.
+                let msg = format!("cannot open {}: {}", port_cfg.port, e);
+                if should_log_outage(&last_outage, &msg) {
+                    glog!("Serial console (Port {}): {} — retrying", label, msg);
+                    last_outage = Some(msg);
+                }
+                let delay = net_backoff;
+                net_backoff = next_network_backoff(net_backoff);
+                slave_backoff(idx, &shutdown, delay);
                 continue;
             }
         };
 
-        let label = id.label();
         let connected = handle.block_on(async {
             crate::relay::connect_master_register(&host, mport, &user, &pass, label).await
         });
         let relay = match connected {
             Ok(r) => r,
             Err(e) => {
-                glog!("Serial console (Port {}): register failed: {}", label, e);
+                use crate::relay::RelayConnectError as E;
+                let delay = relay_reconnect_delay(&e, &mut net_backoff);
+                let msg = match &e {
+                    E::Network(m) => format!("master {}:{} unreachable: {}", host, mport, m),
+                    E::Auth(m) => format!(
+                        "master {}:{} auth rejected ({}) — backing off {}m; \
+                         check slave_master_username/password",
+                        host,
+                        mport,
+                        m,
+                        RECONNECT_BACKOFF_AUTH.as_secs() / 60
+                    ),
+                    E::Refused(m) => format!(
+                        "master {}:{} not accepting relays ({}) — backing off {}s; \
+                         is it gateway_role=master with master_accept_relays=true?",
+                        host,
+                        mport,
+                        m,
+                        RECONNECT_BACKOFF_REFUSED.as_secs()
+                    ),
+                };
+                if should_log_outage(&last_outage, &msg) {
+                    glog!("Serial console (Port {}): {}", label, msg);
+                    last_outage = Some(msg);
+                }
                 drop(port);
-                slave_backoff(idx, &shutdown);
+                slave_backoff(idx, &shutdown, delay);
                 continue;
             }
         };
+
+        // Connected — announce recovery if we were in an outage, then reset
+        // the backoff/dedupe state so a later outage starts fresh.
+        if last_outage.is_some() {
+            glog!(
+                "Serial console (Port {}): reconnected to master {}:{}",
+                label,
+                host,
+                mport
+            );
+        }
+        last_outage = None;
+        net_backoff = RECONNECT_BACKOFF_MIN;
         glog!(
             "Serial console (Port {}): registered with master; awaiting pick",
             label
@@ -812,7 +918,9 @@ fn console_slave_register_tick(
             }
             ActivateOutcome::Aborted => return,
         }
-        slave_backoff(idx, &shutdown);
+        // Normal churn (bridge ended or channel closed cleanly) — brisk
+        // re-register, not an outage backoff.
+        slave_backoff(idx, &shutdown, RECONNECT_BACKOFF_MIN);
     }
 }
 
@@ -857,10 +965,11 @@ where
     }
 }
 
-/// Backoff between slave reconnect attempts, responsive to shutdown/restart.
-fn slave_backoff(idx: usize, shutdown: &Arc<AtomicBool>) {
+/// Wait `backoff` before the next slave reconnect attempt, staying
+/// responsive to shutdown/restart (polls in 100 ms steps and returns early
+/// when either flag is set, so a long auth backoff never delays shutdown).
+fn slave_backoff(idx: usize, shutdown: &Arc<AtomicBool>, backoff: Duration) {
     let mut waited = Duration::ZERO;
-    let backoff = Duration::from_millis(1000);
     let step = Duration::from_millis(100);
     while waited < backoff
         && !shutdown.load(Ordering::SeqCst)
@@ -5024,6 +5133,73 @@ mod tests {
     // ─── Slave relay-target resolution (Model B) ──────────
     // These cases avoid the phonebook branch (which reads global config)
     // by using the gateway keywords and literal host:port targets.
+
+    // ─── Slave reconnect backoff policy (§9 #14) ──────────
+
+    #[test]
+    fn test_next_network_backoff_is_capped_exponential() {
+        // Doubles each step, then clamps at the cap and stays there.
+        let mut d = RECONNECT_BACKOFF_MIN;
+        assert_eq!(d, Duration::from_secs(1));
+        d = next_network_backoff(d);
+        assert_eq!(d, Duration::from_secs(2));
+        d = next_network_backoff(d);
+        assert_eq!(d, Duration::from_secs(4));
+        // Walk it up to and past the cap; it must never exceed MAX.
+        for _ in 0..10 {
+            d = next_network_backoff(d);
+            assert!(d <= RECONNECT_BACKOFF_MAX);
+        }
+        assert_eq!(d, RECONNECT_BACKOFF_MAX);
+        // At the cap it is idempotent (no overflow on saturating_mul).
+        assert_eq!(next_network_backoff(d), RECONNECT_BACKOFF_MAX);
+    }
+
+    #[test]
+    fn test_relay_reconnect_delay_network_advances_backoff() {
+        use crate::relay::RelayConnectError as E;
+        let mut net = RECONNECT_BACKOFF_MIN;
+        // A network failure consumes the current delay and advances it.
+        let d1 = relay_reconnect_delay(&E::Network("x".into()), &mut net);
+        assert_eq!(d1, RECONNECT_BACKOFF_MIN);
+        assert_eq!(net, Duration::from_secs(2));
+        let d2 = relay_reconnect_delay(&E::Network("x".into()), &mut net);
+        assert_eq!(d2, Duration::from_secs(2));
+        assert_eq!(net, Duration::from_secs(4));
+    }
+
+    #[test]
+    fn test_relay_reconnect_delay_hard_failures_back_off_long_and_reset() {
+        use crate::relay::RelayConnectError as E;
+        // Auth: hard backoff, and the network track resets to MIN so a later
+        // transient outage starts brisk again.
+        let mut net = Duration::from_secs(16);
+        let d = relay_reconnect_delay(&E::Auth("bad".into()), &mut net);
+        assert_eq!(d, RECONNECT_BACKOFF_AUTH);
+        assert_eq!(net, RECONNECT_BACKOFF_MIN);
+        // The auth backoff must exceed the master's lockout window so repeated
+        // wrong-credential attempts never accumulate to the 3-strike ban.
+        assert!(d > crate::telnet::LOCKOUT_DURATION);
+
+        // Refused: its own hard backoff, also resets the network track.
+        let mut net = Duration::from_secs(8);
+        let d = relay_reconnect_delay(&E::Refused("standalone".into()), &mut net);
+        assert_eq!(d, RECONNECT_BACKOFF_REFUSED);
+        assert_eq!(net, RECONNECT_BACKOFF_MIN);
+    }
+
+    #[test]
+    fn test_should_log_outage_dedupes_identical_messages() {
+        // First occurrence logs; an identical repeat does not; a changed
+        // message logs again (recovery then a new failure).
+        let mut last: Option<String> = None;
+        assert!(should_log_outage(&last, "master down"));
+        last = Some("master down".to_string());
+        assert!(!should_log_outage(&last, "master down"));
+        assert!(should_log_outage(&last, "auth rejected"));
+        last = None;
+        assert!(should_log_outage(&last, "master down"));
+    }
 
     #[test]
     fn test_slave_resolve_relay_target_menu_keyword() {

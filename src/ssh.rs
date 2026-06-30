@@ -54,6 +54,15 @@ pub fn start_ssh_server(
         let config = russh::server::Config {
             keys: vec![key],
             auth_rejection_time: std::time::Duration::from_secs(1),
+            // Keepalive (§9 #15): detect and reap dead clients — most
+            // importantly a slave whose relay/registration link died
+            // silently, so its master-side session slot and remote-port
+            // registry entry are released promptly (SshHandler::drop) instead
+            // of lingering until a write happens to fail.  Benefits ordinary
+            // SSH sessions too (frees slots from half-open connections).  No
+            // `inactivity_timeout` — an idle console registration is alive.
+            keepalive_interval: Some(std::time::Duration::from_secs(30)),
+            keepalive_max: 3,
             ..Default::default()
         };
         let config = Arc::new(config);

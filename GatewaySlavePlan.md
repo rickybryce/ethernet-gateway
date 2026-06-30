@@ -574,6 +574,14 @@ Surfaced in the 2026-06-28 design review. Some now decided; the rest flagged.
   UART (critical for file transfers). TCP backpressure handles this *if* the slave doesn't
   pre-drain the socket.
 - **#14 Reconnect policy — keep trying, but distinguish network vs auth vs relay-refused failure.**
+  **DONE 2026-06-30 (post-review).** `connect_master_*` now return `relay::RelayConnectError`
+  {`Network`|`Auth`|`Refused`}; `console_slave_register_tick` classifies the failure and backs off
+  per class — `Network` capped-exponential 1→30 s, `Auth` 6 min (> the 5-min lockout window so a
+  wrong-credential slave never self-bans), `Refused` 60 s — and logs the outage **once**
+  (`should_log_outage`) instead of every retry. Modem-mode dial is connect-per-call (device redials),
+  so it just surfaces the reason + `NO CARRIER`. Tests: `test_next_network_backoff_*`,
+  `test_relay_reconnect_delay_*`, `test_should_log_outage_*`, `test_relay_connect_error_*`.
+  Original requirement below:
   Yes, the slave keeps trying. Reuse the proven serial-reconnect pattern (commit `4cfad87`): **log
   the outage once** (no ~2/sec spam), **honor the shutdown/role-change flag** (no spin; exits
   cleanly), and reconnect automatically when the master returns. Applies to both the **initial**
@@ -595,7 +603,14 @@ Surfaced in the 2026-06-28 design review. Some now decided; the rest flagged.
     level message ("master is not accepting relays"), since the target is reachable and authenticating
     fine; only the relay request is being declined.
   - Each relayed port/channel retries independently.
-- **#15 Dead-link / half-open detection (keepalive).** There is **no keepalive anywhere** in the
+- **#15 Dead-link / half-open detection (keepalive).** **DONE 2026-06-30 (post-review).** SSH
+  keepalive enabled on both ends of relay links — the slave relay client (`relay.rs`
+  `keepalive_interval=30s, keepalive_max=3`) and the master SSH server (`ssh.rs`, same), with no
+  `inactivity_timeout` so an idle-but-alive console registration stays up. A dead link is now
+  detected in ~2 min: the slave's reconnect loop (#14) re-establishes, and on the master the dead
+  connection's `SshHandler::drop` releases the session slot + remote-port registry entry (so #3/#16
+  actually fire). Original requirement below:
+  There is **no keepalive anywhere** in the
   codebase today. A *silently* dropped relay link (master powered off, cable pulled, NAT
   idle-timeout) isn't noticed until the next write fails — so #3 (carrier drop) and #14 (reconnect)
   won't fire promptly, leaving a **stale master-side session** and a slave that wrongly believes it

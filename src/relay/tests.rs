@@ -21,8 +21,23 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::{
     parse_relay_command, run_master_relay_dial, run_master_relay_session, ParsedRelay,
-    RelayTarget,
+    RelayConnectError, RelayTarget,
 };
+
+/// The connect-error classes carry their detail through `Display`/`message`
+/// (the slave reconnect loop, §9 #14, formats them into its log + chooses a
+/// backoff by variant).
+#[test]
+fn test_relay_connect_error_message_and_display() {
+    let n = RelayConnectError::Network("unreachable".into());
+    let a = RelayConnectError::Auth("bad creds".into());
+    let r = RelayConnectError::Refused("standalone".into());
+    assert_eq!(n.message(), "unreachable");
+    assert_eq!(a.message(), "bad creds");
+    assert_eq!(r.message(), "standalone");
+    // Display mirrors message() so existing `{}` log sites keep working.
+    assert_eq!(format!("{}", a), "bad creds");
+}
 
 /// Read from `dev` into `acc` until `needle` appears in the accumulated
 /// (lossy-UTF-8) output, or the overall deadline elapses.  Returns true if
