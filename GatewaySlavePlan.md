@@ -348,26 +348,31 @@ master` (policy choice at implementation time — see §4.6).
     `parse_relay_command`), onward-dial transparent piping (`run_master_relay_dial` ↔ a fake TCP
     echo), plus P1's full-session loopback (the exact thing the SSH channel carries). All CI-able.
   - Suite green (1273 lib + 1 e2e at last full run), clippy `--all-targets` clean.
-  - **Deferred (not blockers; tracked for a later pass):**
-    - **Real two-instance SSH smoke test** is the manual ground truth (a CI test would race the
-      process-global config singleton and write a host key into CWD — same reason CCGMS/VICE
-      interop is manual). Components are covered above.
-    - **Console-mode remote ports** (§9 #12): persistent slave→master registration channel +
-      remote-port registry in the master's Serial Gateway picker + paging/cap. Modem-mode
-      (slave-initiated on connect) is done; console-mode (master-initiated on pick) is not.
-    - **Review finding 3 (relay identity):** `client_type_label()` still shows "Serial modem" for
-      a relay; first-class `is_relay`/remote-key identity rides with the picker registry work.
-    - **`+++`/ATO resume across a relay call** (modem mode): not preserved in v1 — a relay call
-      ends on `+++` (the device can redial). `ActiveConnection` has no relay variant yet. (The
-      relay write half is now flushed+EOF'd cleanly on `+++` so the master isn't reset mid-flush.)
-    - **#13 slave-mode warning** on the telnet main menu ("this gateway is in SLAVE mode — connect
-      to the master at <ip>"): not yet added.
-    - **`relay_transport = raw`** (P3): only `ssh` is implemented. The `raw` option is now hidden
-      from all 3 UIs and a startup warning fires if it's hand-set (was a silent "set raw, get ssh"
-      trap); the config key is retained for when P3 adds the raw transport.
-    - **Head-of-line blocking** across concurrent relay channels on one SSH connection: documented
-      in `ssh.rs` `data()`; the correct fix (per-channel mpsc pump with SSH-window backpressure)
-      belongs with the concurrent multi-channel work (#12), not a naive try_send/unbounded buffer.
+  - **Deferrals — DONE 2026-06-30 (this session):**
+    - **Console-mode remote ports (§9 #12): DONE.** `serial-register <port>` exec → master holds
+      the channel idle in a global `REMOTE_PORTS` registry; the Serial Gateway picker lists local
+      A/B + registered remote ports (digit-keyed, capped at `REMOTE_PORT_DISPLAY_CAP=6` per the
+      "cap not paging" allowance); on pick the master claims the channel, sends the one-byte
+      `RELAY_ACTIVATE_BYTE`, and bridges via the existing console pump. Slave runs
+      `console_slave_register_tick` (open port → register → await activate → bridge → reconnect,
+      bounded/shutdown-aware); its own picker marks the relayed port "-> master" (ineligible).
+      Registrations count against `max_sessions`; `channel_close` drops the registry entry.
+    - **Review finding 3 (relay identity): DONE** — `is_relay` flag; `client_type_label()` →
+      "Relay (slave)".
+    - **`+++`/ATO resume across a relay call: DONE** — `ActiveConnection::Relay` preserves the SSH
+      connection across `+++`; ATO resumes; clean EOF on disconnect/hangup.
+    - **#13 slave-mode warning: DONE** — the slave's main telnet menu shows "SLAVE mode: ports
+      relay to master" + the master address.
+  - **Remaining deferrals (genuinely optional / out of band):**
+    - **Real two-instance SSH smoke test** — manual ground truth (a CI test would race the
+      process-global config singleton + write a host key to CWD; same reason CCGMS/VICE is manual).
+    - **`relay_transport = raw` (P3): SKIPPED by decision (2026-06-30)** — SSH transport adopted;
+      raw is the design's explicitly-skippable alternative. Config key retained, hidden from UIs,
+      startup-warned if hand-set.
+    - **Head-of-line blocking:** documented in `ssh.rs` `data()`. Not reachable today — the slave
+      opens one channel per connection (modem connect-per-call; console one connection per port),
+      so no two channels share a connection. The per-channel-pump fix belongs with any future
+      single-connection multi-channel design.
   - **Two adversarial review passes (2026-06-30): all findings fixed** except the deferrals above.
     P2-review fixes shipped: relay connect timeout (15s), `channel_close` cleanup (no writer leak),
     onward-dial `copy_bidirectional` (no truncation), slave host-key TOFU pin via `gateway_hosts`,

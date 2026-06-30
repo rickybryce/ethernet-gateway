@@ -550,7 +550,14 @@ fn serial_manager(
         let port = cfg.port(id).clone();
         if port.enabled && !port.port.is_empty() {
             if port.mode == "console" {
-                console_manager_tick(id, port, handle.clone(), shutdown.clone());
+                if cfg.gateway_role == "slave" {
+                    // Slave: a console-mode port registers itself with the
+                    // master and is bridged on demand (master-initiated),
+                    // rather than waiting for a local Serial Gateway pick.
+                    console_slave_register_tick(id, port, handle.clone(), shutdown.clone());
+                } else {
+                    console_manager_tick(id, port, handle.clone(), shutdown.clone());
+                }
             } else {
                 // Modem mode: keep the port open, reopening it if the
                 // underlying device disappears (e.g. a socat or USB-serial
@@ -702,6 +709,168 @@ fn console_manager_tick(
     }
 }
 
+/// Slave-role console-mode loop (§9 #12).  Registers the port with the
+/// master over SSH and keeps the registration idle; when a master user
+/// picks the port, the master sends one activate byte and we bridge the
+/// local UART to the relay channel.  Reconnects/re-registers after each
+/// bridge ends or if the link drops.  The port is dedicated to the master
+/// (not offered in the slave's own local Serial Gateway picker).
+fn console_slave_register_tick(
+    id: SerialPortId,
+    port_cfg: SerialPortConfig,
+    handle: tokio::runtime::Handle,
+    shutdown: Arc<AtomicBool>,
+) {
+    let idx = id.index();
+    let cfg = config::get_config();
+    let aborted = |idx: usize| {
+        shutdown.load(Ordering::SeqCst) || SERIAL_RESTART[idx].load(Ordering::SeqCst)
+    };
+
+    if cfg.slave_master_host.is_empty() {
+        glog!(
+            "Serial console (Port {}): slave mode but no master host set; idle",
+            id.label()
+        );
+        while !aborted(idx) {
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        return;
+    }
+
+    let host = cfg.slave_master_host.clone();
+    let mport = cfg.slave_master_port;
+    let user = cfg.slave_master_username.clone();
+    let pass = cfg.slave_master_password.clone();
+    glog!(
+        "Serial console (Port {}): slave mode — registering with master {}:{}",
+        id.label(),
+        host,
+        mport
+    );
+
+    loop {
+        if aborted(idx) {
+            return;
+        }
+
+        let port = match open_serial_port(&port_cfg) {
+            Ok(p) => p,
+            Err(e) => {
+                glog!(
+                    "Serial console (Port {}): cannot open {}: {} — retrying",
+                    id.label(),
+                    port_cfg.port,
+                    e
+                );
+                slave_backoff(idx, &shutdown);
+                continue;
+            }
+        };
+
+        let label = id.label();
+        let connected = handle.block_on(async {
+            crate::relay::connect_master_register(&host, mport, &user, &pass, label).await
+        });
+        let relay = match connected {
+            Ok(r) => r,
+            Err(e) => {
+                glog!("Serial console (Port {}): register failed: {}", label, e);
+                drop(port);
+                slave_backoff(idx, &shutdown);
+                continue;
+            }
+        };
+        glog!(
+            "Serial console (Port {}): registered with master; awaiting pick",
+            label
+        );
+
+        let crate::relay::MasterRelay {
+            _session,
+            mut stream,
+        } = relay;
+
+        // Idle until the master sends the one-byte activate signal (a user
+        // picked us) or the channel drops — staying responsive to
+        // shutdown/restart.
+        match slave_wait_for_activate(&handle, &mut stream, &shutdown, idx) {
+            ActivateOutcome::Activated => {
+                glog!("Serial console (Port {}): master attached; bridging", label);
+                run_console_bridge(id, port, stream, handle.clone(), shutdown.clone());
+                glog!(
+                    "Serial console (Port {}): bridge closed; re-registering",
+                    label
+                );
+            }
+            ActivateOutcome::Closed => {
+                glog!(
+                    "Serial console (Port {}): registration channel closed; reconnecting",
+                    label
+                );
+                drop(port);
+            }
+            ActivateOutcome::Aborted => return,
+        }
+        slave_backoff(idx, &shutdown);
+    }
+}
+
+/// Outcome of waiting for the master's activate signal on a registration
+/// channel.
+enum ActivateOutcome {
+    /// Master sent the activate byte — a user picked this port.
+    Activated,
+    /// Channel closed before activation (master gone) — reconnect.
+    Closed,
+    /// Server shutdown / config restart — stop.
+    Aborted,
+}
+
+/// Block (responsively) until the master sends the one-byte activate
+/// signal on a registration channel.  The byte itself is discarded
+/// (positional handshake — see `relay::RELAY_ACTIVATE_BYTE`).
+fn slave_wait_for_activate<S>(
+    handle: &tokio::runtime::Handle,
+    stream: &mut S,
+    shutdown: &Arc<AtomicBool>,
+    idx: usize,
+) -> ActivateOutcome
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    let mut byte = [0u8; 1];
+    loop {
+        if shutdown.load(Ordering::SeqCst) || SERIAL_RESTART[idx].load(Ordering::SeqCst) {
+            return ActivateOutcome::Aborted;
+        }
+        let result = handle.block_on(async {
+            tokio::time::timeout(Duration::from_millis(250), stream.read(&mut byte)).await
+        });
+        match result {
+            Ok(Ok(0)) => return ActivateOutcome::Closed,
+            Ok(Ok(_)) => return ActivateOutcome::Activated,
+            Ok(Err(_)) => return ActivateOutcome::Closed,
+            Err(_) => {} // idle timeout — re-check flags and keep waiting
+        }
+    }
+}
+
+/// Backoff between slave reconnect attempts, responsive to shutdown/restart.
+fn slave_backoff(idx: usize, shutdown: &Arc<AtomicBool>) {
+    let mut waited = Duration::ZERO;
+    let backoff = Duration::from_millis(1000);
+    let step = Duration::from_millis(100);
+    while waited < backoff
+        && !shutdown.load(Ordering::SeqCst)
+        && !SERIAL_RESTART[idx].load(Ordering::SeqCst)
+    {
+        std::thread::sleep(step);
+        waited += step;
+    }
+}
+
 /// Open one port with the user's current framing and flow-control
 /// settings.  Shared by modem mode and console mode.  Takes a port-
 /// scoped slice so the call site doesn't need to know which port id
@@ -759,16 +928,18 @@ const CONSOLE_BRIDGE_BUFSIZE: usize = 1024;
 /// Each side terminates the other by dropping its sender.  The serial
 /// thread additionally watches `SHUTDOWN` and `SERIAL_RESTART` so a
 /// server shutdown can preempt a wedged peer.
-fn run_console_bridge(
+fn run_console_bridge<S>(
     id: SerialPortId,
     mut port: Box<dyn serialport::SerialPort>,
-    duplex: tokio::io::DuplexStream,
+    stream: S,
     handle: tokio::runtime::Handle,
     shutdown: Arc<AtomicBool>,
-) {
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let (mut duplex_read, mut duplex_write) = tokio::io::split(duplex);
+    let (mut duplex_read, mut duplex_write) = tokio::io::split(stream);
     let (port_to_session_tx, mut port_to_session_rx) =
         tokio::sync::mpsc::channel::<Vec<u8>>(64);
     let (session_to_port_tx, mut session_to_port_rx) =

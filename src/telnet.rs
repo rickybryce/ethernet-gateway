@@ -1460,6 +1460,19 @@ struct WeatherData {
 pub(crate) type SharedWriter = Arc<tokio::sync::Mutex<Box<dyn tokio::io::AsyncWrite + Unpin + Send>>>;
 pub(crate) type SessionWriters = Arc<tokio::sync::Mutex<Vec<SharedWriter>>>;
 
+/// A Serial Gateway pick: either a local port (A/B) or a registered
+/// remote console port on a slave (§9 #12), keyed by the slave's IP and
+/// port label.
+enum GatewayPick {
+    Local(crate::config::SerialPortId),
+    Remote { ip: IpAddr, label: String },
+}
+
+/// Max remote console ports shown in the Serial Gateway picker.  §9 #12
+/// allows "paging OR a cap"; a cap (like `SERVER_ADDR_DISPLAY_CAP`) keeps
+/// the picker inside the 22-row PETSCII budget without paging state.
+const REMOTE_PORT_DISPLAY_CAP: usize = 6;
+
 // ─── TelnetSession ──────────────────────────────────────────
 
 pub(crate) struct TelnetSession {
@@ -6755,15 +6768,14 @@ impl TelnetSession {
         self.is_serial && self.serial_port_id == Some(id)
     }
 
-    /// Render the Serial Gateway port picker.  Returns `Ok(Some(id))`
-    /// if the user picked an eligible port, `Ok(None)` if they backed
-    /// out (or every port was ineligible and they pressed any key).
-    /// Always shows both ports' status — even when only one is
-    /// eligible — so the menu structure stays consistent and the
-    /// user can see *why* a port is unavailable.
+    /// Render the Serial Gateway port picker.  Returns the user's pick
+    /// (a local port or a registered remote console port, §9 #12), or
+    /// `Ok(None)` if they backed out.  Always shows both local ports'
+    /// status — even when only one is eligible — so the menu structure
+    /// stays consistent and the user can see *why* a port is unavailable.
     async fn gateway_serial_picker(
         &mut self,
-    ) -> Result<Option<crate::config::SerialPortId>, std::io::Error> {
+    ) -> Result<Option<GatewayPick>, std::io::Error> {
         use crate::config::{SerialPortId, SERIAL_PORT_IDS};
 
         loop {
@@ -6783,7 +6795,16 @@ impl TelnetSession {
                 // arrival port back into itself, so exclude only that
                 // port — every other port stays selectable.
                 let own_port = self.is_own_arrival_port(id);
+                // On a slave, a console port is dedicated to the master
+                // (it runs the registration loop, not the local console
+                // bridge), so it isn't selectable here — picking it would
+                // hang waiting for a local bridge nothing services (§9 #13).
+                let relayed_to_master = cfg.gateway_role == "slave"
+                    && port.enabled
+                    && port.mode == "console"
+                    && !port.port.is_empty();
                 let ok = !own_port
+                    && !relayed_to_master
                     && crate::serial::check_console_bridge_eligible(&cfg, id).is_ok();
                 any_eligible |= ok;
                 // Two-line per-port entry so the device path + baud
@@ -6795,6 +6816,8 @@ impl TelnetSession {
                 let label = format!("[{}] Port {}", id.label(), id.label());
                 let role = if own_port {
                     "Your port"
+                } else if relayed_to_master {
+                    "-> master"
                 } else if !port.enabled {
                     "Disabled"
                 } else if port.mode != "console" {
@@ -6806,6 +6829,8 @@ impl TelnetSession {
                 };
                 let role_colored = if own_port {
                     self.amber(role)
+                } else if relayed_to_master {
+                    self.dim(role)
                 } else if !port.enabled {
                     self.red(role)
                 } else if port.mode != "console" {
@@ -6834,6 +6859,36 @@ impl TelnetSession {
                 }
             }
             self.send_line("").await?;
+
+            // Registered remote console ports (§9 #12), capped.  Each is a
+            // single line keyed by a digit; the captured Vec maps the digit
+            // back to its (slave IP, label) on selection.
+            let remotes = crate::relay::list_remote_ports();
+            let shown: Vec<(std::net::IpAddr, String)> =
+                remotes.iter().take(REMOTE_PORT_DISPLAY_CAP).cloned().collect();
+            any_eligible |= !shown.is_empty();
+            if !remotes.is_empty() {
+                self.send_line(&format!("  {}", self.dim("Remote (slave) ports:")))
+                    .await?;
+                for (i, (ip, label)) in shown.iter().enumerate() {
+                    let entry = truncate_to_width(&format!("{} @ {}", label, ip), 30);
+                    self.send_line(&format!(
+                        "  {} {}",
+                        self.cyan(&format!("[{}]", i + 1)),
+                        self.green(&entry)
+                    ))
+                    .await?;
+                }
+                if remotes.len() > shown.len() {
+                    self.send_line(&format!(
+                        "  {}",
+                        self.dim(&format!("+{} more not shown", remotes.len() - shown.len()))
+                    ))
+                    .await?;
+                }
+                self.send_line("").await?;
+            }
+
             if !any_eligible {
                 self.send_line(&format!(
                     "  {}",
@@ -6857,20 +6912,26 @@ impl TelnetSession {
                 Some(s) if !s.is_empty() => s,
                 _ => return Ok(None),
             };
-            let id = match input.as_str() {
-                "a" => SerialPortId::A,
-                "b" => SerialPortId::B,
+            match input.as_str() {
+                "a" => return Ok(Some(GatewayPick::Local(SerialPortId::A))),
+                "b" => return Ok(Some(GatewayPick::Local(SerialPortId::B))),
                 "q" => return Ok(None),
-                _ => {
-                    self.show_error("Press A, B, or Q.").await?;
+                s => {
+                    // A digit selects a remote port from the shown list.
+                    if let Ok(n) = s.parse::<usize>()
+                        && n >= 1
+                        && n <= shown.len()
+                    {
+                        let (ip, label) = shown[n - 1].clone();
+                        return Ok(Some(GatewayPick::Remote { ip, label }));
+                    }
+                    self.show_error("Press A, B, a number, or Q.").await?;
                     continue;
                 }
-            };
-            // Final eligibility check happens in the caller — we
-            // return the picked id even if it's currently dim, so
-            // the user gets a specific reason rather than the
-            // generic "Press A, B, or Q" rejection.
-            return Ok(Some(id));
+            }
+            // Final eligibility for a LOCAL pick is re-checked by the
+            // caller, so a dim port still returns (the user gets a
+            // specific reason rather than a generic rejection).
         }
     }
 
@@ -6886,11 +6947,20 @@ impl TelnetSession {
         // Always render a picker — even if only one port is eligible
         // — so the user can see both ports' status side-by-side and
         // the menu structure stays consistent regardless of config.
-        let id = match self.gateway_serial_picker().await? {
-            Some(id) => id,
-            None => return Ok(()),
-        };
+        match self.gateway_serial_picker().await? {
+            None => Ok(()),
+            Some(GatewayPick::Local(id)) => self.gateway_serial_local(id).await,
+            Some(GatewayPick::Remote { ip, label }) => {
+                self.gateway_serial_remote(ip, label).await
+            }
+        }
+    }
 
+    /// Bridge to a local serial port (the original Serial Gateway path).
+    async fn gateway_serial_local(
+        &mut self,
+        id: crate::config::SerialPortId,
+    ) -> Result<(), std::io::Error> {
         // Bridging the modem-emulator's own port back into the session
         // that arrived over that very port would loop the user's
         // terminal to itself — a footgun.  Reject *only* that case: a
@@ -7033,6 +7103,100 @@ impl TelnetSession {
         let idle_timeout = std::time::Duration::from_secs(
             config::get_config().idle_timeout_secs,
         );
+        if idle_timeout.is_zero() {
+            let _ = self.wait_for_key().await;
+        } else {
+            let _ = tokio::time::timeout(idle_timeout, self.wait_for_key()).await;
+        }
+        result
+    }
+
+    /// Bridge to a registered **remote** console port on a slave (§9 #12).
+    /// The master reaches inward: claim the slave's idle registration
+    /// channel, send the one-byte activate signal so the slave starts
+    /// bridging its UART, then run the same console pump against the
+    /// channel.  Dropping the stream at the end closes the channel, which
+    /// the slave sees as end-of-bridge (it re-registers).
+    async fn gateway_serial_remote(
+        &mut self,
+        ip: IpAddr,
+        label: String,
+    ) -> Result<(), std::io::Error> {
+        use tokio::io::AsyncWriteExt;
+
+        let esc_label = match self.terminal_type {
+            TerminalType::Petscii => "<-",
+            _ => "ESC",
+        };
+        self.clear_screen().await?;
+        let sep = self.separator();
+        self.send_line(&sep).await?;
+        let title = truncate_to_width(&format!("REMOTE: {} @ {}", label, ip), 36);
+        self.send_line(&format!("  {}", self.yellow(&title))).await?;
+        self.send_line(&sep).await?;
+        self.send_line("").await?;
+        self.send_line(&format!(
+            "  Press {} {} to disconnect.",
+            self.cyan(esc_label),
+            self.cyan(esc_label)
+        ))
+        .await?;
+        self.send_line("").await?;
+        self.send(&format!("  {} ", self.cyan("Connect now? (Y/N):")))
+            .await?;
+        self.flush().await?;
+        let confirm = match self.read_byte_filtered().await? {
+            Some(b) => b,
+            None => return Ok(()),
+        };
+        self.send_line("").await?;
+        if confirm != b'Y' && confirm != b'y' {
+            return Ok(());
+        }
+
+        // Claim the registration channel (removes it from the registry so
+        // no other master user can grab the same port).
+        let Some(mut stream) = crate::relay::remove_remote_port(ip, &label) else {
+            self.show_error_lines(&[
+                "That remote port is no longer",
+                "available (slave disconnected).",
+            ])
+            .await?;
+            return Ok(());
+        };
+        // Signal the slave that a user attached so it starts bridging its
+        // UART (the byte is consumed by the slave, never reaches the user).
+        if stream
+            .write_all(&[crate::relay::RELAY_ACTIVATE_BYTE])
+            .await
+            .is_err()
+            || stream.flush().await.is_err()
+        {
+            self.show_error_lines(&[
+                "Remote port went away before",
+                "the bridge could start.",
+            ])
+            .await?;
+            return Ok(());
+        }
+
+        self.send_line(&format!("  {}", self.green("Connected."))).await?;
+        self.send_line("").await?;
+        self.flush().await?;
+
+        let result = self.run_serial_console_loop(stream).await;
+
+        self.send_line("").await?;
+        self.send_line(&format!(
+            "  {}",
+            self.yellow("Remote serial bridge closed.")
+        ))
+        .await?;
+        self.send_line("").await?;
+        self.send("  Press any key to continue.").await?;
+        self.flush().await?;
+        let idle_timeout =
+            std::time::Duration::from_secs(config::get_config().idle_timeout_secs);
         if idle_timeout.is_zero() {
             let _ = self.wait_for_key().await;
         } else {
@@ -16449,9 +16613,16 @@ mod tests {
         // Worst case: both ports configured, so each takes 2 lines.
         let port_rows = 2 * 2;
         let blank_after = 1;
-        let fallback = 1 + 1 + 1; // red error + dim hint + blank (only when no port eligible)
         let footer = 1 + 1; // Q footer + prompt
-        let worst_case = chrome + port_rows + blank_after + fallback + footer;
+        // The fallback ("no port available", 3 rows) and the remote block
+        // are mutually exclusive (remotes make a port "eligible", so the
+        // fallback is suppressed).  The remote block is the larger of the
+        // two, so it drives the worst case: header + capped entries +
+        // "+N more" + trailing blank.
+        let fallback = 1 + 1 + 1;
+        let remote_block = 1 + REMOTE_PORT_DISPLAY_CAP + 1 + 1;
+        let bigger = if remote_block > fallback { remote_block } else { fallback };
+        let worst_case = chrome + port_rows + blank_after + bigger + footer;
         assert!(
             worst_case <= 22,
             "Serial Gateway picker is {} rows, exceeds 22",

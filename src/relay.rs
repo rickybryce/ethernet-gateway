@@ -22,9 +22,10 @@
 //! escaping, no CR-NUL stuffing.  `TelnetSession::new_relay` sets the
 //! session up for that (see its doc comment).
 
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use crate::logger::glog;
 use crate::telnet::{LockoutMap, SessionWriters, SharedWriter, TelnetSession};
@@ -256,11 +257,43 @@ pub async fn connect_master_relay(
     target: &RelayTarget,
     port_label: &str,
 ) -> Result<MasterRelay, String> {
-    // Bound the whole connect+auth+channel handshake so a wedged master
-    // can't freeze the serial thread (review finding: no timeout).
+    connect_relay_exec(host, port, username, password, &target.exec_command(port_label)).await
+}
+
+/// Connect to the master and register a **console-mode** port as
+/// available (§9 #12).  The master holds the channel idle in its
+/// remote-port registry until a master user picks it; the returned
+/// [`MasterRelay`] is then driven by the slave's console-registration
+/// loop (read one activate byte, then bridge the UART).
+pub async fn connect_master_register(
+    host: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+    port_label: &str,
+) -> Result<MasterRelay, String> {
+    connect_relay_exec(
+        host,
+        port,
+        username,
+        password,
+        &format!("serial-register {}", port_label),
+    )
+    .await
+}
+
+/// Shared connect+auth+channel+exec, bounded by `RELAY_CONNECT_TIMEOUT`
+/// so a wedged master can't freeze the serial thread.
+async fn connect_relay_exec(
+    host: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+    exec_command: &str,
+) -> Result<MasterRelay, String> {
     match tokio::time::timeout(
         RELAY_CONNECT_TIMEOUT,
-        connect_master_relay_inner(host, port, username, password, target, port_label),
+        connect_master_relay_inner(host, port, username, password, exec_command),
     )
     .await
     {
@@ -279,8 +312,7 @@ async fn connect_master_relay_inner(
     port: u16,
     username: &str,
     password: &str,
-    target: &RelayTarget,
-    port_label: &str,
+    exec_command: &str,
 ) -> Result<MasterRelay, String> {
     let config = Arc::new(russh::client::Config::default());
     let server_key = std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -343,7 +375,7 @@ async fn connect_master_relay_inner(
         .await
         .map_err(|e| format!("channel open failed: {}", e))?;
     channel
-        .exec(true, target.exec_command(port_label).as_bytes())
+        .exec(true, exec_command.as_bytes())
         .await
         .map_err(|e| format!("relay exec failed: {}", e))?;
 
@@ -352,6 +384,52 @@ async fn connect_master_relay_inner(
         _session: session,
         stream,
     })
+}
+
+// ─── Master-side remote-port registry (console-mode, §9 #12) ──────
+
+/// Master→slave control byte sent on a registration channel when a master
+/// user picks that remote console port: "a user attached — start bridging
+/// your UART".  The slave reads exactly one byte before entering its
+/// transparent console bridge; the value is ignored (positional), so no
+/// in-band escaping of the subsequent raw byte stream is needed.
+pub const RELAY_ACTIVATE_BYTE: u8 = 0x01;
+
+/// Console-mode slave ports currently registered with this master, keyed
+/// by `(slave IP, port label)`.  Each value is the master's end of the
+/// idle SSH registration channel.  The Serial Gateway picker lists the
+/// keys and `claim`s (removes) an entry to bridge a master user to the
+/// slave's console device.  Populated by `ssh.rs` `exec_request`
+/// (`serial-register`), drained by the picker or by channel teardown.
+static REMOTE_PORTS: StdMutex<Option<HashMap<(IpAddr, String), tokio::io::DuplexStream>>> =
+    StdMutex::new(None);
+
+/// Register (or replace) a console-mode remote port as available.
+pub fn register_remote_port(slave_ip: IpAddr, label: String, stream: tokio::io::DuplexStream) {
+    let mut g = REMOTE_PORTS.lock().unwrap_or_else(|e| e.into_inner());
+    g.get_or_insert_with(HashMap::new)
+        .insert((slave_ip, label), stream);
+}
+
+/// Remove a registered remote port, returning the master's channel end if
+/// present.  Used both to **claim** a port for bridging (the caller then
+/// owns the stream) and to drop a stale registration on channel teardown.
+pub fn remove_remote_port(slave_ip: IpAddr, label: &str) -> Option<tokio::io::DuplexStream> {
+    let mut g = REMOTE_PORTS.lock().unwrap_or_else(|e| e.into_inner());
+    g.as_mut()
+        .and_then(|m| m.remove(&(slave_ip, label.to_string())))
+}
+
+/// List the currently-registered remote console ports, sorted stably so
+/// the picker order doesn't jump around between redraws.
+pub fn list_remote_ports() -> Vec<(IpAddr, String)> {
+    let g = REMOTE_PORTS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut v: Vec<(IpAddr, String)> = g
+        .as_ref()
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+    v.sort();
+    v
 }
 
 #[cfg(test)]

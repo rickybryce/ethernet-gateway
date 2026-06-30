@@ -310,6 +310,7 @@ impl russh::server::Server for SshServer {
             peer_addr: peer_addr.map(|a| a.ip()),
             duplex_writer: None,
             relay_writers: std::collections::HashMap::new(),
+            registered_ports: std::collections::HashMap::new(),
             session_writers: self.session_writers.clone(),
             lockouts: self.lockouts.clone(),
             counted: false,
@@ -343,6 +344,11 @@ struct SshHandler {
         russh::ChannelId,
         Arc<tokio::sync::Mutex<tokio::io::WriteHalf<tokio::io::DuplexStream>>>,
     >,
+    /// Console-mode **registration** channels (`exec "serial-register
+    /// <port>"`): channel -> the port label it registered.  Lets
+    /// channel teardown remove the matching entry from the global
+    /// remote-port registry and release its session-cap slot (§9 #12).
+    registered_ports: std::collections::HashMap<russh::ChannelId, String>,
     session_writers: telnet::SessionWriters,
     /// Shared brute-force lockout map (telnet + SSH).
     lockouts: telnet::LockoutMap,
@@ -366,11 +372,88 @@ impl Drop for SshHandler {
 }
 
 impl SshHandler {
+    /// Register a console-mode remote port (`serial-register <port>`,
+    /// §9 #12).  Gated like the relay path (master + accept_relays + a
+    /// known peer IP) and counted against the session cap (a registered
+    /// idle port holds a slot until it disconnects).  The channel is held
+    /// idle in the global registry; the Serial Gateway picker claims it.
+    async fn register_console_port(
+        &mut self,
+        channel: russh::ChannelId,
+        label: &str,
+        session: &mut russh::server::Session,
+    ) -> Result<(), russh::Error> {
+        let cfg = config::get_config();
+        if cfg.gateway_role != "master" || !cfg.master_accept_relays {
+            glog!(
+                "SSH: refused serial-register from {:?} (role={}, accept_relays={})",
+                self.peer_addr,
+                cfg.gateway_role,
+                cfg.master_accept_relays
+            );
+            session.channel_failure(channel)?;
+            return Ok(());
+        }
+        let Some(slave_ip) = self.peer_addr else {
+            glog!("SSH: serial-register with no peer address; refusing");
+            session.channel_failure(channel)?;
+            return Ok(());
+        };
+        if label.is_empty() {
+            session.channel_failure(channel)?;
+            return Ok(());
+        }
+
+        // A registered idle port consumes a session slot for its lifetime.
+        let prev = self.session_count.fetch_add(1, Ordering::SeqCst);
+        if prev >= self.max_sessions {
+            self.session_count.fetch_sub(1, Ordering::SeqCst);
+            glog!(
+                "SSH: serial-register from {} rejected (server at capacity {})",
+                slave_ip,
+                self.max_sessions
+            );
+            session.channel_failure(channel)?;
+            return Ok(());
+        }
+
+        session.channel_success(channel)?;
+        glog!(
+            "SSH: registered remote console port {} from {}",
+            label,
+            slave_ip
+        );
+
+        // gateway_stream (kept whole, stored in the registry) IS the
+        // master's end of the channel: writing to it reaches the slave,
+        // reading from it yields the slave's bytes.
+        let (gateway_stream, handler_stream) = tokio::io::duplex(65536);
+        let (handler_read, handler_write) = tokio::io::split(handler_stream);
+        self.relay_writers.insert(
+            channel,
+            Arc::new(tokio::sync::Mutex::new(handler_write)),
+        );
+        spawn_channel_reader(session.handle(), channel, handler_read);
+
+        let label = label.to_string();
+        crate::relay::register_remote_port(slave_ip, label.clone(), gateway_stream);
+        self.registered_ports.insert(channel, label);
+        Ok(())
+    }
+
     /// Shut down the bridge for a closed channel.  A relay channel closes
     /// only that channel's session; any non-relay channel falls back to the
     /// single interactive shell bridge.  Shared by channel_eof and
     /// channel_close (a peer may send either, or both — idempotent).
     async fn teardown_channel(&mut self, channel: russh::ChannelId) {
+        // A registration channel: drop its registry entry (if still
+        // unclaimed) and release its session-cap slot.
+        if let Some(label) = self.registered_ports.remove(&channel) {
+            if let Some(addr) = self.peer_addr {
+                let _ = crate::relay::remove_remote_port(addr, &label);
+            }
+            self.session_count.fetch_sub(1, Ordering::SeqCst);
+        }
         if let Some(writer) = self.relay_writers.remove(&channel) {
             let mut w = writer.lock().await;
             let _ = w.shutdown().await;
@@ -595,6 +678,16 @@ impl russh::server::Handler for SshHandler {
     ) -> Result<(), Self::Error> {
         let command = String::from_utf8_lossy(data);
         let command = command.trim();
+
+        // Console-mode registration (§9 #12): `serial-register <port>` —
+        // the slave offers a console port; we hold the channel idle in the
+        // remote-port registry until a master user picks it in the Serial
+        // Gateway picker.
+        if let Some(label) = command.strip_prefix("serial-register ") {
+            return self
+                .register_console_port(channel, label.trim(), session)
+                .await;
+        }
 
         // Grammar (§3 Model B): `serial-relay <port> menu`
         //                    or `serial-relay <port> dial <host>:<port>`.
@@ -955,6 +1048,7 @@ mod tests {
             peer_addr: Some("10.0.0.1".parse().unwrap()),
             duplex_writer: None,
             relay_writers: std::collections::HashMap::new(),
+            registered_ports: std::collections::HashMap::new(),
             session_writers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             lockouts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             counted: false,
@@ -1040,6 +1134,7 @@ mod tests {
             peer_addr: Some(ip),
             duplex_writer: None,
             relay_writers: std::collections::HashMap::new(),
+            registered_ports: std::collections::HashMap::new(),
             session_writers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             lockouts: lockouts.clone(),
             counted: false,
@@ -1071,6 +1166,7 @@ mod tests {
             peer_addr: Some(ip),
             duplex_writer: None,
             relay_writers: std::collections::HashMap::new(),
+            registered_ports: std::collections::HashMap::new(),
             session_writers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             lockouts: lockouts.clone(),
             counted: false,
@@ -1117,6 +1213,7 @@ mod tests {
             peer_addr: Some(ip),
             duplex_writer: None,
             relay_writers: std::collections::HashMap::new(),
+            registered_ports: std::collections::HashMap::new(),
             session_writers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             lockouts: lockouts.clone(),
             counted: false,

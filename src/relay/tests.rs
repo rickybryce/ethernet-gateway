@@ -213,6 +213,33 @@ fn test_parse_relay_command_rejects_garbage() {
     );
 }
 
+/// The console-mode remote-port registry (§9 #12): register, list,
+/// claim-removes, and a second claim finds nothing.  Uses a TEST-NET-3 IP
+/// (203.0.113.x) so it can't collide with another test's registry keys.
+#[tokio::test]
+async fn test_remote_port_registry() {
+    use std::net::IpAddr;
+    let ip: IpAddr = "203.0.113.7".parse().unwrap();
+    let (master_a, _dev_a) = tokio::io::duplex(64);
+    let (master_b, _dev_b) = tokio::io::duplex(64);
+
+    super::register_remote_port(ip, "A".into(), master_a);
+    super::register_remote_port(ip, "B".into(), master_b);
+
+    let listed = super::list_remote_ports();
+    assert!(listed.contains(&(ip, "A".to_string())));
+    assert!(listed.contains(&(ip, "B".to_string())));
+
+    // Claiming removes the entry; a second claim finds nothing.
+    assert!(super::remove_remote_port(ip, "A").is_some());
+    assert!(super::remove_remote_port(ip, "A").is_none());
+    assert!(!super::list_remote_ports().contains(&(ip, "A".to_string())));
+
+    // Clean up so the global registry doesn't leak into other tests.
+    let _ = super::remove_remote_port(ip, "B");
+    assert!(!super::list_remote_ports().contains(&(ip, "B".to_string())));
+}
+
 /// Onward dial (Model B): `run_master_relay_dial` connects to the target
 /// and pipes the relay channel through transparently in both directions.
 #[tokio::test]
