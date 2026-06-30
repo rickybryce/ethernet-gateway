@@ -164,6 +164,14 @@ enum ActiveConnection {
         read: tokio::io::ReadHalf<tokio::io::DuplexStream>,
         write: tokio::io::WriteHalf<tokio::io::DuplexStream>,
     },
+    /// A preserved master/slave relay call (SSH).  `_session` keeps the
+    /// SSH connection open across a `+++` escape so ATO can resume; the
+    /// halves are the relay channel stream the UART bridges through.
+    Relay {
+        _session: crate::relay::RelaySession,
+        read: crate::relay::RelayReadHalf,
+        write: crate::relay::RelayWriteHalf,
+    },
 }
 
 /// Why the online-mode loop exited.
@@ -2041,7 +2049,42 @@ fn handle_return_online(state: &mut ModemState) {
                 }
             }
         }
+        ActiveConnection::Relay {
+            _session,
+            mut read,
+            mut write,
+        } => {
+            let exit = online_mode_duplex(state, &mut read, &mut write);
+            state.mode = ModemMode::Command;
+            match exit {
+                OnlineExit::Escaped => {
+                    state.active_connection = Some(ActiveConnection::Relay {
+                        _session,
+                        read,
+                        write,
+                    });
+                    send_result(state, "OK");
+                }
+                OnlineExit::Disconnected => {
+                    relay_shutdown_write(state, &mut write);
+                    send_result(state, "NO CARRIER");
+                }
+            }
+        }
     }
+}
+
+/// Cleanly EOF a relay channel's write half (bounded) so the master sees
+/// end-of-call rather than a hard reset when the connection drops.  Used
+/// on the disconnect/hangup paths of a relay call.
+fn relay_shutdown_write(state: &ModemState, write: &mut crate::relay::RelayWriteHalf) {
+    let _ = state.handle.block_on(async {
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio::io::AsyncWriteExt::shutdown(write),
+        )
+        .await
+    });
 }
 
 // ─── Dialing ───────────────────────────────────────────────
@@ -2314,38 +2357,31 @@ fn dial_master_relay(
     send_result(state, "CONNECT");
     state.mode = ModemMode::Online;
 
-    // Keep the SSH session handle alive for the duration of the call;
-    // dropping it closes the connection.
     let crate::relay::MasterRelay { _session, stream } = relay;
     let (mut relay_read, mut relay_write) = tokio::io::split(stream);
     let exit = online_mode_duplex(state, &mut relay_read, &mut relay_write);
 
     state.mode = ModemMode::Command;
-
-    // Cleanly close the relay write half so the master sees EOF (and can
-    // flush any in-flight output / finish a transfer) rather than a hard
-    // connection reset when `_session` drops.  Bounded so a stuck peer
-    // can't wedge the serial thread.
-    let _ = state.handle.block_on(async {
-        tokio::time::timeout(
-            Duration::from_secs(2),
-            tokio::io::AsyncWriteExt::shutdown(&mut relay_write),
-        )
-        .await
-    });
-
     match exit {
         OnlineExit::Escaped => {
-            // v1: relay calls are not preserved across +++ (no ATO
-            // resume); fall back to command mode and let the connection
-            // close when `_session` drops below.
+            // Preserve the SSH connection across the +++ escape so ATO can
+            // resume the call (the master session is just parked reading
+            // the idle channel).  Do NOT shut the write half here.
+            state.active_connection = Some(ActiveConnection::Relay {
+                _session,
+                read: relay_read,
+                write: relay_write,
+            });
             send_result(state, "OK");
         }
         OnlineExit::Disconnected => {
+            // Cleanly EOF the write half so the master sees end-of-call
+            // (and can finish flushing) rather than a hard reset when
+            // `_session` drops at end of scope.
+            relay_shutdown_write(state, &mut relay_write);
             send_result(state, "NO CARRIER");
         }
     }
-    // `_session` drops here, tearing down the SSH relay connection.
 }
 
 /// Returns true if the dial string looks like a phone number rather than a

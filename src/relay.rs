@@ -233,6 +233,15 @@ pub struct MasterRelay {
     pub stream: russh::ChannelStream<russh::client::Msg>,
 }
 
+/// The SSH client session handle for a relay call — held alive to keep
+/// the connection open across a `+++` escape so ATO can resume it (see
+/// `serial::ActiveConnection::Relay`).
+pub type RelaySession = russh::client::Handle<SlaveRelayHandler>;
+/// Read half of a preserved relay channel stream.
+pub type RelayReadHalf = tokio::io::ReadHalf<russh::ChannelStream<russh::client::Msg>>;
+/// Write half of a preserved relay channel stream.
+pub type RelayWriteHalf = tokio::io::WriteHalf<russh::ChannelStream<russh::client::Msg>>;
+
 /// Connect to the master's SSH server, authenticate with the slave's
 /// stored master credentials, open a channel, and request the relay
 /// `exec`.  On success the returned [`MasterRelay`] carries the channel

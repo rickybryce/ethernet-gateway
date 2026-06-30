@@ -1483,6 +1483,12 @@ pub(crate) struct TelnetSession {
     web_forms: Vec<crate::webbrowser::WebForm>,
     weather_zip: String,
     is_serial: bool,
+    /// True for a master/slave **relay** session (a remote device bridged
+    /// in from a slave).  Such a session behaves like a serial caller
+    /// (`is_serial = true`, raw 8-bit, owns no local port) but is labelled
+    /// distinctly and, for the console-mode picker, identified by its
+    /// peer (the slave's IP).  False for every local/telnet/SSH session.
+    is_relay: bool,
     /// When `is_serial = true`, this records WHICH physical port the
     /// caller dialed in on (Port A or Port B).  Used by
     /// `modem_apply_settings` to scope the 60-s warn-+-revert flow to
@@ -1575,6 +1581,7 @@ impl TelnetSession {
             web_forms: Vec::new(),
             weather_zip: config::get_config().weather_zip,
             is_serial: true,
+            is_relay: false,
             serial_port_id: Some(port_id),
             is_ssh: false,
             idle_timeout: std::time::Duration::from_secs(config::get_config().idle_timeout_secs),
@@ -1630,6 +1637,7 @@ impl TelnetSession {
             web_forms: Vec::new(),
             weather_zip: config::get_config().weather_zip,
             is_serial: false,
+            is_relay: false,
             serial_port_id: None,
             is_ssh: true,
             idle_timeout: std::time::Duration::from_secs(config::get_config().idle_timeout_secs),
@@ -1701,6 +1709,7 @@ impl TelnetSession {
             web_forms: Vec::new(),
             weather_zip: config::get_config().weather_zip,
             is_serial: true,
+            is_relay: true,
             serial_port_id: None,
             is_ssh: false,
             idle_timeout: std::time::Duration::from_secs(config::get_config().idle_timeout_secs),
@@ -3460,6 +3469,37 @@ impl TelnetSession {
             .await?;
         self.send_line(&sep).await?;
         self.send_line("").await?;
+
+        // Slave-mode notice (§9 #13).  Shown only on a slave's own inbound
+        // menu (never on the master or on a relay session, whose config is
+        // the master's).  The slave still serves its own menu, but its
+        // serial ports relay to the master, so point the operator there.
+        // Costs 3 rows in slave mode only; the main menu is 16/22 rows so
+        // a slave lands at ~19, still inside the PETSCII budget.
+        {
+            let cfg = config::get_config();
+            if cfg.gateway_role == "slave" {
+                self.send_line(&format!(
+                    "  {}",
+                    self.amber("SLAVE mode: ports relay to master.")
+                ))
+                .await?;
+                let max_host = if self.terminal_type == TerminalType::Petscii {
+                    28 // 40 - "  Master: " - margin
+                } else {
+                    66
+                };
+                let host = if cfg.slave_master_host.is_empty() {
+                    "(not configured)".to_string()
+                } else {
+                    truncate_to_width(&cfg.slave_master_host, max_host)
+                };
+                self.send_line(&format!("  Master: {}", self.amber(&host)))
+                    .await?;
+                self.send_line("").await?;
+            }
+        }
+
         self.send_line(&format!(
             "  {}  AI Chat",
             self.cyan("A")
@@ -12571,7 +12611,9 @@ impl TelnetSession {
     // ─── TROUBLESHOOTING ────────────────────────────────────
 
     fn client_type_label(&self) -> &'static str {
-        if self.is_ssh {
+        if self.is_relay {
+            "Relay (slave)"
+        } else if self.is_ssh {
             "SSH"
         } else if self.is_serial {
             "Serial modem"
@@ -14028,6 +14070,7 @@ pub fn start_server(
                                     web_forms: Vec::new(),
                                     weather_zip: config::get_config().weather_zip,
                                     is_serial: false,
+                                    is_relay: false,
                                     serial_port_id: None,
                                     is_ssh: false,
                                     idle_timeout: std::time::Duration::from_secs(cfg.idle_timeout_secs),
@@ -14675,6 +14718,7 @@ mod tests {
             web_forms: Vec::new(),
             weather_zip: String::new(),
             is_serial: false,
+            is_relay: false,
             serial_port_id: None,
             is_ssh: false,
             idle_timeout: std::time::Duration::ZERO,
@@ -14725,6 +14769,7 @@ mod tests {
             web_forms: Vec::new(),
             weather_zip: String::new(),
             is_serial: false,
+            is_relay: false,
             serial_port_id: None,
             is_ssh: false,
             idle_timeout: std::time::Duration::ZERO,
@@ -16354,8 +16399,43 @@ mod tests {
             lockouts,
         );
         assert!(!session.is_serial);
+        assert!(!session.is_relay);
+        assert_eq!(session.client_type_label(), "SSH");
         assert!(!session.is_own_arrival_port(SerialPortId::A));
         assert!(!session.is_own_arrival_port(SerialPortId::B));
+    }
+
+    /// A relay session (master/slave) is flagged `is_relay`, owns no local
+    /// port, and is labelled distinctly from a local serial caller.
+    #[test]
+    fn test_relay_session_identity() {
+        use crate::config::SerialPortId;
+        use std::collections::HashMap;
+        use std::sync::Mutex as StdMutex;
+        let (_w, reader) = tokio::io::duplex(1);
+        let (_, writer_inner) = tokio::io::duplex(1);
+        let writer: SharedWriter = std::sync::Arc::new(tokio::sync::Mutex::new(
+            Box::new(writer_inner),
+        ));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let restart = Arc::new(AtomicBool::new(false));
+        let lockouts: LockoutMap = std::sync::Arc::new(StdMutex::new(HashMap::new()));
+        let session = TelnetSession::new_relay(
+            Box::new(reader),
+            writer,
+            shutdown,
+            restart,
+            Some("192.168.1.50".parse().unwrap()),
+            lockouts,
+        );
+        assert!(session.is_relay);
+        // Behaves like a serial caller (raw 8-bit) but owns no local port.
+        assert!(session.is_serial);
+        assert_eq!(session.serial_port_id, None);
+        assert!(!session.is_own_arrival_port(SerialPortId::A));
+        assert!(!session.is_own_arrival_port(SerialPortId::B));
+        // Labelled as a relay, not "Serial modem".
+        assert_eq!(session.client_type_label(), "Relay (slave)");
     }
 
     /// New Serial Gateway picker (always shown, even when only one
