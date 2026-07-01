@@ -183,9 +183,11 @@ fn serial_broadcast() -> &'static broadcast::Sender<Arc<[u8]>> {
 /// while online simply skips the intermediate ones (`Lagged`).
 ///
 /// The message bytes are sent verbatim, so the caller must include any
-/// framing (leading/trailing CRLF).  No-op if no ports are subscribed.
-/// **Not** the shutdown-goodbye path — that has its own shutdown-flag write
-/// in `serial_thread` that fires even mid-online.
+/// framing (leading/trailing CRLF).  They also **bypass PETSCII case-swapping**
+/// (like `send_response`, unlike telnet's `send()`), so a caller targeting a
+/// C64/PET port running `AT+PETSCII=1` must pre-encode.  No-op if no ports are
+/// subscribed.  **Not** the shutdown-goodbye path — that has its own
+/// shutdown-flag write in `serial_thread` that fires even mid-online.
 ///
 /// This is a wired extension point: the channel, subscription, and drain are
 /// live, but no production broadcast is routed to it yet (the only broadcast

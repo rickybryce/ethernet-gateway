@@ -1484,6 +1484,8 @@ serial_a_flowcontrol = none
 # (plus serial_a_echo, serial_a_verbose, serial_a_quiet, serial_a_s_regs,
 #  serial_a_x_code, serial_a_dtr_mode, serial_a_flow_mode, serial_a_dcd_mode,
 #  serial_a_stored_0..3 — all written by AT&amp;W, restored by ATZ)
+# serial_a_drive_carrier = false   # opt-in: drive DTR as a DCD carrier proxy
+#  (reflects physical cabling — config-only, NOT reset by ATZ/AT&amp;F)
 
 # Serial Port B (mirrors Port A's keys with serial_b_ prefix)
 serial_b_enabled = false

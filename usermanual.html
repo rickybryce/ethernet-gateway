@@ -2094,16 +2094,21 @@ All three can be overridden interactively (e.g. <code>AT&amp;D2</code>, <code>AT
 </aside>
 
 <aside class="warn">
-<span class="label">Signal pins are not driven</span>
+<span class="label">Signal pins are mostly not driven</span>
 <code>AT&amp;C</code>, <code>AT&amp;D</code>, and <code>AT&amp;K</code> are
 parsed, stored, persisted, and shown by <code>AT&amp;V</code> — but the
-emulator does not drive the corresponding RS-232 hardware pins. DCD, RI, DSR,
-and DTR are not controlled, and RTS/CTS handshaking on the wire is governed
-by each port's <code>serial_<em>x</em>_flowcontrol</code> setting rather
-than <code>&amp;K</code>. Most
-retro terminal software works fine without these signals; if your program
-requires DCD before communicating, look for a "force DTR" or "ignore
-carrier" option.
+emulator drives no RS-232 hardware pins by default. RI, DSR, and the read
+direction of DTR are not controlled, and RTS/CTS handshaking on the wire is
+governed by each port's <code>serial_<em>x</em>_flowcontrol</code> setting
+rather than <code>&amp;K</code>. The one exception is carrier: enable the
+per-port <code>serial_<em>x</em>_drive_carrier</code> opt-in (default off) and
+the emulator drives <strong>DTR</strong> as a carrier proxy following
+<code>AT&amp;C</code> — assert on <code>CONNECT</code>, drop on
+<code>NO&nbsp;CARRIER</code> under <code>&amp;C1</code> (or forced on under
+<code>&amp;C0</code>) — which a terminal wired DTR&rarr;DCD sees as carrier
+detect. Most retro terminal software works fine without these signals; if your
+program requires DCD before communicating, enable that opt-in or look for a
+"force DTR" / "ignore carrier" option.
 </aside>
 
 <aside class="note">
@@ -2745,8 +2750,8 @@ When a signal arrives:
     <li>An <code>AtomicBool</code> flag is set.</li>
     <li>A watcher thread fires a tokio <code>Notify</code> to wake the async runtime.</li>
     <li>Listeners stop accepting new connections.</li>
-    <li>A broadcast notification is sent to every active telnet and SSH session: "Server shutting down. Goodbye."</li>
-    <li>The serial modem thread exits cleanly, releasing the port.</li>
+    <li>A broadcast notification is sent to every active telnet, SSH, and master/slave relay session: "Server shutting down. Goodbye."</li>
+    <li>The serial modem thread emits the same notice and exits cleanly, releasing the port.</li>
     <li>The GUI window closes automatically.</li>
     <li>The process exits.</li>
 </ol>
