@@ -88,6 +88,20 @@ halves over `tokio::io::duplex` or a loopback `TcpListener`, driving a scripted
 binary transfer through the relay) would cover most of scenarios 3/4 without two
 processes. Worth building so transfers-over-relay stop being manual-only.
 
+**Partly built (2026-07-01):** the **onward-dial (Model B) transfer path** is now
+CI-covered in `src/relay/tests.rs` — real XMODEM / YMODEM / ZMODEM transfers, both
+directions, with an adversarial all-byte-values payload (incl. `0xFF`/`0x00`/CR-LF/
+`0x1A`/`0x18`/XON-XOFF), driven end to end through `run_master_relay_dial`'s
+`copy_bidirectional` (`device ↔ slave ↔ master ↔ BBS`). This is the raw-transparency
+proof for external transfers over the relay and would catch any re-introduced IAC/
+CR-NUL mangling on the dial path. **Still manual** (both documented in the test
+module): (a) a menu-driven upload *landing on the master's `transfer_dir`* —
+blocked by the process-global config singleton + CWD file writes; the full-session
+loopback test proves the menu path's raw-byte transparency but not the disk landing;
+(b) the slave's `serial::online_mode_duplex` pump carrying a binary transfer — needs
+a mock `SerialPort` trait seam (tracked with the DCD work); its byte handling is
+unit-covered by `serial::tests::test_process_bytes`.
+
 ---
 
 ## 2. Drive DCD / hardware carrier  *(new request — must not affect users without a DCD pin)*

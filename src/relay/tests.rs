@@ -359,3 +359,271 @@ async fn test_master_relay_dial_pipes_both_ways() {
     drop(d_read);
     let _ = tokio::time::timeout(Duration::from_secs(5), dialer).await;
 }
+
+// ─── In-process transfer-over-relay harness (§1 complement / #11) ─────
+//
+// `GatewayRemainingWork.md` §1 asks for a CI-able harness that drives a
+// scripted **binary file transfer through the relay** so transfers over
+// the relay stop being manual-only.  These tests cover the **onward-dial
+// (Model B) path** — `device ↔ slave ↔ master ↔ BBS` — end to end: a real
+// XMODEM / YMODEM / ZMODEM transfer runs between a simulated slave-attached
+// device and a simulated external BBS, with every byte crossing
+// `run_master_relay_dial`'s `copy_bidirectional`.  This is the exact code
+// path an `ATDT host:port` from a relayed device takes to reach a file
+// server on the master's network, and it needs no menu, no disk, and no
+// global config, so it runs in CI.
+//
+// The transfers use raw serial semantics (`is_tcp = false`, no telnet IAC
+// escaping) on both endpoints — the relay hop itself does no telnet
+// negotiation, so a bare `0xFF` must survive as a single `0xFF` end to
+// end.  The payload deliberately includes every transparency-sensitive
+// byte (`0x00`, `0xFF`, CR/LF, `0x1A` SUB, `0x18` CAN/ZDLE, XON/XOFF) so a
+// regression that re-introduced IAC doubling or CR-NUL stuffing on the
+// relay path (the class of bug the 2026-06-28 CR-NUL fix addressed) would
+// corrupt the transfer and fail these tests.
+//
+// NOT covered here (still manual — see `GatewayRemainingWork.md` §1):
+//   * A menu-driven upload landing on the *master's* `transfer_dir`
+//     (scenario 3, menu case) — the master session resolves `transfer_dir`
+//     from the process-global config singleton, which a parallel CI test
+//     can't set without racing every other test; and it writes real files
+//     to CWD.  The full-session loopback test above proves the menu path's
+//     raw-byte transparency (the `0xFF` color-prompt probe); the disk
+//     landing stays a two-instance manual check.
+//   * The slave-side `serial::online_mode_duplex` pump carrying a binary
+//     transfer — it reads a blocking `SerialPort`, so it needs a mock-port
+//     trait seam (tracked with the "drive DCD" work).  Its transparency-
+//     critical byte handling (`process_online_bytes`, `+++` guard) is unit-
+//     covered by `serial::tests::test_process_bytes`.
+
+/// A multi-block payload that exercises every byte value in varied
+/// positions plus an explicit run of the bytes the relay's transparency
+/// claim rests on.  4 KiB guarantees multiple blocks for all three
+/// protocols (128 B / 1 KiB / ZMODEM subpackets).
+fn adversarial_payload() -> Vec<u8> {
+    let mut v = Vec::with_capacity(4096 + 16);
+    // 16 XOR-permuted sweeps: each pass still contains all 256 byte
+    // values (XOR by a constant is a bijection), but at shifting offsets
+    // so block boundaries land on different values each pass.
+    for pass in 0u8..16 {
+        for b in 0u8..=255 {
+            v.push(b ^ pass);
+        }
+    }
+    // Explicit torture run: IAC, NUL, CR, LF, SUB, CAN/ZDLE, XON, XOFF,
+    // and a double-CAN (an abort look-alike that must pass as data).
+    v.extend_from_slice(&[0xFF, 0x00, 0x0D, 0x0A, 0x1A, 0x18, 0x11, 0x13, 0x18, 0x18]);
+    v
+}
+
+/// Stand up an onward-dial relay hop and return the two endpoints a
+/// real transfer protocol runs over: the **device** end (what a slave-
+/// attached machine drives) and the **BBS** end (the external host the
+/// master dialed).  Every byte between them traverses
+/// `run_master_relay_dial`'s `copy_bidirectional`.  The returned join
+/// handle is the master dialer task (await it to confirm clean teardown).
+async fn onward_dial_endpoints() -> (
+    tokio::io::DuplexStream,
+    tokio::net::TcpStream,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    // Ample buffer so neither direction blocks the copy loop on a slow
+    // stop-and-wait protocol.
+    let (master_end, device_end) = tokio::io::duplex(64 * 1024);
+    let dialer = tokio::spawn(run_master_relay_dial(
+        master_end,
+        "127.0.0.1".to_string(),
+        addr.port(),
+    ));
+    let (bbs, _) = listener.accept().await.unwrap();
+    (device_end, bbs, dialer)
+}
+
+/// XMODEM upload over the relay: the relayed device SENDS, the external
+/// BBS RECEIVES, and the bytes must arrive byte-identical after crossing
+/// the master's onward-dial pipe.
+#[tokio::test]
+async fn test_relay_onward_dial_xmodem_upload() {
+    let payload = adversarial_payload();
+    let (device_end, bbs, dialer) = onward_dial_endpoints().await;
+
+    let data = payload.clone();
+    let sender = tokio::spawn(async move {
+        let (mut r, mut w) = tokio::io::split(device_end);
+        crate::xmodem::xmodem_send(&mut r, &mut w, &data, false, false, false, false, None).await
+    });
+    let receiver = tokio::spawn(async move {
+        let (mut r, mut w) = tokio::io::split(bbs);
+        crate::xmodem::xmodem_receive(&mut r, &mut w, false, false, false).await
+    });
+
+    let (send_res, recv_res) = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(sender, receiver)
+    })
+    .await
+    .expect("relay XMODEM upload timed out");
+
+    send_res.unwrap().expect("XMODEM sender failed");
+    let (received, _meta) = recv_res.unwrap().expect("XMODEM receiver failed");
+    // XMODEM pads the final block to a 128-byte boundary; the receiver
+    // strips trailing SUB (0x1A).  Our payload ends in 0x13, so the
+    // non-padded content compares exactly.
+    assert_eq!(
+        received, payload,
+        "XMODEM upload over relay corrupted the file"
+    );
+
+    let _ = tokio::time::timeout(Duration::from_secs(5), dialer).await;
+}
+
+/// XMODEM download over the relay: the external BBS SENDS, the relayed
+/// device RECEIVES — the other direction of the transparent pipe.
+#[tokio::test]
+async fn test_relay_onward_dial_xmodem_download() {
+    let payload = adversarial_payload();
+    let (device_end, bbs, dialer) = onward_dial_endpoints().await;
+
+    let data = payload.clone();
+    let sender = tokio::spawn(async move {
+        let (mut r, mut w) = tokio::io::split(bbs);
+        crate::xmodem::xmodem_send(&mut r, &mut w, &data, false, false, false, false, None).await
+    });
+    let receiver = tokio::spawn(async move {
+        let (mut r, mut w) = tokio::io::split(device_end);
+        crate::xmodem::xmodem_receive(&mut r, &mut w, false, false, false).await
+    });
+
+    let (send_res, recv_res) = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(sender, receiver)
+    })
+    .await
+    .expect("relay XMODEM download timed out");
+
+    send_res.unwrap().expect("XMODEM sender failed");
+    let (received, _meta) = recv_res.unwrap().expect("XMODEM receiver failed");
+    assert_eq!(
+        received, payload,
+        "XMODEM download over relay corrupted the file"
+    );
+
+    let _ = tokio::time::timeout(Duration::from_secs(5), dialer).await;
+}
+
+/// YMODEM upload over the relay: exercises the block-0 filename/size
+/// metadata header across the onward-dial pipe (the receiver auto-detects
+/// YMODEM from block 0 and reports the sender-declared size).
+#[tokio::test]
+async fn test_relay_onward_dial_ymodem_upload() {
+    let payload = adversarial_payload();
+    let (device_end, bbs, dialer) = onward_dial_endpoints().await;
+
+    let data = payload.clone();
+    let size = payload.len() as u64;
+    let sender = tokio::spawn(async move {
+        let hdr = crate::xmodem::YmodemHeader {
+            filename: "relay.bin".to_string(),
+            size,
+            modtime: None,
+            mode: None,
+        };
+        let (mut r, mut w) = tokio::io::split(device_end);
+        crate::xmodem::xmodem_send(&mut r, &mut w, &data, false, false, false, true, Some(hdr)).await
+    });
+    let receiver = tokio::spawn(async move {
+        let (mut r, mut w) = tokio::io::split(bbs);
+        crate::xmodem::xmodem_receive(&mut r, &mut w, false, false, false).await
+    });
+
+    let (send_res, recv_res) = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(sender, receiver)
+    })
+    .await
+    .expect("relay YMODEM upload timed out");
+
+    send_res.unwrap().expect("YMODEM sender failed");
+    let (received, meta) = recv_res.unwrap().expect("YMODEM receiver failed");
+    // YMODEM's block-0 size field drives exact-length truncation, so the
+    // received bytes match regardless of block padding.
+    assert_eq!(
+        received, payload,
+        "YMODEM upload over relay corrupted the file"
+    );
+    assert_eq!(
+        meta.and_then(|m| m.size),
+        Some(size),
+        "YMODEM block-0 size should survive the relay hop"
+    );
+
+    let _ = tokio::time::timeout(Duration::from_secs(5), dialer).await;
+}
+
+/// ZMODEM upload over the relay: the workhorse batch protocol, device
+/// SENDS → BBS RECEIVES, filename + bytes intact across the onward-dial
+/// pipe.  ZMODEM's own ZDLE escaping rides transparently on the raw relay.
+#[tokio::test]
+async fn test_relay_onward_dial_zmodem_upload() {
+    let payload = adversarial_payload();
+    let (device_end, bbs, dialer) = onward_dial_endpoints().await;
+
+    let data = payload.clone();
+    let sender = tokio::spawn(async move {
+        let (mut r, mut w) = tokio::io::split(device_end);
+        crate::zmodem::zmodem_send(&mut r, &mut w, &[("relay.bin", &data)], false, false).await
+    });
+    let receiver = tokio::spawn(async move {
+        let (mut r, mut w) = tokio::io::split(bbs);
+        crate::zmodem::zmodem_receive(&mut r, &mut w, false, false, |_, _, _| true).await
+    });
+
+    let (send_res, recv_res) = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(sender, receiver)
+    })
+    .await
+    .expect("relay ZMODEM upload timed out");
+
+    send_res.unwrap().expect("ZMODEM sender failed");
+    let files = recv_res.unwrap().expect("ZMODEM receiver failed");
+    assert_eq!(files.len(), 1, "expected exactly one file");
+    assert_eq!(files[0].filename, "relay.bin");
+    assert_eq!(
+        files[0].data, payload,
+        "ZMODEM upload over relay corrupted the file"
+    );
+
+    let _ = tokio::time::timeout(Duration::from_secs(5), dialer).await;
+}
+
+/// ZMODEM download over the relay: BBS SENDS → device RECEIVES.
+#[tokio::test]
+async fn test_relay_onward_dial_zmodem_download() {
+    let payload = adversarial_payload();
+    let (device_end, bbs, dialer) = onward_dial_endpoints().await;
+
+    let data = payload.clone();
+    let sender = tokio::spawn(async move {
+        let (mut r, mut w) = tokio::io::split(bbs);
+        crate::zmodem::zmodem_send(&mut r, &mut w, &[("relay.bin", &data)], false, false).await
+    });
+    let receiver = tokio::spawn(async move {
+        let (mut r, mut w) = tokio::io::split(device_end);
+        crate::zmodem::zmodem_receive(&mut r, &mut w, false, false, |_, _, _| true).await
+    });
+
+    let (send_res, recv_res) = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(sender, receiver)
+    })
+    .await
+    .expect("relay ZMODEM download timed out");
+
+    send_res.unwrap().expect("ZMODEM sender failed");
+    let files = recv_res.unwrap().expect("ZMODEM receiver failed");
+    assert_eq!(files.len(), 1, "expected exactly one file");
+    assert_eq!(
+        files[0].data, payload,
+        "ZMODEM download over relay corrupted the file"
+    );
+
+    let _ = tokio::time::timeout(Duration::from_secs(5), dialer).await;
+}
