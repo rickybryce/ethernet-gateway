@@ -8206,16 +8206,29 @@ impl TelnetSession {
                 self.amber(&port.baud.to_string())
             ))
             .await?;
-            self.send_line(&format!(
-                "  Data:   {}",
-                self.amber(&format!(
-                    "{}-{}-{}",
-                    port.databits,
-                    port.parity.chars().next().unwrap_or('N').to_uppercase(),
-                    port.stopbits
+            let data_str = format!(
+                "{}-{}-{}",
+                port.databits,
+                port.parity.chars().next().unwrap_or('N').to_uppercase(),
+                port.stopbits
+            );
+            // Drive-carrier (DCD proxy) is a modem-emulator feature, so —
+            // like PETSCII — it shares an existing row rather than spending
+            // one of the 22-row PETSCII budget.  The Data value is stable-
+            // width (X-Y-Z), so appending the carrier state here always fits
+            // 40 columns.
+            if console_mode {
+                self.send_line(&format!("  Data:   {}", self.amber(&data_str)))
+                    .await?;
+            } else {
+                let carrier_state = if port.drive_carrier { "on" } else { "off" };
+                self.send_line(&format!(
+                    "  Data:   {}   Carrier: {}",
+                    self.amber(&data_str),
+                    self.amber(carrier_state)
                 ))
-            ))
-            .await?;
+                .await?;
+            }
             // PETSCII xlate is a modem-emulator feature (direct-TCP dials
             // only), so it rides on the Flow line in modem mode rather
             // than spending a row of the 22-row PETSCII budget.
@@ -8297,8 +8310,9 @@ impl TelnetSession {
             // features only — they don't apply to a raw console bridge.
             if !console_mode {
                 self.send_line(&format!(
-                    "  {}  Dialup Mapping",
-                    self.cyan("D")
+                    "  {}  Dialup Mapping   {}  Carrier",
+                    self.cyan("D"),
+                    self.cyan("C")
                 ))
                 .await?;
                 // Hide Ring on the port the caller is dialed in on
@@ -8378,6 +8392,21 @@ impl TelnetSession {
                     .await
                     .ok();
                 }
+                "c" if !console_mode => {
+                    // Toggle the drive-carrier (DCD proxy) opt-in and
+                    // persist immediately — same per-port field the web and
+                    // GUI surfaces write.  Takes effect on the next port
+                    // restart (modem_apply_settings triggers one via the
+                    // diff below).
+                    let new_val = if port.drive_carrier { "false" } else { "true" };
+                    let v = new_val.to_string();
+                    let key = config::serial_key(id, "drive_carrier");
+                    tokio::task::spawn_blocking(move || {
+                        config::update_config_value(&key, &v);
+                    })
+                    .await
+                    .ok();
+                }
                 "d" if !console_mode => {
                     self.dialup_mapping().await?;
                 }
@@ -8402,8 +8431,8 @@ impl TelnetSession {
                     let msg = match (console_mode, on_own_port) {
                         (true, true) => "Press E, S, B, P, F, H, or Q.",
                         (true, false) => "Press E, T, S, B, P, F, H, or Q.",
-                        (false, true) => "Press E, S, B, P, D, F, X, H, or Q.",
-                        (false, false) => "Press E, T, S, B, P, D, F, X, I, H, or Q.",
+                        (false, true) => "Press E, S, B, P, C, D, F, X, H, or Q.",
+                        (false, false) => "Press E, T, S, B, P, C, D, F, X, I, H, or Q.",
                     };
                     self.show_error(msg).await?;
                 }
@@ -8431,7 +8460,8 @@ impl TelnetSession {
             || new_port.parity != old_port.parity
             || new_port.stopbits != old_port.stopbits
             || new_port.flowcontrol != old_port.flowcontrol
-            || new_port.petscii_translate != old_port.petscii_translate;
+            || new_port.petscii_translate != old_port.petscii_translate
+            || new_port.drive_carrier != old_port.drive_carrier;
 
         if !changed {
             return Ok(());
@@ -9213,6 +9243,7 @@ impl TelnetSession {
                 "  Configuration:",
                 "  ATXn     Result-code level 0-4",
                 "  AT&Cn    DCD mode (0-1)",
+                "    (DTR->DCD if opt-in on)",
                 "  AT&Dn    DTR handling (0-3)",
                 "  AT&Kn    Flow control (0-4)",
                 "  AT+PETSCII=n  PETSCII xlate 0/1",
@@ -9277,6 +9308,7 @@ impl TelnetSession {
                 "  ATXn       Result-code level 0-4 (see",
                 "             README for the table)",
                 "  AT&Cn      DCD: 0=always on, 1=carrier",
+                "             (drives DTR->DCD when the port's drive-carrier opt-in is enabled)",
                 "  AT&Dn      DTR handling 0-3",
                 "  AT&Kn      Flow control 0-4",
                 "  AT+PETSCII=n  PETSCII translation on direct-",

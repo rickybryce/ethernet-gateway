@@ -1015,6 +1015,24 @@ impl App {
                     .color(AMBER),
             );
         });
+        ui.horizontal(|ui| {
+            ui.checkbox(
+                &mut self.cfg.port_mut(id).drive_carrier,
+                "Drive carrier (DCD)",
+            )
+            .on_hover_text(
+                "Drive DTR as a carrier proxy: asserted on CONNECT, dropped \
+                 on NO CARRIER, per AT&C (&C0 = always on, &C1 = follows \
+                 carrier). Wire DTR->DCD via a null-modem cable. Off (default) \
+                 = the gateway never touches the modem-control lines, so a \
+                 port without DCD wiring is unaffected. Modem mode only.",
+            );
+            ui.label(
+                egui::RichText::new("(DTR->DCD, modem mode)")
+                    .small()
+                    .color(AMBER),
+            );
+        });
 
         ui.add_space(6.0);
         ui.separator();

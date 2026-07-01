@@ -251,6 +251,14 @@ struct ModemState {
     /// `AT+PETSCII=0` (or the X key in the serial port menu) before
     /// starting a file transfer; re-enable it after.
     petscii_translate: bool,
+    /// Drive DTR as a hardware carrier proxy (config `serial_X_drive_carrier`,
+    /// default false).  When false, `apply_carrier` makes **zero**
+    /// serialport modem-line calls, so a port without DCD wiring behaves
+    /// exactly as before.  When true, DTR is asserted/dropped with the
+    /// connection per AT&C (`dcd_mode`) so a terminal wired DTR→DCD sees
+    /// carrier detect.  Reflects physical cabling, so it is NOT reset by
+    /// ATZ/AT&F (unlike the modem-profile fields).
+    drive_carrier: bool,
 }
 
 // ─── Public API ────────────────────────────────────────────
@@ -980,6 +988,48 @@ fn slave_backoff(idx: usize, shutdown: &Arc<AtomicBool>, backoff: Duration) {
     }
 }
 
+/// Desired DTR level for the carrier proxy, or `None` when the per-port
+/// opt-in is off (⇒ make no serialport modem-line call at all, so a port
+/// without DCD wiring is byte-for-byte unaffected).
+///
+/// A PC / USB-serial adapter is a DTE: `serialport` can drive DTR/RTS but
+/// DCD is a read-only input, so we drive **DTR** as the carrier proxy and
+/// the user's null-modem cable crosses DTR→DCD into the vintage machine
+/// (the same trick tcpser uses).  The level follows AT&C (`dcd_mode`):
+/// - `&C0` (`dcd_mode == 0`): DCD forced **always on** → DTR stays asserted
+///   for the port's lifetime, regardless of connection state.
+/// - `&C1` (default): DCD **follows carrier** → DTR tracks `carrier_up`.
+fn carrier_dtr_level(drive_carrier: bool, dcd_mode: u8, carrier_up: bool) -> Option<bool> {
+    if !drive_carrier {
+        return None;
+    }
+    match dcd_mode {
+        0 => Some(true),       // &C0 — forced on
+        _ => Some(carrier_up), // &C1 — follows carrier
+    }
+}
+
+/// Apply the carrier (DTR) line state for the given connection state,
+/// honoring the per-port opt-in and AT&C mode.  A no-op — issuing **zero**
+/// serialport calls — when the opt-in is off.  A driver error is logged and
+/// swallowed: failing to twiddle a control line must never abort a call.
+///
+/// Safe to over-call for `carrier_up = false`: under `&C1` it is idempotent
+/// (DTR already low), and under `&C0` it re-asserts the forced-on level, so
+/// callers can drop carrier defensively at any teardown site.
+fn apply_carrier(state: &mut ModemState, carrier_up: bool) {
+    if let Some(level) = carrier_dtr_level(state.drive_carrier, state.dcd_mode, carrier_up) {
+        if let Err(e) = state.port.write_data_terminal_ready(level) {
+            glog!(
+                "Serial modem (Port {}): drive-carrier DTR={} failed: {}",
+                state.port_id.label(),
+                level,
+                e
+            );
+        }
+    }
+}
+
 /// Open one port with the user's current framing and flow-control
 /// settings.  Shared by modem mode and console mode.  Takes a port-
 /// scoped slice so the call site doesn't need to know which port id
@@ -1216,7 +1266,13 @@ fn serial_thread(
         last_command: String::new(),
         stored_numbers: port_cfg.stored_numbers.clone(),
         petscii_translate: port_cfg.petscii_translate,
+        drive_carrier: port_cfg.drive_carrier,
     };
+
+    // Establish the initial carrier line state: no call is in progress at
+    // startup, so DTR follows AT&C for `carrier_up = false` (dropped under
+    // &C1, forced-asserted under &C0).  No-op when the opt-in is off.
+    apply_carrier(&mut state, false);
 
     send_response(&mut state, "OK");
 
@@ -2015,6 +2071,7 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
                 let parsed = parse_dial_string(&target, &state.s_regs);
                 // Hang up any existing connection before dialing.
                 state.active_connection = None;
+                apply_carrier(state, false); // carrier follows the connection
                 state.last_dial = target.clone();
                 if parsed.pre_delay > Duration::ZERO {
                     std::thread::sleep(parsed.pre_delay);
@@ -2033,6 +2090,7 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
                     return;
                 }
                 state.active_connection = None;
+                apply_carrier(state, false); // carrier follows the connection
                 let target = state.last_dial.clone();
                 let parsed = parse_dial_string(&target, &state.s_regs);
                 if parsed.pre_delay > Duration::ZERO {
@@ -2051,6 +2109,7 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
             }
             AtResult::Hangup => {
                 state.active_connection = None;
+                apply_carrier(state, false); // carrier follows the connection
                 pending_ok = true;
             }
             AtResult::Reset => {
@@ -2059,6 +2118,7 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
                 state.verbose = true;
                 state.quiet = false;
                 state.active_connection = None;
+                apply_carrier(state, false); // carrier follows the connection
                 state.s_regs = S_REG_DEFAULTS;
                 state.x_code = DEFAULT_X_CODE;
                 state.dtr_mode = DEFAULT_DTR_MODE;
@@ -2085,6 +2145,7 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
                 state.stored_numbers = port.stored_numbers.clone();
                 state.petscii_translate = port.petscii_translate;
                 state.active_connection = None;
+                apply_carrier(state, false); // carrier follows the connection
                 pending_ok = true;
             }
             AtResult::SaveConfig => {
@@ -2171,6 +2232,7 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
                 }
                 let parsed = parse_dial_string(&stored, &state.s_regs);
                 state.active_connection = None;
+                apply_carrier(state, false); // carrier follows the connection
                 state.last_dial = stored;
                 if parsed.pre_delay > Duration::ZERO {
                     std::thread::sleep(parsed.pre_delay);
@@ -2301,6 +2363,7 @@ fn handle_return_online(state: &mut ModemState) {
     };
     send_result(state, "CONNECT");
     state.mode = ModemMode::Online;
+    apply_carrier(state, true); // assert carrier for the duration of the call
     match conn {
         ActiveConnection::Tcp(mut tcp) => {
             let exit = online_mode_tcp(state, &mut tcp);
@@ -2311,6 +2374,7 @@ fn handle_return_online(state: &mut ModemState) {
                     send_result(state, "OK");
                 }
                 OnlineExit::Disconnected => {
+                    apply_carrier(state, false);
                     send_result(state, "NO CARRIER");
                 }
             }
@@ -2325,6 +2389,7 @@ fn handle_return_online(state: &mut ModemState) {
                     send_result(state, "OK");
                 }
                 OnlineExit::Disconnected => {
+                    apply_carrier(state, false);
                     send_result(state, "NO CARRIER");
                 }
             }
@@ -2346,6 +2411,7 @@ fn handle_return_online(state: &mut ModemState) {
                     send_result(state, "OK");
                 }
                 OnlineExit::Disconnected => {
+                    apply_carrier(state, false);
                     relay_shutdown_write(state, &mut write);
                     send_result(state, "NO CARRIER");
                 }
@@ -2645,6 +2711,7 @@ fn dial_master_relay(
 
     send_result(state, "CONNECT");
     state.mode = ModemMode::Online;
+    apply_carrier(state, true); // assert carrier for the duration of the call
 
     let crate::relay::MasterRelay { _session, stream } = relay;
     let (mut relay_read, mut relay_write) = tokio::io::split(stream);
@@ -2664,6 +2731,7 @@ fn dial_master_relay(
             send_result(state, "OK");
         }
         OnlineExit::Disconnected => {
+            apply_carrier(state, false);
             // Cleanly EOF the write half so the master sees end-of-call
             // (and can finish flushing) rather than a hard reset when
             // `_session` drops at end of scope.
@@ -2703,6 +2771,7 @@ fn is_phone_number(s: &str) -> bool {
 fn dial_ethernet_gateway(state: &mut ModemState) {
     send_result(state, "CONNECT");
     state.mode = ModemMode::Online;
+    apply_carrier(state, true); // assert carrier for the duration of the call
 
     // Create a duplex pair: one end for TelnetSession, the other for this thread.
     // Large buffer to handle slow baud rates (300–9600) without data loss.
@@ -2755,6 +2824,7 @@ fn dial_ethernet_gateway(state: &mut ModemState) {
             send_result(state, "OK");
         }
         OnlineExit::Disconnected => {
+            apply_carrier(state, false);
             send_result(state, "NO CARRIER");
         }
     }
@@ -2774,6 +2844,7 @@ fn dial_ethernet_gateway(state: &mut ModemState) {
 fn dial_kermit_server(state: &mut ModemState) {
     send_result(state, "CONNECT");
     state.mode = ModemMode::Online;
+    apply_carrier(state, true); // assert carrier for the duration of the call
 
     let (async_stream, serial_stream) = tokio::io::duplex(65536);
     let (mut async_read, mut async_write) = tokio::io::split(async_stream);
@@ -2836,6 +2907,7 @@ fn dial_kermit_server(state: &mut ModemState) {
             send_result(state, "OK");
         }
         OnlineExit::Disconnected => {
+            apply_carrier(state, false);
             send_result(state, "NO CARRIER");
         }
     }
@@ -2938,6 +3010,7 @@ fn dial_tcp(state: &mut ModemState, host: &str, port: u16) {
 
     send_result(state, "CONNECT");
     state.mode = ModemMode::Online;
+    apply_carrier(state, true); // assert carrier for the duration of the call
 
     let exit = online_mode_tcp(state, &mut stream);
 
@@ -2948,6 +3021,7 @@ fn dial_tcp(state: &mut ModemState, host: &str, port: u16) {
             send_result(state, "OK");
         }
         OnlineExit::Disconnected => {
+            apply_carrier(state, false);
             send_result(state, "NO CARRIER");
         }
     }
@@ -5301,6 +5375,38 @@ mod tests {
         assert_eq!(parse("AT&C", &mut echo), vec![AtResult::DcdSet(0)]);
         assert_eq!(parse("AT&C0", &mut echo), vec![AtResult::DcdSet(0)]);
         assert_eq!(parse("AT&C1", &mut echo), vec![AtResult::DcdSet(1)]);
+    }
+
+    // ─── Drive-carrier (DCD proxy) decision logic ─────────────
+
+    /// With the opt-in OFF the decision function returns `None` for every
+    /// AT&C mode and connection state — the guarantee that a port without
+    /// DCD wiring makes zero serialport modem-line calls.
+    #[test]
+    fn test_carrier_off_makes_no_call() {
+        for dcd_mode in 0u8..=1 {
+            for carrier_up in [false, true] {
+                assert_eq!(
+                    carrier_dtr_level(false, dcd_mode, carrier_up),
+                    None,
+                    "opt-in off must never drive a line (dcd_mode={}, up={})",
+                    dcd_mode,
+                    carrier_up
+                );
+            }
+        }
+    }
+
+    /// &C0 (dcd_mode 0) forces DCD always on: DTR asserted regardless of
+    /// whether a call is up.  &C1 (dcd_mode 1, the default) follows carrier.
+    #[test]
+    fn test_carrier_on_follows_atc_mode() {
+        // &C0 — forced on in both connection states.
+        assert_eq!(carrier_dtr_level(true, 0, false), Some(true));
+        assert_eq!(carrier_dtr_level(true, 0, true), Some(true));
+        // &C1 — tracks the connection.
+        assert_eq!(carrier_dtr_level(true, 1, false), Some(false));
+        assert_eq!(carrier_dtr_level(true, 1, true), Some(true));
     }
 
     #[test]

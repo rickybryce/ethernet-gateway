@@ -232,6 +232,15 @@ const DEFAULT_SERIAL_DCD_MODE: u8 = 1;
 /// render PETSCII correctly.  Also editable from the telnet, web, and GUI
 /// config surfaces.
 const DEFAULT_SERIAL_PETSCII_TRANSLATE: bool = false;
+/// Drive a hardware carrier line off (default).  When true, the modem
+/// emulator drives DTR as a carrier proxy (asserted on CONNECT, dropped
+/// on NO CARRIER, tied to AT&C) so a vintage terminal wired DTR→DCD via a
+/// null-modem cable sees carrier detect.  A PC/USB-serial adapter is a DTE
+/// and cannot drive a DCD pin directly, so DTR is the standard proxy.
+/// Default off means the gateway makes **zero** modem-line calls, so ports
+/// without DCD wiring are byte-for-byte unaffected.  Modem-mode only
+/// (console mode has no AT&C carrier concept).
+const DEFAULT_SERIAL_DRIVE_CARRIER: bool = false;
 const DEFAULT_SSH_ENABLED: bool = false;
 const DEFAULT_SSH_PORT: u16 = 2222;
 /// Default SSH-gateway authentication mode: "key" uses the gateway's
@@ -341,6 +350,13 @@ pub struct SerialPortConfig {
     /// immediately, and it is also editable from the telnet, web, and
     /// GUI config surfaces.
     pub petscii_translate: bool,
+    /// Drive DTR as a hardware carrier proxy (default false).  When true,
+    /// the modem emulator asserts/drops DTR with the connection (tied to
+    /// AT&C) so a terminal wired DTR→DCD sees carrier detect.  When false
+    /// the gateway never touches the modem-control lines, so a port without
+    /// DCD wiring behaves exactly as before.  Editable in all three config
+    /// UIs.  Modem-mode only.
+    pub drive_carrier: bool,
 }
 
 impl Default for SerialPortConfig {
@@ -369,6 +385,7 @@ impl Default for SerialPortConfig {
                 String::new(),
             ],
             petscii_translate: DEFAULT_SERIAL_PETSCII_TRANSLATE,
+            drive_carrier: DEFAULT_SERIAL_DRIVE_CARRIER,
         }
     }
 }
@@ -1160,6 +1177,9 @@ fn read_serial_port_config(
         petscii_translate: lookup("petscii_translate", "serial_petscii_translate")
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(DEFAULT_SERIAL_PETSCII_TRANSLATE),
+        drive_carrier: lookup("drive_carrier", "serial_drive_carrier")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(DEFAULT_SERIAL_DRIVE_CARRIER),
     }
 }
 
@@ -1247,6 +1267,7 @@ fn write_serial_port_section(
         write_kv_str(out, &format!("{}_stored_{}", prefix, i), slot);
     }
     write_kv(out, &format!("{}_petscii_translate", prefix), port.petscii_translate);
+    write_kv(out, &format!("{}_drive_carrier", prefix), port.drive_carrier);
     out.push('\n');
 }
 
@@ -1750,6 +1771,7 @@ fn apply_serial_port_key(port: &mut SerialPortConfig, suffix: &str, value: &str)
         "stored_2" => port.stored_numbers[2] = value.to_string(),
         "stored_3" => port.stored_numbers[3] = value.to_string(),
         "petscii_translate" => port.petscii_translate = value.eq_ignore_ascii_case("true"),
+        "drive_carrier" => port.drive_carrier = value.eq_ignore_ascii_case("true"),
         _ => {}
     }
 }
@@ -2487,6 +2509,7 @@ mod tests {
                     "9W,5551212".into(),
                 ],
                 petscii_translate: true,
+                drive_carrier: true,
             },
             serial_b: SerialPortConfig {
                 enabled: true,
@@ -2512,6 +2535,7 @@ mod tests {
                     "B4".into(),
                 ],
                 petscii_translate: false,
+                drive_carrier: false,
             },
             ssh_enabled: true,
             ssh_port: 2222,
@@ -2751,6 +2775,7 @@ mod tests {
             "serial_a_stored_2",
             "serial_a_stored_3",
             "serial_a_petscii_translate",
+            "serial_a_drive_carrier",
             "serial_b_enabled",
             "serial_b_mode",
             "serial_b_port",
@@ -2772,6 +2797,7 @@ mod tests {
             "serial_b_stored_2",
             "serial_b_stored_3",
             "serial_b_petscii_translate",
+            "serial_b_drive_carrier",
             "ssh_enabled",
             "ssh_port",
             "ssh_gateway_auth",
@@ -3839,6 +3865,7 @@ mod tests {
                     "B-three".into(),
                 ],
                 petscii_translate: true,
+                drive_carrier: true,
             },
             ..Config::default()
         };
@@ -3894,6 +3921,7 @@ mod tests {
             ("stored_2", "333"),
             ("stored_3", "444"),
             ("petscii_translate", "true"),
+            ("drive_carrier", "true"),
         ];
 
         for &id in &[SerialPortId::A, SerialPortId::B] {
@@ -3926,6 +3954,7 @@ mod tests {
             assert_eq!(port.stored_numbers[2], "333");
             assert_eq!(port.stored_numbers[3], "444");
             assert!(port.petscii_translate);
+            assert!(port.drive_carrier);
 
             // The OTHER port must still be at defaults — proves no
             // cross-contamination.

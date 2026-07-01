@@ -848,6 +848,7 @@ fn collect_form_updates(
         "serial_a_echo", "serial_a_verbose", "serial_a_quiet",
         "serial_b_echo", "serial_b_verbose", "serial_b_quiet",
         "serial_a_petscii_translate", "serial_b_petscii_translate",
+        "serial_a_drive_carrier", "serial_b_drive_carrier",
     ];
     for key in bool_keys {
         let truthy = fields.get(*key).map(|s| is_truthy(s)).unwrap_or(false);
@@ -1463,7 +1464,7 @@ fn serial_more_popup(prefix: &str, label: &str, port: &config::SerialPortConfig)
          <span class=\"label\">Flow:</span><select name=\"{prefix}_flowcontrol\">{fo}</select>\
          </div>\
          <div class=\"row\">{echo} {verb} {quiet} {petscii}</div>\
-         <div class=\"row\">{xc} {dtr} {flw} {dcd}</div>\
+         <div class=\"row\">{xc} {dtr} {flw} {dcd} {carrier}</div>\
          <div class=\"row\"><span class=\"label\">S-registers:</span>\
          <input type=\"text\" name=\"{prefix}_s_regs\" value=\"{sregs}\" size=\"40\"></div>\
          <h3>Stored numbers</h3>\
@@ -1493,6 +1494,12 @@ fn serial_more_popup(prefix: &str, label: &str, port: &config::SerialPortConfig)
         dtr = numfield(&format!("{}_dtr_mode", prefix), "&D", port.dtr_mode),
         flw = numfield(&format!("{}_flow_mode", prefix), "&K", port.flow_mode),
         dcd = numfield(&format!("{}_dcd_mode", prefix), "&C", port.dcd_mode),
+        carrier = checkbox_with_attr(
+            &format!("{}_drive_carrier", prefix),
+            "Drive carrier (DCD)",
+            port.drive_carrier,
+            "title=\"Drive DTR as a carrier proxy (asserted on CONNECT, dropped on NO CARRIER, per AT&C). Wire DTR->DCD via null-modem. Off = the gateway never touches the modem-control lines. Modem mode only.\"",
+        ),
         sregs = html_escape(&port.s_regs),
         n0 = textfield(&format!("{}_stored_0", prefix), "Slot 0", &port.stored_numbers[0], false, 16),
         n1 = textfield(&format!("{}_stored_1", prefix), "Slot 1", &port.stored_numbers[1], false, 16),

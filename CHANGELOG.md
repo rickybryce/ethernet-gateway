@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.6.3] - Unreleased
 
 ### Added
+- **Optional hardware carrier (DCD) signalling.** New per-port opt-in
+  `serial_a_drive_carrier` / `serial_b_drive_carrier` (default `false`; also a
+  checkbox in the GUI/web config and the **C** key in the telnet per-port modem
+  menu). When enabled, the modem emulator drives **DTR** as a carrier proxy
+  (a PC/USB-serial adapter is a DTE and can't drive a DCD *output*, so you cross
+  DTR→DCD in a null-modem cable, as tcpser does), following `AT&C`: `&C0` forces
+  it always asserted while the port is open, `&C1` (default) asserts on
+  `CONNECT` and drops on `NO CARRIER` / `ATH` / hangup / relay-link-loss (so a
+  slave-attached machine sees loss-of-carrier in hardware too). **When off, the
+  gateway makes zero modem-control-line calls**, so ports without DCD wiring are
+  byte-for-byte unaffected. Modem mode only.
 - **Master/Slave serial extender (optional).** A gateway set to
   `gateway_role = slave` extends its serial ports to a `master` gateway over
   the master's existing SSH port; the serial device reaches the master's menu,

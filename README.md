@@ -713,6 +713,9 @@ serial_a_stored_2 =
 serial_a_stored_3 =
 # PETSCII<->ASCII translation on direct-TCP dials (AT+PETSCII); per port
 serial_a_petscii_translate = false
+# Drive DTR as a DCD carrier proxy per AT&C (wire DTR->DCD). Default off =
+# gateway never touches the modem-control lines. Modem mode only.
+serial_a_drive_carrier = false
 
 # Serial Port B
 serial_b_enabled = false
@@ -736,6 +739,7 @@ serial_b_stored_1 =
 serial_b_stored_2 =
 serial_b_stored_3 =
 serial_b_petscii_translate = false
+serial_b_drive_carrier = false
 
 # SSH server interface (encrypted access to the gateway)
 # Set ssh_enabled = true to activate. Uses its own credentials.
@@ -1311,9 +1315,11 @@ All three deviations can be overridden interactively (e.g. `AT&D2`,
 **Implementation notes:**
 
 - `AT&D`, `AT&K`, and `AT&C` are parsed, stored, displayed in `AT&V`, and
-  persisted — but their effects on RS-232 hardware signalling (DTR monitoring,
-  RTS/CTS handshake, DCD line) are not enforced by the emulator. See the
-  **Limitations** section below for why.
+  persisted. Their effects on RS-232 hardware signalling (DTR monitoring,
+  RTS/CTS handshake) are not enforced by the emulator — **except** the `AT&C`
+  DCD line, which *is* driven (as a DTR→DCD proxy) when the per-port
+  `serial_X_drive_carrier` opt-in is enabled. See the **Limitations** section
+  below for the wiring and the rationale.
 - `ATX1`–`ATX4` all affect result codes and `CONNECT` formatting.
 - `ATS6` (wait-for-dial-tone) and `ATS8` (comma pause) sleep for the
   configured number of seconds before the TCP connect, summed per modifier
@@ -1377,13 +1383,24 @@ letters or dots).
 
 This is a software modem emulator, not a real modem. The Hayes command set
 (including `AT&C`, `AT&D`, `AT&K`) is fully parsed, stored, persisted via
-`AT&W`, and displayed in `AT&V`, but the emulator does not drive the RS-232
-hardware signal pins that those commands nominally control:
+`AT&W`, and displayed in `AT&V`. Most of the RS-232 hardware signal pins those
+commands nominally control are **not** driven (see below); the one exception is
+DCD, which can be driven via an opt-in:
 
 - **DCD (Data Carrier Detect, pin 1)** -- A real modem asserts DCD when a
-  carrier is established with the remote modem. `AT&C1` is accepted and
-  persisted, but this emulator does not drive DCD, so the serial device has
-  no hardware indication that a connection is active.
+  carrier is established. By default this emulator does not drive DCD, so the
+  serial device has no hardware indication that a connection is active. You can
+  enable a **carrier proxy** per port with **`serial_a_drive_carrier` /
+  `serial_b_drive_carrier`** (default `false`; also a checkbox in the GUI/web
+  config and the **C** key in the telnet per-port menu). A PC / USB-serial
+  adapter is wired as DTE and cannot drive a DCD *output* pin, so the gateway
+  drives **DTR** as the carrier proxy and you cross **DTR→DCD** in a null-modem
+  cable into the vintage machine's DCD input (the same trick tcpser uses). The
+  line follows `AT&C`: `AT&C0` forces it always asserted while the port is open,
+  `AT&C1` (default) asserts it on `CONNECT` and drops it on `NO CARRIER` / `ATH`
+  / hangup / relay-link-loss. **When the opt-in is off the gateway makes zero
+  modem-control-line calls**, so a port without DCD wiring is byte-for-byte
+  unaffected. Modem mode only (console mode has no `AT&C` carrier concept).
 - **RI (Ring Indicator, pin 9)** -- A real modem asserts RI when an incoming
   call is ringing. The ring emulator sends `RING` result codes over the
   serial data line, but the RI pin is never driven.
@@ -1402,8 +1419,9 @@ hardware signal pins that those commands nominally control:
 Most retro terminal software works fine without these signals, especially
 when configured to ignore DCD (sometimes labeled "Force DTR" or "Ignore
 Carrier" in the terminal program settings). If your software requires DCD to
-be asserted before it will communicate, check its configuration for an
-option to disable carrier detection.
+be asserted before it will communicate, either enable the `serial_X_drive_carrier`
+carrier proxy above (and wire DTR→DCD), or check the terminal program's
+configuration for an option to disable carrier detection.
 
 ### Console Mode (Telnet-Serial Bridge)
 
