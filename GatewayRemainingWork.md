@@ -106,6 +106,17 @@ unit-covered by `serial::tests::test_process_bytes`.
 
 ## 2. Drive DCD / hardware carrier  *(new request — must not affect users without a DCD pin)*
 
+**DONE 2026-07-01 (commit `3fd25f0`, on `dev`).** Shipped the DTR-as-DCD carrier
+proxy exactly as planned below: per-port `serial_X_drive_carrier` opt-in (default
+false, zero modem-line calls when off), 3-UI wiring, `AT&C`-tied semantics
+(`&C0` always-on / `&C1` follows carrier), hooks at open + every CONNECT /
+Disconnected / hangup / relay-loss (Escaped/+++ keeps carrier up), modem-mode
+only, not reset by ATZ/AT&F. Pure `carrier_dtr_level()` decision fn + off-path
+tests; README/CHANGELOG/AT-help updated. **Still needs hardware validation** (a
+USB-serial adapter with a loopback/scope — socat PTYs don't carry modem-control
+lines) and the optional second key to pick RTS instead of DTR was deferred (DTR
+only). The original plan follows for reference.
+
 **Goal:** when a connection is established, signal "carrier present" on a
 hardware line so a vintage terminal configured for carrier detect sees it; drop
 it on `NO CARRIER` / `ATH` / relay-link-loss (#3). Closes the gap the README
