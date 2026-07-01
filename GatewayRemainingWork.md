@@ -48,7 +48,8 @@ run matters.
 - **standalone regression — PASS.** A third `gateway_role=standalone`
   instance (telnet-only, separate ports) rendered the menu, opened the File
   Transfer submenu, and quit cleanly; the relay code was inert (no warnings).
-- **#14 refused-class — FINDING (open, minor).** With the master set
+- **#14 refused-class — FINDING (RESOLVED 2026-07-01 by the #9 handshake below).**
+  With the master set
   `master_accept_relays=false`, the master correctly logs and refuses
   (`channel_failure`, "refused serial-register ... accept_relays=false"), **but
   the slave never learns it was refused**: the russh client `exec()` returns
@@ -60,11 +61,12 @@ run matters.
   the *master's* log. Not a crash or busy-loop (the idle channel is
   keepalive-maintained), but a slave pointed at a standalone/relays-off master
   gives no slave-side indication of the misconfiguration, and a modem-mode
-  caller would see a false `CONNECT` then a dead session. Proper fix needs an
-  application-level register/relay **ack** (master signals "accepted" on
-  success, closes-without-ack on refusal; slave times out waiting for the ack
-  -> Refused) -- this overlaps the deferred **#9 channel-open handshake**, so
-  fold it in there. Everything recovers correctly once accept_relays=true.
+  caller would see a false `CONNECT` then a dead session. **FIXED by the #9
+  relay hello (below):** the master now writes an `EGR`+version hello on accept,
+  the slave reads it before using the channel, and its absence (5 s timeout /
+  EOF) is classified `Refused` -> 60 s backoff with a clear slave-side message
+  ("not accepting relays ... is it gateway_role=master with
+  master_accept_relays=true?"). Re-verified live 2026-07-01.
 - Minor observation logged: transient "cannot open <pty>: Device or resource
   busy - retrying" during rapid register/re-register churn (self-recovers;
   PTY contention in the test harness, not a gateway defect).
@@ -223,16 +225,18 @@ it). Document the wiring; optionally allow RTS instead of DTR via config.
 
 ## 3. Other deferred items (lower priority)
 
-- **#9 — Channel-open handshake / protocol version.** Advertise a small
-  identity + protocol-version byte on relay channel open so a master/slave
-  version mismatch fails cleanly with a clear message instead of a confusing
-  desync. Natural home: the first bytes of the relay exec, or an SSH
-  channel-open extension. Low risk, nice-to-have. **Also carries the
-  refused-detection fix** for the §1 #14 finding: the master sends an
-  "accepted" ack on a successful register/relay and closes-without-ack on
-  refusal, so the slave can distinguish accepted vs refused (russh `exec()`
-  alone returns `Ok` even on the master's `channel_failure`) and apply the
-  Refused 60 s backoff / surface a clear slave-side error.
+- **#9 — Channel-open handshake / protocol version. DONE 2026-07-01.** The
+  master writes a `RELAY_HELLO` (`b"EGR"` magic + `RELAY_PROTOCOL_VERSION`
+  byte, `relay.rs`) as the first bytes on every accepted relay/registration
+  channel, right after `channel_success` (`ssh.rs` `exec_request` +
+  `register_console_port`); the slave reads+validates it in
+  `connect_master_relay_inner` (`read_relay_hello`) before using the channel.
+  This (a) makes a version skew fail cleanly ("upgrade the older gateway")
+  instead of desyncing, and (b) fixed the §1 #14 refused finding — a refusing
+  master sends no hello, so its absence (5 s timeout / EOF) is classified
+  `Refused`. Done before any release so there is no old-peer compat concern.
+  5 unit tests + live re-verification. Bump `RELAY_PROTOCOL_VERSION` on any
+  future incompatible wire change.
 - **#10 — Observability.** Operator-visible relay status: a master view of
   "connected slaves / registered remote ports", clearer connect/lose log lines
   (some exist already), maybe a telnet status page. The logs from #14/#15 cover

@@ -39,6 +39,67 @@ fn test_relay_connect_error_message_and_display() {
     assert_eq!(format!("{}", a), "bad creds");
 }
 
+// ─── §9 relay hello / protocol-version handshake ─────────────
+
+/// The wire hello is the "EGR" magic plus the current protocol version.
+/// Value-locked so an accidental byte/version change is caught (both ends
+/// share this constant, so a change would silently break every relay).
+#[test]
+fn test_relay_hello_bytes() {
+    use super::{RELAY_HELLO, RELAY_PROTOCOL_VERSION};
+    assert_eq!(&RELAY_HELLO[..3], b"EGR");
+    assert_eq!(RELAY_HELLO[3], RELAY_PROTOCOL_VERSION);
+    assert_eq!(RELAY_PROTOCOL_VERSION, 1, "bump deliberately on a wire change");
+}
+
+/// A valid hello (what the master writes on accept) is accepted.
+#[tokio::test]
+async fn test_read_relay_hello_accepts_valid() {
+    let (mut master, mut slave) = tokio::io::duplex(64);
+    master.write_all(&super::RELAY_HELLO).await.unwrap();
+    assert!(super::read_relay_hello(&mut slave).await.is_ok());
+}
+
+/// A refusing master accepts the channel-open but never writes the hello,
+/// so the slave sees EOF (channel closed) and classifies it `Refused` —
+/// the fix for the smoke-test finding (russh `exec()` returns Ok even on
+/// the master's `channel_failure`, so absence of the hello is the signal).
+#[tokio::test]
+async fn test_read_relay_hello_eof_is_refused() {
+    let (master, mut slave) = tokio::io::duplex(64);
+    drop(master); // master refused: channel open, no hello, then closed
+    match super::read_relay_hello(&mut slave).await {
+        Err(RelayConnectError::Refused(_)) => {}
+        other => panic!("expected Refused on missing hello, got {:?}", other),
+    }
+}
+
+/// A version-skewed master fails cleanly (Refused, with an upgrade hint)
+/// rather than desyncing the session.
+#[tokio::test]
+async fn test_read_relay_hello_version_mismatch() {
+    let (mut master, mut slave) = tokio::io::duplex(64);
+    master.write_all(b"EGR\x63").await.unwrap(); // magic OK, version 99
+    match super::read_relay_hello(&mut slave).await {
+        Err(RelayConnectError::Refused(m)) => {
+            assert!(m.contains("version mismatch"), "got: {}", m)
+        }
+        other => panic!("expected Refused version mismatch, got {:?}", other),
+    }
+}
+
+/// Bytes that aren't our magic (a non-relay endpoint, or a pre-handshake
+/// build that sent session data first) are rejected, not misread as data.
+#[tokio::test]
+async fn test_read_relay_hello_bad_magic() {
+    let (mut master, mut slave) = tokio::io::duplex(64);
+    master.write_all(b"\r\nPr").await.unwrap(); // e.g. a telnet prompt
+    match super::read_relay_hello(&mut slave).await {
+        Err(RelayConnectError::Refused(_)) => {}
+        other => panic!("expected Refused on bad magic, got {:?}", other),
+    }
+}
+
 /// Read from `dev` into `acc` until `needle` appears in the accumulated
 /// (lossy-UTF-8) output, or the overall deadline elapses.  Returns true if
 /// the needle was seen.  Tolerates the byte-at-a-time, sleep-laced output

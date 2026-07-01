@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.6.3] - Unreleased
 
 ### Added
+- **Relay channel handshake / protocol version.** The master now writes a small
+  hello (`EGR` magic + a protocol-version byte) as the first bytes on every
+  accepted master/slave relay or console-registration channel; the slave
+  validates it before using the channel. A master/slave version skew now fails
+  cleanly with an "upgrade the older gateway" message instead of desyncing, and
+  a slave pointed at a master that is declining relays (`standalone`,
+  `master_accept_relays=false`, or at capacity) now detects the refusal — the
+  absence of the hello — and backs off with a clear message, instead of
+  mistaking the refused-but-open channel for a live registration and idling.
 - **Optional hardware carrier (DCD) signalling.** New per-port opt-in
   `serial_a_drive_carrier` / `serial_b_drive_carrier` (default `false`; also a
   checkbox in the GUI/web config and the **C** key in the telnet per-port modem

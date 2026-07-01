@@ -237,6 +237,33 @@ impl russh::client::Handler for SlaveRelayHandler {
 /// proxy's `GATEWAY_CONNECT_TIMEOUT`).
 const RELAY_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// Relay wire-protocol version.  Bump on any incompatible change to the
+/// master↔slave relay framing so a version-skewed pair fails cleanly with a
+/// clear message instead of desyncing (§9).
+pub const RELAY_PROTOCOL_VERSION: u8 = 1;
+
+/// Master→slave **relay hello**: the master writes these bytes as the very
+/// first data on an accepted relay/registration channel, ahead of any
+/// session or bridge bytes — magic `"EGR"` (Ethernet Gateway Relay) plus a
+/// protocol-version byte.  The slave reads and validates it (see
+/// [`read_relay_hello`]) before using the channel.  Its purpose is twofold:
+///  1. **Accepted vs refused.** The russh client `exec()` future resolves
+///     `Ok` even when the master answered the exec with `channel_failure`
+///     (a refusing master — wrong role / `master_accept_relays=false` /
+///     capacity), so a refused channel stays open and the slave used to
+///     mistake it for a live registration and idle forever.  A refusing
+///     master never writes the hello, so its absence (EOF/timeout) now
+///     reliably signals refusal.
+///  2. **Version skew.** A mismatched version byte fails with a clear
+///     "upgrade the older gateway" message rather than a garbled session.
+pub const RELAY_HELLO: [u8; 4] = [b'E', b'G', b'R', RELAY_PROTOCOL_VERSION];
+
+/// How long the slave waits for the master's [`RELAY_HELLO`] after the exec
+/// before concluding the master refused the channel.  Short — a real master
+/// writes the hello immediately on accept; only a refusing/incompatible
+/// master leaves the channel silent.
+const RELAY_HELLO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// A live slave→master relay: the SSH client session (kept alive for the
 /// duration of the call — dropping it tears the connection down) and the
 /// channel stream the modem bridge pumps through.
@@ -453,11 +480,65 @@ async fn connect_master_relay_inner(
         .await
         .map_err(|e| RelayConnectError::Refused(format!("relay declined by master: {}", e)))?;
 
-    let stream = channel.into_stream();
+    let mut stream = channel.into_stream();
+    // §9 handshake: read the master's relay hello before handing the
+    // channel to the caller.  This is what distinguishes an ACCEPTED relay
+    // from a refused-but-open channel (russh `exec()` returns Ok even on
+    // the master's `channel_failure`) and catches a protocol-version skew.
+    read_relay_hello(&mut stream).await?;
     Ok(MasterRelay {
         _session: session,
         stream,
     })
+}
+
+/// Read and validate the master's [`RELAY_HELLO`] from a freshly-accepted
+/// relay channel.  Maps every failure mode to a [`RelayConnectError`] the
+/// slave's reconnect loop (§9 #14) can classify:
+/// - no hello (EOF or [`RELAY_HELLO_TIMEOUT`]) ⇒ `Refused` (the master is
+///   declining relays / standalone / an older build with no relay handler);
+/// - wrong magic ⇒ `Refused` (not our relay protocol on this channel);
+/// - version mismatch ⇒ `Refused`, with an explicit upgrade message.
+async fn read_relay_hello<R>(stream: &mut R) -> Result<(), RelayConnectError>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    let mut hello = [0u8; RELAY_HELLO.len()];
+    match tokio::time::timeout(RELAY_HELLO_TIMEOUT, stream.read_exact(&mut hello)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(_)) => {
+            return Err(RelayConnectError::Refused(
+                "master accepted the channel but sent no relay hello — it is \
+                 refusing relays (not a master, master_accept_relays off, at \
+                 capacity) or is an incompatible build"
+                    .to_string(),
+            ));
+        }
+        Err(_) => {
+            return Err(RelayConnectError::Refused(format!(
+                "timed out after {}s waiting for the master's relay hello — \
+                 relays disabled / standalone / incompatible master?",
+                RELAY_HELLO_TIMEOUT.as_secs()
+            )));
+        }
+    }
+    if hello[..3] != RELAY_HELLO[..3] {
+        return Err(RelayConnectError::Refused(format!(
+            "master did not send a valid relay hello (got {:02x?}) — \
+             incompatible or non-relay endpoint",
+            hello
+        )));
+    }
+    let master_version = hello[3];
+    if master_version != RELAY_PROTOCOL_VERSION {
+        return Err(RelayConnectError::Refused(format!(
+            "relay protocol version mismatch: master v{}, slave v{} — \
+             upgrade the older gateway",
+            master_version, RELAY_PROTOCOL_VERSION
+        )));
+    }
+    Ok(())
 }
 
 // ─── Master-side remote-port registry (console-mode, §9 #12) ──────

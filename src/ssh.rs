@@ -450,6 +450,16 @@ impl SshHandler {
             self.session_count.fetch_sub(1, Ordering::SeqCst);
             return Err(e);
         }
+        // §9 handshake: write the relay hello as the first bytes on the
+        // accepted channel so the slave can tell this ACCEPTED registration
+        // from a refused-but-open channel and check the protocol version.
+        if let Err(e) = session.data(
+            channel,
+            bytes::Bytes::copy_from_slice(&crate::relay::RELAY_HELLO),
+        ) {
+            self.session_count.fetch_sub(1, Ordering::SeqCst);
+            return Err(e);
+        }
         glog!(
             "SSH: registered remote console port {} from {}",
             label,
@@ -778,6 +788,17 @@ impl russh::server::Handler for SshHandler {
         // relay task (the sole owner of the matching fetch_sub), release
         // the slot here so a transport error can't leak it.
         if let Err(e) = session.channel_success(channel) {
+            self.session_count.fetch_sub(1, Ordering::SeqCst);
+            return Err(e);
+        }
+        // §9 handshake: write the relay hello (magic + protocol version) as
+        // the first bytes on the accepted channel, before any menu/onward-
+        // dial data, so the slave distinguishes an accepted relay from a
+        // refused-but-open channel and detects a version skew.
+        if let Err(e) = session.data(
+            channel,
+            bytes::Bytes::copy_from_slice(&crate::relay::RELAY_HELLO),
+        ) {
             self.session_count.fetch_sub(1, Ordering::SeqCst);
             return Err(e);
         }
