@@ -2402,6 +2402,17 @@ sub-screen, the web config <em>Master/Slave</em> card, and the GUI Server
 </ul>
 
 <p>
+<strong>Each gateway's serial ports are configured on the gateway they are
+physically attached to.</strong>  A slave's ports use the <em>slave's</em> own
+<code>serial_a_*</code> / <code>serial_b_*</code> settings (device path, baud,
+mode, flow control, <code>drive_carrier</code>, S-registers, <code>AT&amp;W</code>);
+the master's local ports use the <em>master's</em>.  The relay carries the
+session — the byte stream, and for a console port its label — <strong>not</strong>
+the port configuration.  Set each device's baud/mode/etc. on the gateway it is
+wired to; there is no per-slave serial configuration on the master.
+</p>
+
+<p>
 In slave mode the gateway still serves its own telnet/SSH and shows a
 "SLAVE mode: ports relay to master" notice with the master's address on
 its main menu.  The slave reconnects automatically if the link drops.

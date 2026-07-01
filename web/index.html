@@ -1110,6 +1110,17 @@ Config: telnet=true, port=2323, security=false, transfer_dir=transfer</span></co
                         lists local ports plus registered remote ports.</li>
                 </ul>
                 <p>
+                    <strong>Each gateway's serial ports are configured on the
+                    gateway they are physically attached to.</strong> A slave's
+                    ports use the <em>slave's</em> own <code>serial_a_*</code> /
+                    <code>serial_b_*</code> settings (device path, baud, mode,
+                    <code>drive_carrier</code>, S-registers, <code>AT&amp;W</code>);
+                    the master's local ports use the <em>master's</em>. The relay
+                    carries the session &mdash; the byte stream, and for a console
+                    port its label &mdash; not the port configuration. There is no
+                    per-slave serial configuration on the master.
+                </p>
+                <p>
                     In slave mode the gateway still serves its own telnet/SSH, shows
                     a &ldquo;SLAVE mode&rdquo; notice with the master's address on
                     its main menu, and reconnects automatically if the link drops.

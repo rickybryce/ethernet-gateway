@@ -1088,6 +1088,14 @@ Each serial port relays according to its own mode:
   local ports plus registered remote ports. (A slave's *own* Serial Gateway menu
   shows its relayed console port as "→ master".)
 
+**Each gateway's serial ports are configured on the gateway they are physically
+attached to.** A slave's ports use the *slave's* own `serial_a_*` / `serial_b_*`
+settings (device path, baud, mode, flow control, `drive_carrier`, S-registers,
+`AT&W`); the master's local ports use the *master's*. The relay carries the
+session — the byte stream, and for a console port its label — **not** the port
+configuration. So set each device's baud/mode/etc. on the gateway it is wired
+to; there is no per-slave serial config on the master.
+
 In slave mode the gateway still serves its own telnet/SSH, and the main menu
 shows a "SLAVE mode: ports relay to master" notice with the master's address.
 The slave reconnects automatically if the link drops. Only the SSH transport is
