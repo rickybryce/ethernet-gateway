@@ -2479,15 +2479,28 @@ fn relay_teardown(
     });
 }
 
-/// Take and drop `state.active_connection` inside the tokio runtime.  A
-/// preserved `Relay` holds russh objects whose `Drop` needs the reactor
-/// (see [`relay_teardown`]); `Tcp`/`Duplex` are reactor-free but dropping
-/// them inside `block_on` is harmless.  Used everywhere a preserved
-/// connection is discarded off the online path (hangup, ATZ/AT&F, and the
-/// pre-dial clears) so a parked relay call never drops on the bare thread.
+/// Take and drop `state.active_connection` inside the tokio runtime.  Used
+/// everywhere a preserved connection is discarded off the online path
+/// (hangup, ATZ/AT&F, and the pre-dial clears).
+///
+/// A preserved `Relay` (parked across a `+++` escape) is torn down through
+/// [`relay_teardown`] — the same graceful, bounded write-shutdown the direct
+/// Disconnected path uses — so the master sees a clean end-of-call EOF
+/// rather than a hard channel reset, regardless of whether the call ended
+/// by carrier loss or by an `ATH`/`ATZ`/`AT&F` after a `+++`.  `Tcp`/`Duplex`
+/// are reactor-free but dropping them inside `block_on` is harmless and
+/// keeps the "never drop a russh object on the bare thread" invariant simple.
 fn clear_active_connection(state: &mut ModemState) {
-    if let Some(conn) = state.active_connection.take() {
-        state.handle.block_on(async move { drop(conn) });
+    match state.active_connection.take() {
+        Some(ActiveConnection::Relay {
+            _session,
+            read,
+            write,
+        }) => relay_teardown(&state.handle, _session, read, write),
+        Some(conn) => {
+            state.handle.block_on(async move { drop(conn) });
+        }
+        None => {}
     }
 }
 
