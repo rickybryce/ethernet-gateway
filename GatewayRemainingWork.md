@@ -37,11 +37,37 @@ thread ("no reactor running"). Fixed in commit `837632f` (drop inside
 `block_on`; covers the modem Disconnected arms, the six command-mode clears, the
 console register loop, and thread-exit). The smoke test found a *second*
 (console-path) instance the first modem-only fix missed — exactly why the live
-run matters. **Still worth a follow-up run:** #15 keepalive/dead-link (needs a
-~2-min silent-sever), #14 refused-class against a `standalone` master, and a
-plain `standalone` regression instance. Minor observation logged: transient
-"cannot open <pty>: Device or resource busy — retrying" during rapid
-register/re-register churn (self-recovers; PTY contention, not a defect).
+run matters.
+
+**Follow-up run 2026-07-01 (all remaining scenarios):**
+- **#15 keepalive/dead-link — PASS.** `SIGSTOP` the master (silent freeze,
+  TCP stays open): the slave detected the dead registration in **~115 s**
+  (matches keepalive_interval 30 s × keepalive_max 3), logged "registration
+  channel closed; reconnecting", and on `SIGCONT` reconnected + re-registered.
+  No panic (the relay-teardown fix held on the keepalive path too).
+- **standalone regression — PASS.** A third `gateway_role=standalone`
+  instance (telnet-only, separate ports) rendered the menu, opened the File
+  Transfer submenu, and quit cleanly; the relay code was inert (no warnings).
+- **#14 refused-class — FINDING (open, minor).** With the master set
+  `master_accept_relays=false`, the master correctly logs and refuses
+  (`channel_failure`, "refused serial-register ... accept_relays=false"), **but
+  the slave never learns it was refused**: the russh client `exec()` returns
+  `Ok` even though the master answered `channel_failure`, so
+  `connect_master_register` succeeds, the slave logs "registered with master;
+  awaiting pick", and idles indefinitely on the (master-refused, still-open)
+  channel. The intended `RelayConnectError::Refused` classification and 60 s
+  backoff (#14) therefore never fire over SSH; the refusal is visible only in
+  the *master's* log. Not a crash or busy-loop (the idle channel is
+  keepalive-maintained), but a slave pointed at a standalone/relays-off master
+  gives no slave-side indication of the misconfiguration, and a modem-mode
+  caller would see a false `CONNECT` then a dead session. Proper fix needs an
+  application-level register/relay **ack** (master signals "accepted" on
+  success, closes-without-ack on refusal; slave times out waiting for the ack
+  -> Refused) -- this overlaps the deferred **#9 channel-open handshake**, so
+  fold it in there. Everything recovers correctly once accept_relays=true.
+- Minor observation logged: transient "cannot open <pty>: Device or resource
+  busy - retrying" during rapid register/re-register churn (self-recovers;
+  PTY contention in the test harness, not a gateway defect).
 
 ### Setup
 - **Two working directories**, each with its own `egateway.conf` and its own
@@ -201,7 +227,12 @@ it). Document the wiring; optionally allow RTS instead of DTR via config.
   identity + protocol-version byte on relay channel open so a master/slave
   version mismatch fails cleanly with a clear message instead of a confusing
   desync. Natural home: the first bytes of the relay exec, or an SSH
-  channel-open extension. Low risk, nice-to-have.
+  channel-open extension. Low risk, nice-to-have. **Also carries the
+  refused-detection fix** for the §1 #14 finding: the master sends an
+  "accepted" ack on a successful register/relay and closes-without-ack on
+  refusal, so the slave can distinguish accepted vs refused (russh `exec()`
+  alone returns `Ok` even on the master's `channel_failure`) and apply the
+  Refused 60 s backoff / surface a clear slave-side error.
 - **#10 — Observability.** Operator-visible relay status: a master view of
   "connected slaves / registered remote ports", clearer connect/lose log lines
   (some exist already), maybe a telnet status page. The logs from #14/#15 cover
