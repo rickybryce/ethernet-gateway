@@ -908,6 +908,13 @@ fn console_slave_register_tick(
         // Idle until the master sends the one-byte activate signal (a user
         // picked us) or the channel drops — staying responsive to
         // shutdown/restart.
+        //
+        // In every outcome the russh session (`_session`) and, unless the
+        // bridge consumed it, the channel `stream` must be dropped INSIDE
+        // the tokio runtime: their `Drop` impls talk to the reactor and
+        // panic ("no reactor running") if they drop on this bare serial
+        // thread (see `relay_teardown`).  `run_console_bridge` moves the
+        // stream into a spawned task, so its halves already drop in-runtime.
         match slave_wait_for_activate(&handle, &mut stream, &shutdown, idx) {
             ActivateOutcome::Activated => {
                 glog!("Serial console (Port {}): master attached; bridging", label);
@@ -916,6 +923,7 @@ fn console_slave_register_tick(
                     "Serial console (Port {}): bridge closed; re-registering",
                     label
                 );
+                handle.block_on(async move { drop(_session) });
             }
             ActivateOutcome::Closed => {
                 glog!(
@@ -923,8 +931,18 @@ fn console_slave_register_tick(
                     label
                 );
                 drop(port);
+                handle.block_on(async move {
+                    drop(stream);
+                    drop(_session);
+                });
             }
-            ActivateOutcome::Aborted => return,
+            ActivateOutcome::Aborted => {
+                handle.block_on(async move {
+                    drop(stream);
+                    drop(_session);
+                });
+                return;
+            }
         }
         // Normal churn (bridge ended or channel closed cleanly) — brisk
         // re-register, not an outage backoff.
@@ -1301,6 +1319,10 @@ fn serial_thread(
             }
         }
     }
+    // Drop any relay call preserved across a +++ escape inside the runtime
+    // before `state` (and its russh objects) drop on this bare thread at
+    // return — otherwise a restart/shutdown with a parked relay panics.
+    clear_active_connection(&mut state);
     if port_lost {
         // Don't write a goodbye to a dead port; just report so the caller
         // reopens.  The error was already logged in command_mode_tick.
@@ -2070,7 +2092,7 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
             AtResult::Dial(target) => {
                 let parsed = parse_dial_string(&target, &state.s_regs);
                 // Hang up any existing connection before dialing.
-                state.active_connection = None;
+                clear_active_connection(state);
                 apply_carrier(state, false); // carrier follows the connection
                 state.last_dial = target.clone();
                 if parsed.pre_delay > Duration::ZERO {
@@ -2089,7 +2111,7 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
                     send_result(state, "ERROR");
                     return;
                 }
-                state.active_connection = None;
+                clear_active_connection(state);
                 apply_carrier(state, false); // carrier follows the connection
                 let target = state.last_dial.clone();
                 let parsed = parse_dial_string(&target, &state.s_regs);
@@ -2108,7 +2130,7 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
                 return; // online mode takes over
             }
             AtResult::Hangup => {
-                state.active_connection = None;
+                clear_active_connection(state);
                 apply_carrier(state, false); // carrier follows the connection
                 pending_ok = true;
             }
@@ -2117,7 +2139,7 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
                 state.echo = true;
                 state.verbose = true;
                 state.quiet = false;
-                state.active_connection = None;
+                clear_active_connection(state);
                 apply_carrier(state, false); // carrier follows the connection
                 state.s_regs = S_REG_DEFAULTS;
                 state.x_code = DEFAULT_X_CODE;
@@ -2144,7 +2166,7 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
                 state.dcd_mode = port.dcd_mode;
                 state.stored_numbers = port.stored_numbers.clone();
                 state.petscii_translate = port.petscii_translate;
-                state.active_connection = None;
+                clear_active_connection(state);
                 apply_carrier(state, false); // carrier follows the connection
                 pending_ok = true;
             }
@@ -2231,7 +2253,7 @@ fn process_at_command(state: &mut ModemState, cmd: &str) {
                     return;
                 }
                 let parsed = parse_dial_string(&stored, &state.s_regs);
-                state.active_connection = None;
+                clear_active_connection(state);
                 apply_carrier(state, false); // carrier follows the connection
                 state.last_dial = stored;
                 if parsed.pre_delay > Duration::ZERO {
@@ -2412,25 +2434,53 @@ fn handle_return_online(state: &mut ModemState) {
                 }
                 OnlineExit::Disconnected => {
                     apply_carrier(state, false);
-                    relay_shutdown_write(state, &mut write);
                     send_result(state, "NO CARRIER");
+                    // Shut down + drop the russh objects in the runtime.
+                    relay_teardown(&state.handle, _session, read, write);
                 }
             }
         }
     }
 }
 
-/// Cleanly EOF a relay channel's write half (bounded) so the master sees
-/// end-of-call rather than a hard reset when the connection drops.  Used
-/// on the disconnect/hangup paths of a relay call.
-fn relay_shutdown_write(state: &ModemState, write: &mut crate::relay::RelayWriteHalf) {
-    let _ = state.handle.block_on(async {
-        tokio::time::timeout(
+/// Tear down a relay call: cleanly EOF the write half (bounded, so the
+/// master sees end-of-call rather than a hard reset) and then drop the
+/// relay's russh objects **inside the tokio runtime**.
+///
+/// This must run in a runtime context: russh's `ChannelStream` (the read/
+/// write halves) and client `Handle` (`session`) `Drop` impls talk to the
+/// tokio reactor, and dropping them on the bare blocking serial thread
+/// panics with "there is no reactor running".  `block_on` provides the
+/// context for both the shutdown and the drops.  Consumes all three so the
+/// caller can't accidentally drop a leftover on the bare thread afterwards.
+fn relay_teardown(
+    handle: &tokio::runtime::Handle,
+    session: crate::relay::RelaySession,
+    read: crate::relay::RelayReadHalf,
+    mut write: crate::relay::RelayWriteHalf,
+) {
+    handle.block_on(async move {
+        let _ = tokio::time::timeout(
             Duration::from_secs(2),
-            tokio::io::AsyncWriteExt::shutdown(write),
+            tokio::io::AsyncWriteExt::shutdown(&mut write),
         )
-        .await
+        .await;
+        drop(read);
+        drop(write);
+        drop(session);
     });
+}
+
+/// Take and drop `state.active_connection` inside the tokio runtime.  A
+/// preserved `Relay` holds russh objects whose `Drop` needs the reactor
+/// (see [`relay_teardown`]); `Tcp`/`Duplex` are reactor-free but dropping
+/// them inside `block_on` is harmless.  Used everywhere a preserved
+/// connection is discarded off the online path (hangup, ATZ/AT&F, and the
+/// pre-dial clears) so a parked relay call never drops on the bare thread.
+fn clear_active_connection(state: &mut ModemState) {
+    if let Some(conn) = state.active_connection.take() {
+        state.handle.block_on(async move { drop(conn) });
+    }
 }
 
 // ─── Dialing ───────────────────────────────────────────────
@@ -2732,11 +2782,11 @@ fn dial_master_relay(
         }
         OnlineExit::Disconnected => {
             apply_carrier(state, false);
-            // Cleanly EOF the write half so the master sees end-of-call
-            // (and can finish flushing) rather than a hard reset when
-            // `_session` drops at end of scope.
-            relay_shutdown_write(state, &mut relay_write);
             send_result(state, "NO CARRIER");
+            // Shut down the write half (so the master sees end-of-call) and
+            // drop the russh objects in the runtime — dropping them on the
+            // bare serial thread panics ("no reactor running").
+            relay_teardown(&state.handle, _session, relay_read, relay_write);
         }
     }
 }
