@@ -20,6 +20,29 @@ process-global singleton, the SSH host key is written to CWD, and we need two
 live processes talking over a real socket. So this is a documented manual
 procedure (same rationale as the CCGMS/VICE harnesses).
 
+**RUN 2026-07-01 — found + fixed a critical bug.** A reusable harness lives in
+`~/claude/relay-smoke/` (master + slave working dirs, a `socat` PTY for the
+slave serial, a Python expect-`driver.py` for the device end, a `tcp_driver.py`
+telnet client for the master, and a fake `bbs.py`). Scenarios validated live:
+1 (modem dial→master menu + quit), 2 (onward dial→BBS, both ways), 3 (**XMODEM
+file transfer over the relay landed byte-identical in the master's transfer_dir**
+— the core promise, previously only manual), 4 (console register→picker lists
+remote port→pick+confirm→bidirectional bridge), 5 (+++/ATO resume, interactive),
+6 (#14 reconnect: network outage-logged-once + capped backoff + reconnect; auth
+6-min backoff with no self-lockout), 8 (host-key TOFU: first-contact pin + a
+tampered key refused as a possible-MITM Auth backoff). **Bug found:** every relay
+teardown panicked the slave's serial thread — `russh` `ChannelStream`/`Handle`
+`Drop` needs the tokio reactor but was dropping on the bare blocking serial
+thread ("no reactor running"). Fixed in commit `837632f` (drop inside
+`block_on`; covers the modem Disconnected arms, the six command-mode clears, the
+console register loop, and thread-exit). The smoke test found a *second*
+(console-path) instance the first modem-only fix missed — exactly why the live
+run matters. **Still worth a follow-up run:** #15 keepalive/dead-link (needs a
+~2-min silent-sever), #14 refused-class against a `standalone` master, and a
+plain `standalone` regression instance. Minor observation logged: transient
+"cannot open <pty>: Device or resource busy — retrying" during rapid
+register/re-register churn (self-recovers; PTY contention, not a defect).
+
 ### Setup
 - **Two working directories**, each with its own `egateway.conf` and its own
   host key (run each instance from its own dir). E.g. `~/relay-test/master/`
