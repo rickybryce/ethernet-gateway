@@ -747,7 +747,10 @@ under the trusted-LAN threat model. Revisit only if the cost/benefit changes.
   shutdown. Serial sessions (blocking threads, no async writer in the list) emit
   the same notice from `serial::serial_thread` on the shutdown flag; the message
   is unified in one constant (`telnet::SHUTDOWN_GOODBYE`). The helper is also the
-  hook for future all-session broadcast messages. Verified live: a paramiko SSH
+  hook for future all-session broadcast messages — its serial counterpart,
+  `serial::broadcast_to_serial` (command-mode-only delivery, commit `5eec03f`),
+  landed 2026-07-01, so an admin broadcast can now reach telnet, SSH, relay, and
+  serial sessions alike. Verified live: a paramiko SSH
   client on a `telnet_enabled=false` gateway received the goodbye + EOF on SIGTERM.
   (Related: the broadcast's `shutdown()` on a relay's gateway-side write half
   doesn't directly EOF the parked read either — see the doc comment in

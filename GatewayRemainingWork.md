@@ -1,288 +1,68 @@
-# Gateway Master/Slave — Remaining Work Plan
+# Gateway Master/Slave — Remaining Work
 
-**Status as of 2026-06-30 (origin/dev `2a884ed`):** the master/slave serial
-extender is feature-complete against `GatewaySlavePlan.md` §6 (P1+P2) and
-**every §9 "Required (not optional)" item is implemented** (incl. #14 reconnect
-backoff classification and #15 keepalive). Three code-review passes found no
-remaining defects. This document tracks the work we deliberately deferred plus
-one new feature request (drive DCD). **None of this is done yet** — it's the
-"later" pile. Tackle in roughly the order below.
+**Status as of 2026-07-01 (origin/dev `87a4486`):** the master/slave serial
+extender is feature-complete and reviewed. Everything from the original
+"later pile" has shipped **except one item that needs physical hardware to
+verify** — the DCD/drive-carrier validation below. That is the only open
+deferral, and it does not gate the 0.6.3 release.
 
-Companion docs: `GatewaySlavePlan.md` (the design), `README.md` (user docs +
-"Relay limitations" + "Outbound Connections" sections).
+Companion docs: `GatewaySlavePlan.md` (the design + resolved-issue log),
+`README.md` (user docs + "Relay limitations" + "Outbound Connections").
 
 ---
 
-## 1. Manual two-instance SSH smoke test  *(highest value)*
+## Open deferral — DCD / drive-carrier hardware validation
 
-The one thing no unit test covers. A CI test can't: the config is a
-process-global singleton, the SSH host key is written to CWD, and we need two
-live processes talking over a real socket. So this is a documented manual
-procedure (same rationale as the CCGMS/VICE harnesses).
+The `serial_X_drive_carrier` feature (DTR-as-DCD carrier proxy, commit
+`3fd25f0`) is implemented, unit-tested on its decision logic and off-path, and
+wired into all three UIs. What remains is **validation on real hardware**:
+`socat` PTYs do not carry modem-control lines, so nothing in CI can confirm the
+gateway actually toggles DTR the way `AT&C` specifies.
 
-**RUN 2026-07-01 — found + fixed a critical bug.** A reusable harness lives in
-`~/claude/relay-smoke/` (master + slave working dirs, a `socat` PTY for the
-slave serial, a Python expect-`driver.py` for the device end, a `tcp_driver.py`
-telnet client for the master, and a fake `bbs.py`). Scenarios validated live:
-1 (modem dial→master menu + quit), 2 (onward dial→BBS, both ways), 3 (**XMODEM
-file transfer over the relay landed byte-identical in the master's transfer_dir**
-— the core promise, previously only manual), 4 (console register→picker lists
-remote port→pick+confirm→bidirectional bridge), 5 (+++/ATO resume, interactive),
-6 (#14 reconnect: network outage-logged-once + capped backoff + reconnect; auth
-6-min backoff with no self-lockout), 8 (host-key TOFU: first-contact pin + a
-tampered key refused as a possible-MITM Auth backoff). **Bug found:** every relay
-teardown panicked the slave's serial thread — `russh` `ChannelStream`/`Handle`
-`Drop` needs the tokio reactor but was dropping on the bare blocking serial
-thread ("no reactor running"). Fixed in commit `837632f` (drop inside
-`block_on`; covers the modem Disconnected arms, the six command-mode clears, the
-console register loop, and thread-exit). The smoke test found a *second*
-(console-path) instance the first modem-only fix missed — exactly why the live
-run matters.
+- **How:** the harness in **`tools/dcd-validate/`** (Option B — two USB-serial
+  adapters, gateway DTR crossed to an observer's DCD/DSR/CTS input). Run
+  `dcd_observer.py` on the observer adapter and drive calls on the gateway;
+  confirm `&C1` follows the call, `&C0` forces carrier on, relay-link-loss
+  drops it, and `drive_carrier = false` moves nothing (the safety guarantee).
+- **Deferred sub-item:** an optional second config key to drive **RTS** instead
+  of DTR was not built (DTR only for now). Add only if a target machine needs
+  it — no known requirement today.
 
-**Follow-up run 2026-07-01 (all remaining scenarios):**
-- **#15 keepalive/dead-link — PASS.** `SIGSTOP` the master (silent freeze,
-  TCP stays open): the slave detected the dead registration in **~115 s**
-  (matches keepalive_interval 30 s × keepalive_max 3), logged "registration
-  channel closed; reconnecting", and on `SIGCONT` reconnected + re-registered.
-  No panic (the relay-teardown fix held on the keepalive path too).
-- **standalone regression — PASS.** A third `gateway_role=standalone`
-  instance (telnet-only, separate ports) rendered the menu, opened the File
-  Transfer submenu, and quit cleanly; the relay code was inert (no warnings).
-- **#14 refused-class — FINDING (RESOLVED 2026-07-01 by the #9 handshake below).**
-  With the master set
-  `master_accept_relays=false`, the master correctly logs and refuses
-  (`channel_failure`, "refused serial-register ... accept_relays=false"), **but
-  the slave never learns it was refused**: the russh client `exec()` returns
-  `Ok` even though the master answered `channel_failure`, so
-  `connect_master_register` succeeds, the slave logs "registered with master;
-  awaiting pick", and idles indefinitely on the (master-refused, still-open)
-  channel. The intended `RelayConnectError::Refused` classification and 60 s
-  backoff (#14) therefore never fire over SSH; the refusal is visible only in
-  the *master's* log. Not a crash or busy-loop (the idle channel is
-  keepalive-maintained), but a slave pointed at a standalone/relays-off master
-  gives no slave-side indication of the misconfiguration, and a modem-mode
-  caller would see a false `CONNECT` then a dead session. **FIXED by the #9
-  relay hello (below):** the master now writes an `EGR`+version hello on accept,
-  the slave reads it before using the channel, and its absence (5 s timeout /
-  EOF) is classified `Refused` -> 60 s backoff with a clear slave-side message
-  ("not accepting relays ... is it gateway_role=master with
-  master_accept_relays=true?"). Re-verified live 2026-07-01.
-- Minor observation logged: transient "cannot open <pty>: Device or resource
-  busy - retrying" during rapid register/re-register churn (self-recovers;
-  PTY contention in the test harness, not a gateway defect).
-
-### Setup
-- **Two working directories**, each with its own `egateway.conf` and its own
-  host key (run each instance from its own dir). E.g. `~/relay-test/master/`
-  and `~/relay-test/slave/`.
-- **Serial ports for the slave:** use a `socat` PTY pair so no real hardware is
-  needed — `socat -d -d pty,raw,echo=0,link=/tmp/ttyGW pty,raw,echo=0,link=/tmp/ttyDEV`
-  then point `serial_a_port = /tmp/ttyGW` and drive the "device" end
-  (`/tmp/ttyDEV`) with a terminal (`minicom`/`cu`) or a script. (Reuse the
-  `~/claude/punter-vice/serial/` harness pattern.)
-- **Master `egateway.conf`:** `ssh_enabled = true`, `gateway_role = master`,
-  `master_accept_relays = true`, set `username`/`password`, pick an SSH port.
-- **Slave `egateway.conf`:** `gateway_role = slave`, `slave_master_host`/
-  `slave_master_port`/`slave_master_username`/`slave_master_password` pointed at
-  the master, one serial port in `modem` mode (scenarios 3–5, 7) and/or
-  `console` mode (scenario 6).
-
-### Scenarios (each: steps → expected)
-1. **Modem dial → master menu.** Device does `ATDT ethernet-gateway` (or the
-   gateway number). → CONNECT; the **master's** menu renders over the link;
-   terminal detection runs; menu navigation works.
-2. **Onward dial (Model B).** Device does `ATDT <number-in-slave-phonebook>` or
-   `ATDT host:port`. → slave resolves locally, master dials on its network,
-   transparent bytes both ways (`device ↔ slave ↔ master ↔ BBS`).
-3. **File transfer over relay (the core promise).** From the master menu,
-   upload and download a **binary** file (include bytes `0xFF`, `0x00`, `0x1B`,
-   `0x0D`). → bytes are byte-identical end to end; uploaded files land in the
-   **master's** `transfer_dir`. Try XMODEM/YMODEM/ZMODEM at least.
-4. **Console-mode register → pick → bridge.** Slave port in `console` mode;
-   confirm it appears in the **master's** Serial Gateway picker as a remote
-   port (`A @ <slave-ip>`); pick it → master user is bridged transparently to
-   the slave's console device; the slave's *own* picker shows that port as
-   `-> master` (ineligible).
-5. **`+++` / ATO across a relay menu call.** Mid-session `+++` → OK; `ATO`
-   resumes the same call. Then verify the **idle-timeout caveat**: park with
-   `+++`, wait past the master's `idle_timeout_secs`, `ATO` → `NO CARRIER`
-   (documented behavior). Onward-dial relay has no such timeout.
-6. **Reconnect policy (#14).**
-   - *Network:* kill the master mid-idle-registration → slave logs the outage
-     **once**, retries with capped backoff (1→30 s); restart master → slave
-     logs "reconnected" and re-registers.
-   - *Auth:* set a wrong `slave_master_password` → slave logs auth-rejected
-     **once**, backs off ~6 min, and the **slave's own IP is NOT locked out**
-     of the master's telnet/SSH (verify a normal login from the slave host
-     still works — proves the 6-min backoff > 5-min lockout window).
-   - *Refused:* point the slave at a `standalone` master (or one with
-     `master_accept_relays=false`) → slave logs "not accepting relays", backs
-     off 60 s, does not hammer.
-7. **Keepalive / dead-link (#15).** Silently sever the link (e.g.
-   `sudo iptables -A INPUT -p tcp --dport <sshport> -j DROP`, or `kill -STOP`
-   the master) while a console registration is idle. → within ~2 min the slave
-   detects the dead link and reconnects, **and** the master reaps the dead
-   connection: its session-cap slot is released and the stale remote port
-   disappears from the picker (`SshHandler::drop`). Remove the rule / `CONT` to
-   confirm recovery.
-8. **Host-key TOFU.** First slave connect → master key pinned to the slave's
-   `gateway_hosts` (log: "pinned master … first contact"). Then tamper that
-   entry (or regenerate the master's host key) → next connect is **refused**
-   ("host key CHANGED"), classified as Auth (hard backoff), not a hammer loop.
-9. **Standalone regression.** Run a plain `gateway_role = standalone` instance
-   and confirm transfers, dialing, server toggles, and SSH logins behave
-   exactly as before (the relay code is inert).
-
-### CI-able complement (see #11 below)
-An in-process **fake-slave / fake-master** harness (two `TelnetSession`/relay
-halves over `tokio::io::duplex` or a loopback `TcpListener`, driving a scripted
-binary transfer through the relay) would cover most of scenarios 3/4 without two
-processes. Worth building so transfers-over-relay stop being manual-only.
-
-**Partly built (2026-07-01):** the **onward-dial (Model B) transfer path** is now
-CI-covered in `src/relay/tests.rs` — real XMODEM / YMODEM / ZMODEM transfers, both
-directions, with an adversarial all-byte-values payload (incl. `0xFF`/`0x00`/CR-LF/
-`0x1A`/`0x18`/XON-XOFF), driven end to end through `run_master_relay_dial`'s
-`copy_bidirectional` (`device ↔ slave ↔ master ↔ BBS`). This is the raw-transparency
-proof for external transfers over the relay and would catch any re-introduced IAC/
-CR-NUL mangling on the dial path. **Still manual** (both documented in the test
-module): (a) a menu-driven upload *landing on the master's `transfer_dir`* —
-blocked by the process-global config singleton + CWD file writes; the full-session
-loopback test proves the menu path's raw-byte transparency but not the disk landing;
-(b) the slave's `serial::online_mode_duplex` pump carrying a binary transfer — needs
-a mock `SerialPort` trait seam (tracked with the DCD work); its byte handling is
-unit-covered by `serial::tests::test_process_bytes`.
+This is a manual bench check (same class as the CCGMS/VICE harnesses), to be
+run when the hardware is on hand.
 
 ---
 
-## 2. Drive DCD / hardware carrier  *(new request — must not affect users without a DCD pin)*
+## Everything else is done or a decided non-goal
 
-**DONE 2026-07-01 (commit `3fd25f0`, on `dev`).** Shipped the DTR-as-DCD carrier
-proxy exactly as planned below: per-port `serial_X_drive_carrier` opt-in (default
-false, zero modem-line calls when off), 3-UI wiring, `AT&C`-tied semantics
-(`&C0` always-on / `&C1` follows carrier), hooks at open + every CONNECT /
-Disconnected / hangup / relay-loss (Escaped/+++ keeps carrier up), modem-mode
-only, not reset by ATZ/AT&F. Pure `carrier_dtr_level()` decision fn + off-path
-tests; README/CHANGELOG/AT-help updated. **Still needs hardware validation** (a
-USB-serial adapter with a loopback/scope — socat PTYs don't carry modem-control
-lines) and the optional second key to pick RTS instead of DTR was deferred (DTR
-only). The original plan follows for reference.
+Shipped and reviewed this cycle (see `GatewaySlavePlan.md` and the CHANGELOG for
+detail):
 
-**Goal:** when a connection is established, signal "carrier present" on a
-hardware line so a vintage terminal configured for carrier detect sees it; drop
-it on `NO CARRIER` / `ATH` / relay-link-loss (#3). Closes the gap the README
-"Limitations" section documents (AT&C is parsed/stored but no pin is driven).
+- Manual two-instance SSH smoke test — **run 2026-07-01** (found + fixed the
+  relay-teardown panic `837632f`; all scenarios incl. #15 keepalive and the
+  standalone regression passed).
+- In-process through-relay transfer harness (`src/relay/tests.rs`) covering all
+  five protocols over the onward-dial hop.
+- Relay channel-open handshake / protocol version (#9), live relay-status
+  observability (#10), through-relay interop (#11).
+- Optional DTR-as-DCD carrier signalling (#2, code complete — see the open
+  validation above).
+- Serial administrative-broadcast channel (`serial::broadcast_to_serial`) and
+  the transport-neutral shutdown-goodbye broadcast, completing broadcast
+  coverage across telnet/SSH/relay/serial.
 
-### Hard constraint (the cabling reality — investigated 2026-06-30)
-A PC / USB-serial adapter is wired as **DTE**. `serialport` 4.9 only exposes
-**`write_data_terminal_ready` (DTR)** and **`write_request_to_send` (RTS)** as
-drivable outputs; **DCD/DSR/CTS/RI are read-only inputs** — we **cannot drive a
-DCD pin directly**. The standard modem-emulator approach is therefore: **drive
-DTR (carrier proxy)** and let the user's **null-modem / DCE cable cross
-DTR→DCD** into the vintage machine's DCD input (this is how tcpser et al. do
-it). Document the wiring; optionally allow RTS instead of DTR via config.
+Decided **non-goals** (documented, not planned — rationale in
+`GatewaySlavePlan.md` §4.3):
 
-### "Does not affect users without a DCD pin" → default-off per-port opt-in
-- New per-port config key, e.g. **`serial_a_drive_carrier` / `serial_b_drive_carrier`
-  (default `false`)**. When **off, the gateway never touches DTR/RTS** — behavior
-  is byte-for-byte identical to today, so anyone without DCD wiring is wholly
-  unaffected. This is what satisfies the constraint.
-- Optional second key for **which line** to drive (`dtr` default | `rts`) if we
-  want flexibility; can be deferred (start with DTR only).
-- Wire the new key(s) into **all three UIs** (telnet config sub-screen, web
-  form, GUI) per the project rule, with defaults from `DEFAULT_*` consts and
-  README/conf-writer parity.
-
-### Semantics (tie to existing AT&C, already parsed)
-- `AT&C0` (default): DCD forced **always on** → assert DTR for the lifetime of
-  the open port (when the opt-in is on).
-- `AT&C1`: DCD **follows carrier** → assert DTR on CONNECT, drop on
-  `NO CARRIER`/`ATH`/disconnect/relay-loss, re-assert on the next CONNECT.
-- (AT&D — *DTR from the terminal* — is the read direction and is separate; out
-  of scope here, still a documented limitation.)
-
-### Hook points (serial.rs)
-- `open_serial_port` / port open: set the initial line state per opt-in + AT&C.
-- `dial_tcp` / `dial_master_relay` / online-entry: assert on CONNECT.
-- online-exit / `ATH` / `AT&F`/`ATZ` / relay disconnect (#3): drop on carrier
-  loss. Make sure the **slave** drops DTR on relay-link-loss so the attached
-  machine gets `NO CARRIER` via hardware too, not just the in-band result code.
-- Guard every call behind the opt-in so the off path makes **zero** serialport
-  modem-line calls.
-
-### Testing
-- Mostly **manual / hardware**: a USB-serial adapter with a loopback or a second
-  adapter reading the line; or a scope/LED. `socat` PTYs do **not** faithfully
-  carry modem-control lines, so they can't validate this.
-- Unit-testable parts: the **decision logic** (given opt-in + AT&C state +
-  connection state → desired DTR level) factored into a pure function; the
-  config key parse/validate/roundtrip + 3-UI wiring; that the off path issues no
-  line calls (via a trait seam / mock port if we add one).
-- Update README "Limitations" (DCD now drivable via opt-in + wiring note) and
-  the AT&C help text.
+- **`relay_transport = raw`** — SSH is the adopted transport (auth + encryption +
+  port reuse for free). A raw pipe would carry the identical bytes but needs a
+  second open port and hand-rolled auth/lockout, with no encryption. The key is
+  retained but hidden from the UIs and startup-warned if hand-set.
+- **Head-of-line blocking in `ssh.rs data()`** — not reachable with today's
+  one-channel-per-connection design; only relevant if a future single-connection
+  multi-channel design lands.
 
 ---
 
-## 3. Other deferred items (lower priority)
-
-- **#9 — Channel-open handshake / protocol version. DONE 2026-07-01.** The
-  master writes a `RELAY_HELLO` (`b"EGR"` magic + `RELAY_PROTOCOL_VERSION`
-  byte, `relay.rs`) as the first bytes on every accepted relay/registration
-  channel, right after `channel_success` (`ssh.rs` `exec_request` +
-  `register_console_port`); the slave reads+validates it in
-  `connect_master_relay_inner` (`read_relay_hello`) before using the channel.
-  This (a) makes a version skew fail cleanly ("upgrade the older gateway")
-  instead of desyncing, and (b) fixed the §1 #14 refused finding — a refusing
-  master sends no hello, so its absence (5 s timeout / EOF) is classified
-  `Refused`. Done before any release so there is no old-peer compat concern.
-  5 unit tests + live re-verification. Bump `RELAY_PROTOCOL_VERSION` on any
-  future incompatible wire change.
-- **#10 — Observability. DONE 2026-07-01.** The telnet Master/Slave screen now
-  shows live relay status: a **master** lists the remote console ports slaves
-  have registered right now (`relay::list_remote_ports()`, capped to 3 with a
-  "+N more"); a **slave** shows each console port's link state to the master
-  (`down`/`connecting`/`registered`/`bridging`) from a new per-port atomic
-  (`relay::SlaveLinkState`, set at each transition in
-  `console_slave_register_tick`). Read-only summary — the Serial Gateway picker
-  remains where a master user bridges to a remote port. The #14/#15 log lines
-  already cover connect/lose events. (Web/GUI show relay *config*; a live web
-  status view could be added later but wasn't needed.) 2 tests + live-verified.
-- **#11 — Through-relay interop tests. DONE 2026-07-01.** The in-process harness
-  (`src/relay/tests.rs`) now runs a real transfer through the relay for **all
-  five** gateway protocols over `run_master_relay_dial`'s `copy_bidirectional`
-  (`device ↔ slave ↔ master ↔ BBS`): XMODEM up/down, YMODEM up, ZMODEM up/down
-  + a **64 KiB** ZMODEM flow-control stress, **Kermit** up, and **Punter** up —
-  all byte-identical, adversarial payload. Combined with the live smoke test
-  (real lrzsz `sx` → full menu relay → landed byte-identical on the master's
-  disk, §1 scenario 3), transfers-over-relay are no longer manual-only. The
-  menu-upload-*lands-on-master* case stays a live check in CI terms (it saves to
-  the process-global `transfer_dir`), but its transport transparency is proven
-  by these tests + the full-session loopback test. A real-lrzsz-through-relay
-  `#[ignore]` subprocess test could still be added for a ground-truth peer, but
-  the live smoke run already covered it.
-- **raw transport (`relay_transport = raw`).** Skipped by decision — SSH is the
-  adopted transport. The key is retained, hidden from UIs, and startup-warned if
-  hand-set. Only build if a non-SSH path is ever wanted (would need its own
-  port + auth/lockout).
-- **Head-of-line blocking in `ssh.rs` `data()`.** Documented, **not reachable
-  today** (one channel per connection: modem connect-per-call, console one
-  connection per port). Only needs the per-channel mpsc pump fix *if* a future
-  single-connection multi-channel design lands.
-
----
-
-## 4. Suggested order & rough effort
-
-1. **Manual two-instance smoke test** (§1) — *no code*, ~half a day to run
-   through; highest confidence per hour. Do this first; it may surface real
-   issues the unit tests can't.
-2. **In-process relay transfer harness** (§1 complement / #11) — *small-medium*;
-   makes transfers-over-relay CI-covered.
-3. **Drive DCD** (§2) — *medium*; config key (×3 UIs) + line-drive hooks +
-   manual hardware validation. Default-off keeps it safe to ship incrementally.
-4. **#9 handshake / #10 observability** — *small each*; polish.
-5. **#11 through-relay CCGMS/lrzsz** — *medium*; depends on the harness.
-6. raw transport / head-of-line — only if a concrete need appears.
-
-(0.6.3 is still held — none of this gates a release. When 0.6.3 does ship, run
-the `versionchange.txt` checklist.)
+(0.6.3 is still held — nothing here gates a release. When 0.6.3 ships, run the
+`versionchange.txt` checklist.)
