@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.6.3] - Unreleased
 
 ### Added
+- **Live relay status in the telnet Master/Slave screen.** A master now lists
+  the remote console ports slaves have registered (so you can see connected
+  slaves at a glance); a slave shows each console port's link state to its
+  master (`down`/`connecting`/`registered`/`bridging`) — relay connectivity is
+  now visible without reading the logs.
 - **Relay channel handshake / protocol version.** The master now writes a small
   hello (`EGR` magic + a protocol-version byte) as the first bytes on every
   accepted master/slave relay or console-registration channel; the slave

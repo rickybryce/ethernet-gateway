@@ -10356,6 +10356,57 @@ impl TelnetSession {
             self.send_line(&format!("  Pass:   {}", pass_disp)).await?;
             self.send_line("").await?;
 
+            // Live relay status (§9 #10), read-only.  A master lists the
+            // remote console ports slaves have registered right now; a slave
+            // shows each console port's link state to the master — so an
+            // operator can confirm connectivity without grepping logs.  The
+            // Serial Gateway picker remains where a master user actually
+            // bridges to a remote port; this is a compact summary (capped to
+            // keep the screen inside the 22-row PETSCII budget).
+            match cfg.gateway_role.as_str() {
+                "master" => {
+                    let ports = crate::relay::list_remote_ports();
+                    self.send_line(&format!(
+                        "  {} ({})",
+                        self.dim("Registered remote ports:"),
+                        ports.len()
+                    ))
+                    .await?;
+                    const RELAY_STATUS_CAP: usize = 3;
+                    for (ip, label) in ports.iter().take(RELAY_STATUS_CAP) {
+                        self.send_line(&format!("    {} @ {}", self.amber(label), ip))
+                            .await?;
+                    }
+                    if ports.len() > RELAY_STATUS_CAP {
+                        self.send_line(&format!(
+                            "    {}",
+                            self.dim(&format!("+{} more", ports.len() - RELAY_STATUS_CAP))
+                        ))
+                        .await?;
+                    }
+                    self.send_line("").await?;
+                }
+                "slave" => {
+                    for id in [
+                        crate::config::SerialPortId::A,
+                        crate::config::SerialPortId::B,
+                    ] {
+                        let p = cfg.port(id);
+                        if p.enabled && p.mode == "console" {
+                            let st = crate::relay::slave_link_state(id.index());
+                            self.send_line(&format!(
+                                "  Link {}: {}",
+                                id.label(),
+                                self.amber(st.label())
+                            ))
+                            .await?;
+                        }
+                    }
+                    self.send_line("").await?;
+                }
+                _ => {}
+            }
+
             self.send_line(&format!(
                 "  {}  Cycle role       {}  Accept relays",
                 self.cyan("R"),
@@ -15942,9 +15993,16 @@ mod tests {
     /// accept-relays, master host:port, user, pass) + blank + 3 item rows
     /// (R/A, M/P, U/W) + Q/H + prompt = 15.  (Transport is not exposed
     /// until the raw transport is implemented; SSH is the only mode.)
+    /// Plus the §9 #10 live-status block. A master shows a "Registered
+    /// remote ports:" header, up to 3 entries (RELAY_STATUS_CAP), an
+    /// optional "+N more", and a trailing blank — 6 rows worst case. A slave
+    /// shows up to 2 link lines and a blank — 3 rows. The master case
+    /// dominates, so the guard is base plus 6.
     #[test]
     fn test_master_slave_menu_row_count() {
-        let rows = 3 + 1 + 5 + 1 + 3 + 1 + 1; // 15
+        let base = 3 + 1 + 5 + 1 + 3 + 1 + 1; // 15
+        let master_status_worst = 1 + 3 + 1 + 1; // header + cap + "+N more" + blank
+        let rows = base + master_status_worst; // 21
         assert!(rows <= 22, "master/slave menu is {} rows, exceeds 22", rows);
     }
 

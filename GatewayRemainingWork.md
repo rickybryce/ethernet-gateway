@@ -237,15 +237,29 @@ it). Document the wiring; optionally allow RTS instead of DTR via config.
   `Refused`. Done before any release so there is no old-peer compat concern.
   5 unit tests + live re-verification. Bump `RELAY_PROTOCOL_VERSION` on any
   future incompatible wire change.
-- **#10 — Observability.** Operator-visible relay status: a master view of
-  "connected slaves / registered remote ports", clearer connect/lose log lines
-  (some exist already), maybe a telnet status page. The logs from #14/#15 cover
-  the basics now.
-- **#11 — Through-relay interop tests.** Run the existing CCGMS / lrzsz interop
-  *through* the relay hop to prove transfers survive it, plus the in-process
-  fake-slave harness from §1. This is the CI-able piece that would retire the
-  "transfers over relay are manual-only" gap (the data-transparency review flagged
-  it).
+- **#10 — Observability. DONE 2026-07-01.** The telnet Master/Slave screen now
+  shows live relay status: a **master** lists the remote console ports slaves
+  have registered right now (`relay::list_remote_ports()`, capped to 3 with a
+  "+N more"); a **slave** shows each console port's link state to the master
+  (`down`/`connecting`/`registered`/`bridging`) from a new per-port atomic
+  (`relay::SlaveLinkState`, set at each transition in
+  `console_slave_register_tick`). Read-only summary — the Serial Gateway picker
+  remains where a master user bridges to a remote port. The #14/#15 log lines
+  already cover connect/lose events. (Web/GUI show relay *config*; a live web
+  status view could be added later but wasn't needed.) 2 tests + live-verified.
+- **#11 — Through-relay interop tests. DONE 2026-07-01.** The in-process harness
+  (`src/relay/tests.rs`) now runs a real transfer through the relay for **all
+  five** gateway protocols over `run_master_relay_dial`'s `copy_bidirectional`
+  (`device ↔ slave ↔ master ↔ BBS`): XMODEM up/down, YMODEM up, ZMODEM up/down
+  + a **64 KiB** ZMODEM flow-control stress, **Kermit** up, and **Punter** up —
+  all byte-identical, adversarial payload. Combined with the live smoke test
+  (real lrzsz `sx` → full menu relay → landed byte-identical on the master's
+  disk, §1 scenario 3), transfers-over-relay are no longer manual-only. The
+  menu-upload-*lands-on-master* case stays a live check in CI terms (it saves to
+  the process-global `transfer_dir`), but its transport transparency is proven
+  by these tests + the full-session loopback test. A real-lrzsz-through-relay
+  `#[ignore]` subprocess test could still be added for a ground-truth peer, but
+  the live smoke run already covered it.
 - **raw transport (`relay_transport = raw`).** Skipped by decision — SSH is the
   adopted transport. The key is retained, hidden from UIs, and startup-warned if
   hand-set. Only build if a non-SSH path is ever wanted (would need its own

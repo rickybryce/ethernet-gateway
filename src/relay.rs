@@ -24,7 +24,7 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use crate::logger::glog;
@@ -632,6 +632,67 @@ pub fn list_remote_ports() -> Vec<(IpAddr, String)> {
         .unwrap_or_default();
     v.sort();
     v
+}
+
+// ─── Slave-side link status (observability, §9 #10) ──────────
+
+/// Live state of a slave console port's registration link to its master,
+/// surfaced read-only by the telnet Master/Slave status screen so an
+/// operator can see whether a slave is actually reaching its master without
+/// grepping logs.  Per port (A/B).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlaveLinkState {
+    /// Not connected — idle, backing off after a failure, or unconfigured.
+    Down = 0,
+    /// Reaching / authenticating with the master (includes retry backoff).
+    Connecting = 1,
+    /// Registered with the master; idle, awaiting a pick.
+    Registered = 2,
+    /// A master user picked this port; actively bridging the console.
+    Bridging = 3,
+}
+
+impl SlaveLinkState {
+    /// Short human label for the status screen.
+    pub fn label(self) -> &'static str {
+        match self {
+            SlaveLinkState::Down => "down",
+            SlaveLinkState::Connecting => "connecting",
+            SlaveLinkState::Registered => "registered",
+            SlaveLinkState::Bridging => "bridging",
+        }
+    }
+
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => SlaveLinkState::Connecting,
+            2 => SlaveLinkState::Registered,
+            3 => SlaveLinkState::Bridging,
+            _ => SlaveLinkState::Down,
+        }
+    }
+}
+
+/// Per-port (index A=0, B=1) slave link state.  Written by the slave
+/// console register loop (`serial::console_slave_register_tick`), read by
+/// the telnet status screen.  `Relaxed` is fine — it is a single-value
+/// status indicator with no ordering dependency on other state.
+static SLAVE_LINK: [AtomicU8; 2] = [AtomicU8::new(0), AtomicU8::new(0)];
+
+/// Record a slave port's current link state (no-op for an out-of-range
+/// index, though only A/B exist).
+pub fn set_slave_link(port_index: usize, state: SlaveLinkState) {
+    if let Some(cell) = SLAVE_LINK.get(port_index) {
+        cell.store(state as u8, Ordering::Relaxed);
+    }
+}
+
+/// Read a slave port's current link state.
+pub fn slave_link_state(port_index: usize) -> SlaveLinkState {
+    SLAVE_LINK
+        .get(port_index)
+        .map(|c| SlaveLinkState::from_u8(c.load(Ordering::Relaxed)))
+        .unwrap_or(SlaveLinkState::Down)
 }
 
 #[cfg(test)]

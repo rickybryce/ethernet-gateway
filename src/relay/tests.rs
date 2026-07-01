@@ -289,6 +289,30 @@ fn test_parse_relay_command_rejects_garbage() {
     );
 }
 
+/// Slave link-state (§9 #10) round-trips through the per-port atomic and
+/// its labels are stable (the status screen prints them).  Uses port index
+/// 1 (B) so it can't race another test on index 0.
+#[test]
+fn test_slave_link_state_roundtrip() {
+    use super::{set_slave_link, slave_link_state, SlaveLinkState};
+    for st in [
+        SlaveLinkState::Down,
+        SlaveLinkState::Connecting,
+        SlaveLinkState::Registered,
+        SlaveLinkState::Bridging,
+    ] {
+        set_slave_link(1, st);
+        assert_eq!(slave_link_state(1), st);
+    }
+    assert_eq!(SlaveLinkState::Down.label(), "down");
+    assert_eq!(SlaveLinkState::Registered.label(), "registered");
+    assert_eq!(SlaveLinkState::Bridging.label(), "bridging");
+    // Out-of-range index is a no-op read → Down (only A/B exist).
+    assert_eq!(slave_link_state(9), SlaveLinkState::Down);
+    // Leave index 1 back at Down so other tests see a clean slate.
+    set_slave_link(1, SlaveLinkState::Down);
+}
+
 /// The console-mode remote-port registry (§9 #12): register, list,
 /// claim-removes, and a second claim finds nothing.  Uses a TEST-NET-3 IP
 /// (203.0.113.x) so it can't collide with another test's registry keys.
@@ -684,6 +708,130 @@ async fn test_relay_onward_dial_zmodem_download() {
     assert_eq!(
         files[0].data, payload,
         "ZMODEM download over relay corrupted the file"
+    );
+
+    let _ = tokio::time::timeout(Duration::from_secs(5), dialer).await;
+}
+
+/// Kermit upload over the relay: the device SENDS via Kermit, the BBS
+/// RECEIVES — proving the Columbia-protocol handshake + packets survive
+/// the onward-dial pipe (completes the protocol matrix alongside
+/// XMODEM/YMODEM/ZMODEM above; Punter is next).
+#[tokio::test]
+async fn test_relay_onward_dial_kermit_upload() {
+    let payload = adversarial_payload();
+    let (device_end, bbs, dialer) = onward_dial_endpoints().await;
+
+    let data = payload.clone();
+    let sender = tokio::spawn(async move {
+        let file = crate::kermit::KermitSendFile {
+            name: "relay.bin",
+            data: &data,
+            modtime: None,
+            mode: None,
+        };
+        let (mut r, mut w) = tokio::io::split(device_end);
+        crate::kermit::kermit_send(&mut r, &mut w, &[file], false, false, false).await
+    });
+    let receiver = tokio::spawn(async move {
+        let (mut r, mut w) = tokio::io::split(bbs);
+        crate::kermit::kermit_receive(&mut r, &mut w, false, false, false).await
+    });
+
+    let (send_res, recv_res) = tokio::time::timeout(Duration::from_secs(45), async {
+        tokio::join!(sender, receiver)
+    })
+    .await
+    .expect("relay KERMIT upload timed out");
+
+    send_res.unwrap().expect("KERMIT sender failed");
+    let files = recv_res.unwrap().expect("KERMIT receiver failed");
+    assert_eq!(files.len(), 1, "expected exactly one file");
+    assert_eq!(
+        files[0].data, payload,
+        "KERMIT upload over relay corrupted the file"
+    );
+
+    let _ = tokio::time::timeout(Duration::from_secs(5), dialer).await;
+}
+
+/// Punter (C1) upload over the relay: the device SENDS, the BBS RECEIVES —
+/// the two-phase dual-checksum handshake survives the onward-dial pipe.
+/// Punter is stop-and-wait, so this also exercises the relay under a
+/// per-block ack/retry protocol.
+#[tokio::test]
+async fn test_relay_onward_dial_punter_upload() {
+    let payload = adversarial_payload();
+    let (device_end, bbs, dialer) = onward_dial_endpoints().await;
+
+    let data = payload.clone();
+    let sender = tokio::spawn(async move {
+        let (mut r, mut w) = tokio::io::split(device_end);
+        crate::punter::punter_send(
+            &mut r,
+            &mut w,
+            &data,
+            crate::punter::PunterFileType::Prg,
+            false,
+            false,
+            false,
+        )
+        .await
+    });
+    let receiver = tokio::spawn(async move {
+        let (mut r, mut w) = tokio::io::split(bbs);
+        crate::punter::punter_receive(&mut r, &mut w, false, false, false).await
+    });
+
+    let (send_res, recv_res) = tokio::time::timeout(Duration::from_secs(45), async {
+        tokio::join!(sender, receiver)
+    })
+    .await
+    .expect("relay PUNTER upload timed out");
+
+    send_res.unwrap().expect("PUNTER sender failed");
+    let (received, ftype) = recv_res.unwrap().expect("PUNTER receiver failed");
+    assert_eq!(
+        received, payload,
+        "PUNTER upload over relay corrupted the file"
+    );
+    assert_eq!(ftype, crate::punter::PunterFileType::Prg);
+
+    let _ = tokio::time::timeout(Duration::from_secs(5), dialer).await;
+}
+
+/// Large ZMODEM upload over the relay (64 KiB): stresses the onward-dial
+/// pipe's flow control across many subpackets, beyond the ~4 KiB
+/// adversarial payload the other cases use.
+#[tokio::test]
+async fn test_relay_onward_dial_zmodem_large() {
+    // 64 KiB, every byte value cycling, so a dropped/duplicated chunk shows.
+    let payload: Vec<u8> = (0..65536u32).map(|i| (i & 0xFF) as u8).collect();
+    let (device_end, bbs, dialer) = onward_dial_endpoints().await;
+
+    let data = payload.clone();
+    let sender = tokio::spawn(async move {
+        let (mut r, mut w) = tokio::io::split(device_end);
+        crate::zmodem::zmodem_send(&mut r, &mut w, &[("large.bin", &data)], false, false).await
+    });
+    let receiver = tokio::spawn(async move {
+        let (mut r, mut w) = tokio::io::split(bbs);
+        crate::zmodem::zmodem_receive(&mut r, &mut w, false, false, |_, _, _| true).await
+    });
+
+    let (send_res, recv_res) = tokio::time::timeout(Duration::from_secs(45), async {
+        tokio::join!(sender, receiver)
+    })
+    .await
+    .expect("relay large ZMODEM upload timed out");
+
+    send_res.unwrap().expect("ZMODEM sender failed");
+    let files = recv_res.unwrap().expect("ZMODEM receiver failed");
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].data.len(), payload.len());
+    assert_eq!(
+        files[0].data, payload,
+        "large ZMODEM upload over relay corrupted the file"
     );
 
     let _ = tokio::time::timeout(Duration::from_secs(5), dialer).await;

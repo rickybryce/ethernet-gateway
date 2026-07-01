@@ -800,6 +800,7 @@ fn console_slave_register_tick(
             "Serial console (Port {}): slave mode but no master host set; idle",
             id.label()
         );
+        crate::relay::set_slave_link(idx, crate::relay::SlaveLinkState::Down);
         while !aborted(idx) {
             std::thread::sleep(Duration::from_millis(250));
         }
@@ -826,8 +827,12 @@ fn console_slave_register_tick(
 
     loop {
         if aborted(idx) {
+            crate::relay::set_slave_link(idx, crate::relay::SlaveLinkState::Down);
             return;
         }
+        // Entering a connect attempt (covers the retry/backoff paths, which
+        // all loop back here) — reflected as "connecting" until we register.
+        crate::relay::set_slave_link(idx, crate::relay::SlaveLinkState::Connecting);
 
         let port = match open_serial_port(&port_cfg) {
             Ok(p) => p,
@@ -895,6 +900,7 @@ fn console_slave_register_tick(
         }
         last_outage = None;
         net_backoff = RECONNECT_BACKOFF_MIN;
+        crate::relay::set_slave_link(idx, crate::relay::SlaveLinkState::Registered);
         glog!(
             "Serial console (Port {}): registered with master; awaiting pick",
             label
@@ -918,6 +924,7 @@ fn console_slave_register_tick(
         match slave_wait_for_activate(&handle, &mut stream, &shutdown, idx) {
             ActivateOutcome::Activated => {
                 glog!("Serial console (Port {}): master attached; bridging", label);
+                crate::relay::set_slave_link(idx, crate::relay::SlaveLinkState::Bridging);
                 run_console_bridge(id, port, stream, handle.clone(), shutdown.clone());
                 glog!(
                     "Serial console (Port {}): bridge closed; re-registering",
@@ -937,6 +944,7 @@ fn console_slave_register_tick(
                 });
             }
             ActivateOutcome::Aborted => {
+                crate::relay::set_slave_link(idx, crate::relay::SlaveLinkState::Down);
                 handle.block_on(async move {
                     drop(stream);
                     drop(_session);
