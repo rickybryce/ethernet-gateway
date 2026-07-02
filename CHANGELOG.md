@@ -22,12 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   device to a port on its master** (`ATD <Port>@<master-ip>`): the slave relays
   the call and the master resolves the address to one of its own ports and
   rings/connects it (gated by the master's `master_accept_relays` +
-  `allow_peer_dial`). The master also routes a peer address to a port a slave
-  has **registered** with it — so a slave's **console** port is dialable from
-  the master or, via the master as a crossbar, from another slave
-  (`<Port>@<slave-ip>`). Still planned: dialing a slave's **modem** port (needs
-  the slave to announce modem ports). See README "Peer-Dial" and user manual
-  §9.2.3.
+  `allow_peer_dial`). Cross-gateway is symmetric: the master routes a peer
+  address to **any** port a slave has registered — a slave's **console** port
+  and its **modem** port (a slave modem port announces itself to the master and,
+  when dialed, *rings* the attached device) — so `<Port>@<slave-ip>` reaches a
+  slave's port from the master or, via the master as a crossbar, from another
+  slave (device ↔ slave-A ↔ master ↔ slave-B ↔ device). Addressing is by IP, so
+  gateways need distinct addresses (normal for separate machines). See README
+  "Peer-Dial" and user manual §9.2.3.
 - **Live relay status in the telnet Master/Slave screen.** A master now lists
   the remote console ports slaves have registered (so you can see connected
   slaves at a glance); a slave shows each console port's link state to its

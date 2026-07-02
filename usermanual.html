@@ -2087,12 +2087,15 @@ bridging <code>device&nbsp;&harr;&nbsp;slave&nbsp;&harr;&nbsp;master&nbsp;&harr;
 Requires the slave's <code>allow_peer_dial</code> on (to relay) and the master's
 <code>master_accept_relays</code> + <code>allow_peer_dial</code> on (to accept).
 Addressing is by IP, so master and slave need distinct addresses (normal for
-separate machines). The master also routes a peer address to a port a slave has
-<em>registered</em> with it, so a slave's <strong>console</strong> port is
-dialable (<code>&lt;Port&gt;@&lt;slave-ip&gt;</code>) from the master or, with
-the master as a crossbar, from another slave. Still planned: dialing a slave's
-<strong>modem</strong> port (needs the slave to announce its modem ports) &mdash;
-that returns <code>NO&nbsp;CARRIER</code> today.
+separate machines). Cross-gateway is symmetric:
+<code>&lt;Port&gt;@&lt;slave-ip&gt;</code> reaches <strong>any</strong> port a
+slave has &mdash; a <strong>console</strong> port connects directly, a
+<strong>modem</strong> port rings the attached device &mdash; from the master
+or, with the master as a crossbar, from another slave
+(<code>device&nbsp;&harr;&nbsp;slave-A&nbsp;&harr;&nbsp;master&nbsp;&harr;&nbsp;slave-B&nbsp;&harr;&nbsp;device</code>).
+A slave modem port becomes dialable by announcing itself to the master
+(automatic when <code>gateway_role = slave</code> and <code>allow_peer_dial</code>
+are set).
 </p>
 
 <h2 id="ch9-info">9.3 Identification (ATI)</h2>

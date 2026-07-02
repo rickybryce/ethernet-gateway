@@ -774,6 +774,23 @@ fn serial_manager(
                 // underlying device disappears (e.g. a socat or USB-serial
                 // bridge that exits when the attached DOS terminal closes).
                 // Loop until a config-change restart or a server shutdown.
+                //
+                // On a slave with peer-dial on, also spawn a peer-dial
+                // announcer (Phase 2b-ii): a sibling thread that registers
+                // this port with the master so it can be dialed, and on a
+                // call rings the local port.  It runs for this modem-branch
+                // lifetime and stops on the same restart/shutdown flags; we
+                // join it after the reopen loop so it can't pile up.
+                let announcer = if cfg.gateway_role == "slave" && cfg.allow_peer_dial {
+                    let h = handle.clone();
+                    let sd = shutdown.clone();
+                    std::thread::Builder::new()
+                        .name(format!("peer-announce-{}", id.label().to_ascii_lowercase()))
+                        .spawn(move || modem_slave_announce_tick(id, h, sd))
+                        .ok()
+                } else {
+                    None
+                };
                 let mut reported_down = false;
                 while !shutdown.load(Ordering::SeqCst)
                     && !SERIAL_RESTART[idx].load(Ordering::SeqCst)
@@ -830,6 +847,13 @@ fn serial_manager(
                         std::thread::sleep(step);
                         waited += step;
                     }
+                }
+                // The peer-dial announcer watches the same shutdown /
+                // per-port restart flags this loop broke on, so it is already
+                // exiting; join it before re-evaluating config so a restart
+                // can't leave a second announcer running.
+                if let Some(j) = announcer {
+                    let _ = j.join();
                 }
             }
         }
@@ -1157,6 +1181,132 @@ fn console_slave_register_tick(
         }
         // Normal churn (bridge ended or channel closed cleanly) — brisk
         // re-register, not an outage backoff.
+        slave_backoff(idx, &shutdown, RECONNECT_BACKOFF_MIN);
+    }
+}
+
+/// Announcer for a **modem-mode** slave port (Phase 2b-ii).  Registers the
+/// port with the master (`serial-register <label>`, like a console port) so
+/// it is reachable as a peer-dial target — but on activation it *rings the
+/// local modem port* (`request_peer_call`, serviced by this port's own
+/// `serial_thread`) and bridges the master's channel to the answered duplex.
+/// The modem port keeps serving local dial-out on `serial_thread` the whole
+/// time; a peer call that arrives while the device is mid-outbound-call is
+/// simply not answered (BUSY/timeout) and the announcer re-registers.
+///
+/// Runs on its own thread alongside `serial_thread`; exits on shutdown or a
+/// per-port restart.  russh objects (`_session`, the channel `stream`) are
+/// always dropped inside `handle.block_on` — dropping them on this bare
+/// thread panics ("no reactor running"), the same rule as
+/// `console_slave_register_tick`.
+fn modem_slave_announce_tick(
+    id: SerialPortId,
+    handle: tokio::runtime::Handle,
+    shutdown: Arc<AtomicBool>,
+) {
+    let idx = id.index();
+    let aborted =
+        |idx: usize| shutdown.load(Ordering::SeqCst) || SERIAL_RESTART[idx].load(Ordering::SeqCst);
+    let mut net_backoff = RECONNECT_BACKOFF_MIN;
+    let mut last_outage: Option<String> = None;
+
+    loop {
+        if aborted(idx) {
+            return;
+        }
+        // Only announce while this is still a slave modem port with peer-dial
+        // on and a master configured — otherwise stop (config changed).
+        let cfg = config::get_config();
+        let p = cfg.port(id);
+        if cfg.gateway_role != "slave"
+            || !cfg.allow_peer_dial
+            || cfg.slave_master_host.is_empty()
+            || !p.enabled
+            || p.port.is_empty()
+            || p.mode == "console"
+        {
+            return;
+        }
+        let host = cfg.slave_master_host.clone();
+        let mport = cfg.slave_master_port;
+        let user = cfg.slave_master_username.clone();
+        let pass = cfg.slave_master_password.clone();
+        let label = id.label();
+
+        let connected = handle.block_on(async {
+            crate::relay::connect_master_register(&host, mport, &user, &pass, label).await
+        });
+        let relay = match connected {
+            Ok(r) => r,
+            Err(e) => {
+                let delay = relay_reconnect_delay(&e, &mut net_backoff);
+                let msg = format!("{:?}", e);
+                if should_log_outage(&last_outage, &msg) {
+                    glog!(
+                        "Serial modem (Port {}): peer-dial announce to master {}:{} failed: {}",
+                        label,
+                        host,
+                        mport,
+                        msg
+                    );
+                    last_outage = Some(msg);
+                }
+                slave_backoff(idx, &shutdown, delay);
+                continue;
+            }
+        };
+        if last_outage.is_some() {
+            glog!("Serial modem (Port {}): peer-dial announce reconnected", label);
+        }
+        last_outage = None;
+        net_backoff = RECONNECT_BACKOFF_MIN;
+        glog!(
+            "Serial modem (Port {}): announced to master for peer-dial; awaiting call",
+            label
+        );
+
+        let crate::relay::MasterRelay { _session, mut stream } = relay;
+        match slave_wait_for_activate(&handle, &mut stream, &shutdown, idx) {
+            ActivateOutcome::Activated => {
+                glog!(
+                    "Serial modem (Port {}): peer-dial call in — ringing local port",
+                    label
+                );
+                // Ring the LOCAL modem port (serviced by our serial_thread)
+                // and bridge the master channel to the answered duplex.
+                // Everything runs — and every russh object drops — inside the
+                // runtime.
+                handle.block_on(async move {
+                    match request_peer_call(id, Duration::from_secs(30)).await {
+                        Ok(mut caller) => {
+                            let _ = tokio::io::copy_bidirectional(&mut stream, &mut caller).await;
+                        }
+                        Err(o) => {
+                            glog!(
+                                "Serial modem (Port {}): peer-dial ring not answered: {:?}",
+                                id.label(),
+                                o
+                            );
+                        }
+                    }
+                    drop(stream);
+                    drop(_session);
+                });
+            }
+            ActivateOutcome::Closed => {
+                handle.block_on(async move {
+                    drop(stream);
+                    drop(_session);
+                });
+            }
+            ActivateOutcome::Aborted => {
+                handle.block_on(async move {
+                    drop(stream);
+                    drop(_session);
+                });
+                return;
+            }
+        }
         slave_backoff(idx, &shutdown, RECONNECT_BACKOFF_MIN);
     }
 }
