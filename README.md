@@ -453,9 +453,11 @@ Most settings can be changed from within a telnet or SSH session using the
   mode).  Pick a port to enter that port's settings menu, where you
   can toggle its mode (the per-port **T** item flips between Modem
   Emulator and Serial Console), set its device, baud, framing, flow
-  control, AT-state, dialup mapping, and ring emulator.  Each port's
-  settings are fully independent and persist under separate
-  `serial_a_*` / `serial_b_*` keys in `egateway.conf`.
+  control, AT-state, dialup mapping, and ring emulator.  The screen also
+  has two gateway-wide toggles: **D** (gateway debug trace) and **P**
+  (peer-dial, `allow_peer_dial`).  Each port's settings are fully
+  independent and persist under separate `serial_a_*` / `serial_b_*` keys
+  in `egateway.conf`.
 - **S** Server Configuration -- enable/disable the telnet, SSH, Kermit, and
   web listeners and set each one's port, set the session cap (**C**) and idle
   timeout (**D**, `0` disables it), toggle the network-safety opt-out
@@ -636,6 +638,11 @@ kermit_resume_partial = false
 kermit_resume_max_age_hours = 168
 kermit_locking_shifts = false
 allow_atdt_kermit = false
+# allow_peer_dial:             let a modem port dial another port directly
+#                              (ATD <Port>@<IP>, or pick a modem port in the
+#                              Serial Gateway menu) instead of the gateway
+#                              menu.  Off by default (opt-in even on a LAN).
+allow_peer_dial = false
 
 # Standalone Kermit server listener.
 # kermit_server_enabled:  bind a dedicated TCP port that drops every accepted

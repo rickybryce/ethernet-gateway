@@ -195,6 +195,12 @@ pub async fn request_peer_call(
     if try_place_peer_call(target, PeerCall { bridge: target_end, progress: tx }).is_err() {
         return Err(PeerCallOutcome::Busy);
     }
+    // Drop guard: if this await is cancelled (e.g. the task is aborted at
+    // shutdown) rather than running to an outcome, reclaim the slot so a
+    // stale PeerCall doesn't linger and spuriously Busy the next caller.
+    // Disarmed on Answered (the target has claimed the slot); on any other
+    // outcome the guard's drop does the reclaim (replacing an explicit take).
+    let mut slot_guard = PeerSlotGuard { id: target, armed: true };
 
     let start = tokio::time::Instant::now();
     let answer_deadline = start + answer_wait;
@@ -218,12 +224,30 @@ pub async fn request_peer_call(
     };
 
     if outcome == PeerCallOutcome::Answered {
+        // Target claimed the slot and is bridging; leave it be.
+        slot_guard.armed = false;
         Ok(caller_end)
     } else {
-        // Reclaim the request if the target never took it; if it already
-        // did, dropping `rx`/`caller_end` here signals its ring to abort.
-        take_peer_call_request(target);
+        // The guard's drop reclaims the request if the target never took it;
+        // if it already did, dropping `rx`/`caller_end` here signals its ring
+        // to abort (its next `progress.try_send` fails).
         Err(outcome)
+    }
+}
+
+/// Drop guard mirroring [`ConsoleSlotGuard`] for `PEER_CALL_REQUEST`: clears a
+/// placed-but-unclaimed peer call if [`request_peer_call`] is cancelled or
+/// exits without the target having taken the slot.
+struct PeerSlotGuard {
+    id: SerialPortId,
+    armed: bool,
+}
+
+impl Drop for PeerSlotGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            take_peer_call_request(self.id);
+        }
     }
 }
 
@@ -3061,12 +3085,13 @@ fn local_host_ips() -> Vec<String> {
     ips
 }
 
-/// Handle a peer-dial (`ATD <Port>@<host>`).  Phase 1: only *local* targets
-/// (a port on this same gateway) are bridged; a remote host is deferred to
-/// the cross-gateway relay path (Phase 2) and reported as `NO CARRIER` for
-/// now.  Gated by `allow_peer_dial`; a disabled feature or an unresolvable
-/// target looks like any other failed dial (no hint), matching the
-/// `allow_atdt_kermit` posture.
+/// Handle a peer-dial (`ATD <Port>@<host>`) on a standalone/master gateway:
+/// a *local* target (a port on this gateway) is bridged; a remote host has no
+/// master to relay through here, so it is `NO CARRIER`.  (A *slave* routes a
+/// remote peer address to its master in `handle_dial` instead — Phase 2a.)
+/// Gated by `allow_peer_dial`; a disabled feature or an unresolvable target
+/// looks like any other failed dial (no hint), matching the `allow_atdt_kermit`
+/// posture.
 fn handle_peer_dial(state: &mut ModemState, addr: PeerAddress) {
     if !config::get_config().allow_peer_dial {
         send_result(state, "NO CARRIER");
@@ -3084,9 +3109,12 @@ fn handle_peer_dial(state: &mut ModemState, addr: PeerAddress) {
         }
         connect_local_peer(state, addr.port);
     } else {
-        // Phase 2 (cross-gateway relay) — not yet wired.
+        // Cross-gateway peer-dial from a *slave* is handled in `handle_dial`
+        // (relayed to the master).  This path runs only on a standalone or
+        // master gateway, which has no master to relay through — so a remote
+        // peer address is NO CARRIER here.
         glog!(
-            "Serial modem (Port {}): peer-dial to remote {}@{} not yet supported",
+            "Serial modem (Port {}): remote peer-dial {}@{} not routable (no master to relay through)",
             state.port_id.label(),
             addr.port.label(),
             addr.host
@@ -3100,9 +3128,9 @@ fn handle_peer_dial(state: &mut ModemState, addr: PeerAddress) {
 /// A **console-mode** target connects directly (leased-line): we request a
 /// bridge duplex from the target's console manager and pump the caller's
 /// UART through it, so the two attached devices talk transparently.  A
-/// **modem-mode** target rings and answers per its own AT rules — that path
-/// (a `process_ring` bridge variant) is the next step and currently reports
-/// `NO CARRIER`.
+/// **modem-mode** target rings and answers per its own AT rules
+/// (`bridge_local_modem_peer` → `request_peer_call`), then bridges the same
+/// way.
 fn connect_local_peer(state: &mut ModemState, target: SerialPortId) {
     let cfg = config::get_config();
     let tp = cfg.port(target);
@@ -4137,7 +4165,13 @@ fn process_peer_ring(state: &mut ModemState, call: PeerCall) {
         // `bridge` here EOFs the caller's end so it stops waiting.
         return;
     }
-    let _ = progress.try_send(1); // tell the caller: answered
+    // Tell the caller we answered.  If this fails the caller already gave up
+    // (its S7 elapsed and it dropped the channel) — abort before emitting a
+    // spurious CONNECT toward a dead bridge; dropping `bridge`/`progress`
+    // returns the port cleanly to the prompt.
+    if progress.try_send(1).is_err() {
+        return;
+    }
 
     send_result(state, "CONNECT");
     state.mode = ModemMode::Online;
