@@ -135,17 +135,18 @@ where
     let _ = relay.shutdown().await;
 }
 
-/// How long the master waits for its own modem-mode target to answer a
-/// relayed peer call (the relayed device has no local `S7` to bound it).
-/// Matches the telnet Serial Gateway picker's peer-call wait.
-const RELAY_PEER_ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long to wait for a modem-mode peer-dial target to answer when the
+/// caller has no local `S7` to bound it — the master bridging a relayed peer
+/// call, and the slave modem-port announcer ringing its own port.  Matches
+/// the telnet Serial Gateway picker's peer-call wait.
+pub const RELAY_PEER_ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Master-side **peer-dial** (Phase 2): a slave relayed a device that dialed
-/// `<Port>@<host>`.  The master resolves the address against its *own* ports
-/// (Phase 2a — a remote/slave target is deferred) and bridges the relay
-/// channel to that port: a modem port **rings** and answers per its AT rules,
-/// a console port connects directly — reusing the same machinery as a local
-/// peer-dial (`device ↔ slave ↔ master ↔ master's port`).  Refuses unless
+/// `<Port>@<host>`.  The master resolves the address either to one of its
+/// *own* ports (rings a modem port / connects a console port, reusing the
+/// local peer-dial machinery) or, when it names another gateway, to a port a
+/// slave **registered** with it — the crossbar, bridging the two relay legs
+/// (`device ↔ slave-A ↔ master ↔ slave-B ↔ device`).  Refuses unless
 /// `allow_peer_dial` is on.
 pub async fn run_master_relay_peer<S>(mut relay: S, addr: String)
 where
@@ -427,11 +428,13 @@ pub async fn connect_master_relay(
     connect_relay_exec(host, port, username, password, &target.exec_command(port_label)).await
 }
 
-/// Connect to the master and register a **console-mode** port as
-/// available (§9 #12).  The master holds the channel idle in its
-/// remote-port registry until a master user picks it; the returned
-/// [`MasterRelay`] is then driven by the slave's console-registration
-/// loop (read one activate byte, then bridge the UART).
+/// Connect to the master and register a port as available (§9 #12).  The
+/// master holds the channel idle in its remote-port registry
+/// (`REMOTE_PORTS`, keyed by IP+label, mode-agnostic) until it is claimed —
+/// by a Serial Gateway menu pick or a peer-dial — then signals with the
+/// activate byte.  Used by both the console-registration loop (which then
+/// bridges the UART) and the modem-port peer-dial announcer (which then rings
+/// the local modem port); the master treats them uniformly.
 pub async fn connect_master_register(
     host: &str,
     port: u16,
@@ -643,13 +646,15 @@ pub const RELAY_ACTIVATE_BYTE: u8 = 0x01;
 /// registered (see [`REMOTE_PORTS`] for why the generation matters).
 type RegisteredPort = (tokio::io::DuplexStream, u64);
 
-/// Console-mode slave ports currently registered with this master, keyed
-/// by `(slave IP, port label)`.  Each value pairs the master's end of the
-/// idle SSH registration channel with a monotonic **generation** stamped
-/// at registration time.  The Serial Gateway picker lists the keys and
-/// `claim`s (removes) an entry to bridge a master user to the slave's
-/// console device.  Populated by `ssh.rs` `exec_request`
-/// (`serial-register`), drained by the picker or by channel teardown.
+/// Slave ports currently registered with this master, keyed by `(slave IP,
+/// port label)`.  Each value pairs the master's end of the idle SSH
+/// registration channel with a monotonic **generation** stamped at
+/// registration time.  Mode-agnostic: a **console** port (bridged on claim)
+/// and a **modem** port (the peer-dial announcer, which *rings* the slave's
+/// local port on claim) both register through the same `serial-register`
+/// path, so both appear here — and both are claimable by the Serial Gateway
+/// picker and by a peer-dial (`claim_remote_peer`).  Populated by `ssh.rs`
+/// `exec_request`, drained by a claim or by channel teardown.
 ///
 /// The generation disambiguates a re-registration race: if a slave whose
 /// link briefly dropped re-registers the same `(IP, label)` on a fresh

@@ -1240,7 +1240,7 @@ fn modem_slave_announce_tick(
             Ok(r) => r,
             Err(e) => {
                 let delay = relay_reconnect_delay(&e, &mut net_backoff);
-                let msg = format!("{:?}", e);
+                let msg = e.to_string();
                 if should_log_outage(&last_outage, &msg) {
                     glog!(
                         "Serial modem (Port {}): peer-dial announce to master {}:{} failed: {}",
@@ -1275,19 +1275,29 @@ fn modem_slave_announce_tick(
                 // Ring the LOCAL modem port (serviced by our serial_thread)
                 // and bridge the master channel to the answered duplex.
                 // Everything runs — and every russh object drops — inside the
-                // runtime.
+                // runtime.  The whole ring+bridge is raced against a
+                // shutdown/restart poll so a config restart can't leave the
+                // ring-wait (or the bridge) pinning the manager's `join`
+                // (`request_peer_call` isn't itself abort-aware).
+                let sd = shutdown.clone();
                 handle.block_on(async move {
-                    match request_peer_call(id, Duration::from_secs(30)).await {
-                        Ok(mut caller) => {
-                            let _ = tokio::io::copy_bidirectional(&mut stream, &mut caller).await;
-                        }
-                        Err(o) => {
-                            glog!(
-                                "Serial modem (Port {}): peer-dial ring not answered: {:?}",
-                                id.label(),
-                                o
-                            );
-                        }
+                    tokio::select! {
+                        biased;
+                        _ = wait_for_serial_abort(&sd, idx) => {}
+                        _ = async {
+                            match request_peer_call(id, crate::relay::RELAY_PEER_ANSWER_WAIT).await {
+                                Ok(mut caller) => {
+                                    let _ = tokio::io::copy_bidirectional(&mut stream, &mut caller).await;
+                                }
+                                Err(o) => {
+                                    glog!(
+                                        "Serial modem (Port {}): peer-dial ring not answered: {:?}",
+                                        id.label(),
+                                        o
+                                    );
+                                }
+                            }
+                        } => {}
                     }
                     drop(stream);
                     drop(_session);
@@ -1355,6 +1365,15 @@ where
 /// Wait `backoff` before the next slave reconnect attempt, staying
 /// responsive to shutdown/restart (polls in 100 ms steps and returns early
 /// when either flag is set, so a long auth backoff never delays shutdown).
+/// Async poll that resolves as soon as shutdown or this port's restart flag
+/// is set.  Used to race an in-flight peer-dial ring/bridge in the announcer
+/// so a config restart isn't blocked waiting out the answer timeout.
+async fn wait_for_serial_abort(shutdown: &Arc<AtomicBool>, idx: usize) {
+    while !shutdown.load(Ordering::SeqCst) && !SERIAL_RESTART[idx].load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 fn slave_backoff(idx: usize, shutdown: &Arc<AtomicBool>, backoff: Duration) {
     let mut waited = Duration::ZERO;
     let step = Duration::from_millis(100);
@@ -3016,8 +3035,8 @@ fn handle_dial(state: &mut ModemState, target: &str) {
         if cfg.gateway_role == "slave" {
             // Peer-dial on a slave: a LOCAL address (`<Port>@<this-slave-ip>`)
             // is handled locally like any standalone gateway; a REMOTE address
-            // is relayed to the master, which resolves it (Phase 2 — the
-            // master's own port today; the crossbar to another slave later).
+            // is relayed to the master, which resolves it to one of its own
+            // ports or, via the crossbar, to another slave's registered port.
             if let Some(addr) = parse_peer_address(target) {
                 if host_is_local(&addr.host, &local_host_ips()) {
                     handle_peer_dial(state, addr);
@@ -3235,13 +3254,14 @@ fn local_host_ips() -> Vec<String> {
     ips
 }
 
-/// Handle a peer-dial (`ATD <Port>@<host>`) on a standalone/master gateway:
-/// a *local* target (a port on this gateway) is bridged; a remote host has no
-/// master to relay through here, so it is `NO CARRIER`.  (A *slave* routes a
-/// remote peer address to its master in `handle_dial` instead — Phase 2a.)
-/// Gated by `allow_peer_dial`; a disabled feature or an unresolvable target
-/// looks like any other failed dial (no hint), matching the `allow_atdt_kermit`
-/// posture.
+/// Handle a peer-dial (`ATD <Port>@<host>`) on a standalone/master gateway.
+/// A *local* target (a port on this gateway) is rung/connected; a *remote* IP
+/// is treated as a port a slave registered with this master and bridged via
+/// the crossbar (`claim_remote_peer`) — `NO CARRIER` only when nothing matches
+/// (e.g. a standalone gateway with no registrations).  (A *slave* routes a
+/// remote peer address to its own master in `handle_dial` instead.)  Gated by
+/// `allow_peer_dial`; a disabled feature or an unresolvable target looks like
+/// any other failed dial (no hint), matching the `allow_atdt_kermit` posture.
 fn handle_peer_dial(state: &mut ModemState, addr: PeerAddress) {
     if !config::get_config().allow_peer_dial {
         send_result(state, "NO CARRIER");
