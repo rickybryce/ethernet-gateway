@@ -112,6 +112,52 @@ pub(crate) const TYPE_INIT: u8 = b'I';
 /// applied only when `kermit_wait_for_receiver` is on.
 const KERMIT_SERVER_POKE_WAIT_MS: u64 = 1500;
 
+/// The same bound for an *interactive* download, where the user has to go and
+/// start their Kermit client after picking the protocol, so a poke that is
+/// coming is human-scale rather than immediate.
+///
+/// **It must be bounded at all, and it was not.**  The interactive path passed
+/// the whole `kermit_negotiation_timeout` as its poke deadline, so a receiver
+/// that never pokes was never sent to: both ends waited, and whichever gave up
+/// first decided the outcome.  Measured against NovaTerm 9.6c, whose Kermit
+/// receiver waits silently for the Send-Init — which is what Frank da Cruz's
+/// receiver does; the initiating NAK is a *prompt*, not a precondition, and a
+/// sender that requires one cannot talk to a receiver that does not send one.
+/// NovaTerm sat for ~80 s, gave up, sent an Error packet and returned to
+/// terminal mode; our Send-Init then arrived at a command line and painted as
+/// garbage, which is the exact failure the wait exists to prevent.
+///
+/// After this wait the Send-Init is sent and then *retried* across the full
+/// negotiation window, so a user who starts their client late is still served
+/// — the only cost of falling through is that first S landing before the
+/// client is ready.  A poke arriving after we fall through crosses our S and
+/// the peer counts a retry or two, which is the behaviour that predates the
+/// wait; a deadlock is not.
+const KERMIT_INTERACTIVE_POKE_WAIT_MS: u64 = 10_000;
+
+/// How long one Send-Init attempt waits for its ACK before the packet is
+/// retransmitted.
+///
+/// **The Send-Init used to be sent exactly once.**  `send_and_await_ack` gave
+/// its read the *overall* negotiation deadline, so the first attempt consumed
+/// the entire `kermit_negotiation_timeout` window and `max_retries` could
+/// never come into play: whoever was not in receive mode at that one instant
+/// was never spoken to again.  The screen promises "Start transfer within N
+/// seconds" and the code honoured only the first moment of it.
+///
+/// That is why the initiating-NAK wait had become load-bearing rather than an
+/// optimisation -- it existed to aim the single shot.  A sender that
+/// retransmits does not need to aim: measured against NovaTerm 9.6c, which
+/// enters receive mode a second or two after the gateway is told to send, and
+/// which never pokes.
+///
+/// Deliberately short enough that `max_retries` attempts still leave room for
+/// the classic-capabilities fallback below (triggered by "too many timeouts")
+/// to have its own budget inside the same window -- extending the Send-Init
+/// budget to the whole window instead would starve that escalation, which is
+/// what serves genuinely old Kermits.
+const KERMIT_SEND_INIT_ATTEMPT_MS: u64 = 5_000;
+
 // CAPAS bit values in the first capability byte (applied to the unchar'd
 // byte; bit 0 / value 1 is the LSB "another CAPAS byte follows" flag).
 //
@@ -2331,11 +2377,17 @@ async fn kermit_send_impl(
     let max_retries = cfg.kermit_max_retries;
 
     // On an interactive download, hold the Send-Init until the receiver's
-    // initiating NAK arrives (or the negotiation window elapses).  Sending
-    // it the instant the protocol is picked paints the S packet as garbage
-    // on the user's terminal before their Kermit client is in receive mode.
+    // initiating NAK arrives.  Sending it the instant the protocol is picked
+    // paints the S packet as garbage on the user's terminal before their
+    // Kermit client is in receive mode.
+    //
+    // **Bounded, not open-ended.**  This used to wait out `neg_deadline`, the
+    // entire negotiation window, which strands every receiver that does not
+    // poke — see `KERMIT_INTERACTIVE_POKE_WAIT_MS`.
     if wait_for_receiver {
-        wait_for_initiating_nak(reader, is_tcp, is_petscii, verbose, &mut state, neg_deadline)
+        let poke_deadline = tokio::time::Instant::now()
+            + tokio::time::Duration::from_millis(KERMIT_INTERACTIVE_POKE_WAIT_MS);
+        wait_for_initiating_nak(reader, is_tcp, is_petscii, verbose, &mut state, poke_deadline)
             .await?;
         // Brief settle so the receiver is fully in receive mode before our
         // Send-Init lands, then give the exchange a fresh negotiation
@@ -2906,8 +2958,22 @@ async fn send_and_await_ack(
         // (NAK for our seq, or a read timeout); left false, a definitive
         // outcome has already returned from the function.
         let mut resend = false;
+        // A Send-Init gets a per-attempt deadline so it is actually
+        // retransmitted; every other packet keeps the caller's deadline
+        // exactly as before.  Capped by the overall deadline, so the
+        // negotiation window still bounds the whole exchange.
+        let read_deadline = if is_send_init {
+            let attempt_end = tokio::time::Instant::now()
+                + tokio::time::Duration::from_millis(KERMIT_SEND_INIT_ATTEMPT_MS);
+            Some(match deadline {
+                Some(d) => attempt_end.min(d),
+                None => attempt_end,
+            })
+        } else {
+            deadline
+        };
         while !resend {
-            match read_packet(reader, is_tcp, is_petscii, chkt, eol, verbose, state, deadline)
+            match read_packet(reader, is_tcp, is_petscii, chkt, eol, verbose, state, read_deadline)
                 .await
             {
                 Ok(resp) => {
