@@ -2446,6 +2446,164 @@ mod tests {
         assert_eq!(received, original, "receiver must recover correct data after NAK+retry");
     }
 
+    /// A receiver that repeats its start request on a timer can still have a
+    /// stale `C` in flight when the first data block goes out.  `C` is a
+    /// receiver *start request* and is never a valid response to a block --
+    /// ACK, NAK and CAN are -- so the sender absorbs it and goes on waiting
+    /// for the real response.
+    ///
+    /// Getting this wrong is not a lost byte, it is a dead transfer: the
+    /// sender reads the extra `C` as the block's response, calls it
+    /// unexpected, resends the block, and desynchronises into a NAK loop.
+    /// Measured against NovaTerm 9.6c, which sends `C` on a timer; lrzsz does
+    /// not, which is why every fixture and interop test passed regardless.
+    ///
+    /// The scripted receiver reads a fixed number of packets, so a resend
+    /// shows up as the wrong payload rather than as a hang.
+    #[tokio::test]
+    async fn test_sender_absorbs_a_stale_start_request_awaiting_a_block_response() {
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+
+        // 200 bytes = two 128-byte blocks, the second SUB-padded.  No byte of
+        // the tail is SUB itself, so stripping the padding is unambiguous.
+        let original: Vec<u8> = (0..200u32).map(|i| (i as u8) ^ 0x5A).collect();
+        let orig = original.clone();
+        let send_task = tokio::spawn(async move {
+            xmodem_send(
+                &mut send_read, &mut send_write, &orig,
+                false, false, false, false, None,
+            ).await
+        });
+
+        let recv_task = tokio::spawn(async move {
+            raw_write_byte(&mut recv_write, CRC_REQUEST, false).await.unwrap();
+            let mut blocks: Vec<u8> = Vec::new();
+            let mut nums: Vec<u8> = Vec::new();
+            for _ in 0..2 {
+                let mut pkt = vec![0u8; 3 + XMODEM_BLOCK_SIZE + 2];
+                recv_read.read_exact(&mut pkt).await.unwrap();
+                assert_eq!(pkt[0], SOH, "expected a 128-byte block");
+                nums.push(pkt[1]);
+                blocks.extend_from_slice(&pkt[3..3 + XMODEM_BLOCK_SIZE]);
+                // Two stale start requests ahead of the real ACK, so the test
+                // proves absorption is not a one-shot.
+                raw_write_byte(&mut recv_write, CRC_REQUEST, false).await.unwrap();
+                raw_write_byte(&mut recv_write, CRC_REQUEST, false).await.unwrap();
+                raw_write_byte(&mut recv_write, ACK, false).await.unwrap();
+            }
+            // Forsberg EOT verification: NAK the first, ACK the resend.
+            let mut b = [0u8; 1];
+            recv_read.read_exact(&mut b).await.unwrap();
+            assert_eq!(b[0], EOT);
+            raw_write_byte(&mut recv_write, NAK, false).await.unwrap();
+            recv_read.read_exact(&mut b).await.unwrap();
+            assert_eq!(b[0], EOT);
+            raw_write_byte(&mut recv_write, ACK, false).await.unwrap();
+            (blocks, nums)
+        });
+
+        let send_result = send_task.await.unwrap();
+        let (blocks, nums) = recv_task.await.unwrap();
+        send_result.expect("sender must complete despite the receiver's stale 'C'");
+
+        // Blocks 1 and 2, each sent exactly once: absorbing the stale `C`
+        // must not have caused a resend or renumbering.
+        assert_eq!(nums, vec![1, 2]);
+        let mut flat = blocks;
+        while flat.last() == Some(&SUB) {
+            flat.pop();
+        }
+        assert_eq!(flat, original, "payload must arrive intact and in order");
+    }
+
+    /// The absorption is bounded, and the bound is what stops a peer that
+    /// streams start requests from holding the response loop open for ever --
+    /// every absorbed byte restarts the read timeout, so without a count the
+    /// sender waits exactly as long as the peer keeps talking.
+    ///
+    /// The flood starts only once block 1 is on the wire: the post-negotiation
+    /// drain would otherwise swallow it, and this is the realistic shape
+    /// anyway -- a receiver whose start-request timer fires mid-transfer.
+    ///
+    /// This one is a stopwatch, deliberately.  The property is "the sender
+    /// gives up on its own budget rather than waiting out the peer", and the
+    /// margin is wide enough to say so without flaking: the bounded sender
+    /// fails in well under a second, the flood runs for ten.
+    #[tokio::test]
+    async fn test_sender_bounds_a_flood_of_start_requests() {
+        const FLOOD_SECS: u64 = 10;
+
+        // Deliberately NOT swapping the config to shorten the timeouts.
+        // `swap_config_for_test` holds a process-wide singleton and its lock
+        // only excludes tests that *also take the lock* -- the suite runs in
+        // parallel, so a shortened `xmodem_negotiation_timeout` was read by
+        // `test_transfer_timeout_is_reasonable` and failed it.  No swap is
+        // needed anyway: the block timeout governs a *silent* peer, and this
+        // peer is never silent, so the bounded sender burns its whole retry
+        // budget without waiting once.
+        let (sender_half, receiver_half) = tokio::io::duplex(1 << 20);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+
+        let original: Vec<u8> = vec![0x41; 64];
+        let send_task = tokio::spawn(async move {
+            xmodem_send(
+                &mut send_read, &mut send_write, &original,
+                false, false, false, false, None,
+            ).await
+        });
+
+        let flood = tokio::spawn(async move {
+            // Open in CRC mode, then wait for block 1 so the drain that
+            // follows negotiation is finished before the flood begins.
+            raw_write_byte(&mut recv_write, CRC_REQUEST, false).await.unwrap();
+            let mut pkt = vec![0u8; 3 + XMODEM_BLOCK_SIZE + 2];
+            if recv_read.read_exact(&mut pkt).await.is_err() {
+                return;
+            }
+            // Never ACK.  Answer with start requests, and stop at the
+            // deadline so an unbounded sender fails the test rather than
+            // hanging the suite.
+            let deadline = tokio::time::Instant::now()
+                + std::time::Duration::from_secs(FLOOD_SECS);
+            let mut sink = [0u8; 4096];
+            while tokio::time::Instant::now() < deadline {
+                if raw_write_byte(&mut recv_write, CRC_REQUEST, false).await.is_err() {
+                    break;
+                }
+                // Keep the sender's resends drained so it is never blocked on
+                // a full pipe -- that would be a different stall.
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_millis(1),
+                    recv_read.read(&mut sink),
+                ).await;
+            }
+        });
+
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(FLOOD_SECS + 20),
+            send_task,
+        )
+        .await
+        .expect("sender must not absorb start requests for ever")
+        .unwrap();
+        let elapsed = started.elapsed();
+        flood.abort();
+
+        assert!(
+            result.is_err(),
+            "a receiver that only sends 'C' must exhaust the retry budget"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(FLOOD_SECS / 2),
+            "the sender must give up on its own budget, not wait out the peer \
+             (took {elapsed:?}, peer flooded for {FLOOD_SECS}s)"
+        );
+    }
+
     /// Receiver must recover from a CRC-bad YMODEM block 0 by NAKing
     /// and successfully reading the sender's retransmit, rather than
     /// falling out of negotiation and NAK-looping the retransmit as a
