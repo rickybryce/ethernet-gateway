@@ -1177,10 +1177,17 @@ impl TelnetSession {
             self.send_line(&format!("  {} {}", self.dim("Peer:"), flavor))
                 .await?;
         }
+        // The receive side has the same exposure as the download path: a
+        // protocol's teardown keeps talking after its last data byte, and
+        // Punter's handshake codes are literal ASCII words whose letters are
+        // menu keys.  Settle before asking, and again after, so nothing the
+        // peer said is mistaken for something the operator pressed.
+        self.post_transfer_settle().await;
         self.send_line("").await?;
         self.send("  Press any key to continue.").await?;
         self.flush().await?;
         self.wait_for_key().await?;
+        self.drain_input_until_quiet(150, Some(1000)).await;
         Ok(())
     }
 
@@ -1678,6 +1685,12 @@ impl TelnetSession {
         self.send("  Press any key to continue.").await?;
         self.flush().await?;
         self.wait_for_key().await?;
+        // **And again after the keypress.**  If a late teardown byte is what
+        // dismissed the prompt, the rest of its burst is still queued and the
+        // next screen is a menu -- which is how `GOO` opened the Gateway
+        // Shell.  A real keystroke is followed by silence, so this returns at
+        // once for a human and swallows the remainder for a protocol.
+        self.drain_input_until_quiet(150, Some(1000)).await;
         Ok(())
     }
 

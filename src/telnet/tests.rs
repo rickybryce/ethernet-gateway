@@ -9749,3 +9749,38 @@ fn test_the_transfer_outcome_fits_a_40_column_screen() {
     // A short note is untouched -- the common case must not be elided.
     assert_eq!(truncate_to_width("Sent 1775 bytes in 17.8s", 34), "Sent 1775 bytes in 17.8s");
 }
+
+/// A protocol's teardown must never be read as the operator pressing a key.
+///
+/// Punter's C1 handshake codes are literal ASCII words -- `GOO`, `S/B`, `SYN`
+/// -- and they keep arriving after the last data byte.  Measured on the wire
+/// after a completed download: `G` is the File Transfer menu's Gateway Shell
+/// key, so the trailing `GOO` dismissed "Press any key to continue" and then
+/// opened a screen nobody asked for, with the rest of the burst walking
+/// through it.
+///
+/// The property is not "the bytes get drained eventually" -- it is that after
+/// settling, the prompt is STILL WAITING, because nothing the peer said counts
+/// as a keystroke.  Without the settle this fails immediately on the `G`.
+#[tokio::test]
+async fn test_a_protocol_teardown_is_not_a_keypress() {
+    let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
+    use tokio::io::AsyncWriteExt;
+
+    // Exactly what a C64 sends after Punter finishes.
+    peer.write_all(b"GOOS/BSYNS\r").await.unwrap();
+    peer.flush().await.unwrap();
+
+    session.post_transfer_settle().await;
+
+    let waited = tokio::time::timeout(
+        std::time::Duration::from_millis(400),
+        session.wait_for_key(),
+    )
+    .await;
+    assert!(
+        waited.is_err(),
+        "a protocol teardown burst must not satisfy the keypress prompt — \
+         that is how Punter's trailing GOO opened the Gateway Shell"
+    );
+}

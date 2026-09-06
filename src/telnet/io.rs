@@ -1242,9 +1242,18 @@ impl TelnetSession {
     /// `wait_for_key` actually waits for a human keypress instead of
     /// being satisfied by leftover noise.
     pub(in crate::telnet) async fn post_transfer_settle(&mut self) {
-        self.drain_input().await;
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        self.drain_input().await;
+        // **Wait for the line to go quiet; don't guess how long.**  A protocol
+        // keeps talking after its last data byte, and a fixed pause either
+        // wastes time or -- worse -- ends in the middle of the burst and lets
+        // the tail through.  Punter's C1 teardown is the case that showed it:
+        // its handshake codes are literal ASCII words, so a trailing `GOO`
+        // put a `G` on the File Transfer menu, which is the Gateway Shell key,
+        // and the run walked into a screen nobody asked for (measured).
+        //
+        // A quiet gap costs nothing when the line is already silent and
+        // absorbs the whole burst when it is not.  Capped so a peer that never
+        // stops cannot hold the session here.
+        self.drain_input_until_quiet(250, Some(3000)).await;
     }
 
     /// Show a multi-line informational message and wait for a keypress.
