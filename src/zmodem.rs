@@ -108,6 +108,68 @@ const ZCBIN: u8 = 0x01;         // binary transfer, no end-of-line conversion
 // Limits
 use crate::tnio::MAX_FILE_SIZE;
 const SUBPACKET_DATA_SIZE: usize = 1024;
+
+/// Smallest subpacket we will drop to, however little the receiver claims.
+/// A receiver advertising a pathologically small buffer would otherwise turn
+/// the transfer into one escape-pair at a time.
+const MIN_SUBPACKET_DATA_SIZE: usize = 64;
+
+/// How the receiver's ZRINIT says its data phase must be fed.
+///
+/// ZP0/ZP1 is the receiver's buffer length, and Forsberg §8.2 attaches a
+/// *behaviour* to a nonzero one, not only a size: "If the receiver cannot
+/// overlap serial and disk I/O, it uses the ZRINIT frame to specify a buffer
+/// length which the sender will not overflow.  The sending program sends a
+/// **ZCRCW** data subpacket and waits for a ZACK header before sending the
+/// next segment of the file."  So the field selects the frame-end marker as
+/// well as the chunk size, which is why one type carries both rather than a
+/// size travelling next to a bool.
+///
+/// **Read out of NovaTerm 9.6c's own source** (`v9.6/prot/zmodem.src`), which
+/// is the receiver this was built for:
+///
+/// * `bufsiz .word 1024` — advertised in `szrinit`, and `zrdata` refuses the
+///   1025th byte of a subpacket with `buffovr`.  The count it bounds is
+///   `numdata`, **decoded** bytes, so the cap is the advertised figure and not
+///   half of it: escaping does not consume the receiver's file buffer.
+/// * `rzprog42`, reached for ZCRCW, is `jsr writedsk` then `jsr szack` — the
+///   only non-final path that **writes the buffer to disk**.  ZCRCQ is
+///   handled (`rzprog44`) but in its default non-streaming configuration it
+///   ACKs *without* writing and re-enters `zrdata`, which zeroes `numdata`
+///   and resets the buffer pointer — so each ZCRCQ subpacket overwrites the
+///   one before it and only the last survives to `writedsk`.  A conforming
+///   1024-byte ZCRCQ stream would have produced a short, silently wrong file
+///   rather than an error.
+///
+/// Zero means "no limit stated", which is what lrzsz sends, so the common
+/// path keeps full-size ZCRCQ subpackets and is untouched.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RxWindow {
+    /// Data bytes per subpacket.
+    chunk: usize,
+    /// End every non-final subpacket with ZCRCW and open a fresh ZDATA for
+    /// the next segment, instead of streaming ZCRCQ inside one frame.
+    segmented: bool,
+}
+
+impl RxWindow {
+    /// Derive the window from a ZRINIT's ZP0/ZP1 buffer length.
+    fn from_zrinit(rx_bufsize: usize) -> Self {
+        if rx_bufsize == 0 {
+            return RxWindow { chunk: SUBPACKET_DATA_SIZE, segmented: false };
+        }
+        RxWindow {
+            chunk: rx_bufsize.clamp(MIN_SUBPACKET_DATA_SIZE, SUBPACKET_DATA_SIZE),
+            segmented: true,
+        }
+    }
+
+    /// The frame-end marker for a subpacket that is not the last of the file.
+    fn mid_file_marker(&self) -> u8 {
+        if self.segmented { ZCRCW } else { ZCRCQ }
+    }
+}
+
 const MAX_SUBPACKET_DATA: usize = 8192;
 
 /// Cap on consecutive zero-length data subpackets tolerated during the data
@@ -1775,6 +1837,11 @@ pub(crate) async fn zmodem_send(
     // through every binary header + data subpacket for the rest of the
     // batch.
     let esc: EscapeMode;
+    // How the receiver's advertised buffer (ZRINIT ZP0/ZP1) says its data
+    // phase must be fed.  Assigned once, in the same branch as `esc` and for
+    // the same reason: locking onto the ZRINIT is the only non-error exit
+    // from the negotiation loop, so an initialiser here would be dead.
+    let rx_window: RxWindow;
     send_zrqinit(writer, is_tcp, verbose).await?;
     loop {
         if tokio::time::Instant::now() >= deadline || attempts >= max_retries {
@@ -1791,6 +1858,19 @@ pub(crate) async fn zmodem_send(
                 // Honor any extra escaping the receiver requests in its
                 // ZRINIT ZF0 (ESCCTL/ESC8) for the rest of the session.
                 esc = EscapeMode::from_zrinit_zf0(h.zf0());
+                // ZP0/ZP1 (data[0..2], little endian) is the receiver's
+                // buffer length.  Nonzero means it cannot take more than that
+                // before a ZACK, and asks for ZCRCW segments rather than a
+                // ZCRCQ stream -- the field used to be ignored entirely, see
+                // `RxWindow`.
+                let rx_bufsize = h.data[0] as usize | ((h.data[1] as usize) << 8);
+                rx_window = RxWindow::from_zrinit(rx_bufsize);
+                if verbose && rx_window.segmented {
+                    glog!(
+                        "ZMODEM send: receiver advertised a {}-byte buffer, sending {}-byte ZCRCW segments",
+                        rx_bufsize, rx_window.chunk
+                    );
+                }
                 if verbose && (esc.escctl || esc.esc8) {
                     glog!(
                         "ZMODEM send: receiver requested escaping (escctl={} esc8={})",
@@ -2010,7 +2090,7 @@ pub(crate) async fn zmodem_send(
         // orphan ZDATA header with no subpacket desyncs the receiver.
         send_zdata_run(
             reader, writer, &mut state, data, start_pos, is_tcp, esc,
-            frame_timeout, max_retries, verbose,
+            rx_window, frame_timeout, max_retries, verbose,
         )
         .await?;
 
@@ -2051,7 +2131,7 @@ pub(crate) async fn zmodem_send(
                     let resume = (h.position() as usize).min(data.len());
                     send_zdata_run(
                         reader, writer, &mut state, data, resume, is_tcp, esc,
-                        frame_timeout, max_retries, verbose,
+                        rx_window, frame_timeout, max_retries, verbose,
                     )
                     .await?;
                     continue;
@@ -2192,6 +2272,10 @@ async fn send_zdata_run(
     start: usize,
     is_tcp: bool,
     esc: EscapeMode,
+    // Derived from the receiver's advertised ZRINIT buffer, so this travels
+    // beside `esc`: both are things the receiver asked for in the same header
+    // and both must hold for the whole batch.
+    rx_window: RxWindow,
     frame_timeout: u64,
     max_retries: u32,
     verbose: bool,
@@ -2217,10 +2301,10 @@ async fn send_zdata_run(
 
         while pos < data.len() {
             let remaining = data.len() - pos;
-            let chunk_len = remaining.min(SUBPACKET_DATA_SIZE);
+            let chunk_len = remaining.min(rx_window.chunk);
             let chunk = &data[pos..pos + chunk_len];
             let is_last = pos + chunk_len == data.len();
-            let end_marker = if is_last { ZCRCE } else { ZCRCQ };
+            let end_marker = if is_last { ZCRCE } else { rx_window.mid_file_marker() };
             let sub = build_subpacket_mode(chunk, end_marker, esc);
             raw_write_bytes(writer, &sub, is_tcp).await?;
             subpackets_sent += 1;
@@ -2251,6 +2335,17 @@ async fn send_zdata_run(
                         // (sz bounds consecutive errors, not cumulative).
                         zdata_attempts = 0;
                         pos += chunk_len;
+                        // ZCRCW *ends the frame*: the next segment is a new
+                        // ZDATA at the new position, not another subpacket
+                        // inside this one.  Sending one without the header
+                        // would leave the receiver waiting for a header it
+                        // was promised, which is the whole difference between
+                        // the two markers.  `zdata_attempts` was just zeroed,
+                        // so going round the outer loop spends no retry
+                        // budget on ordinary progress.
+                        if rx_window.segmented {
+                            continue 'send_loop;
+                        }
                         continue;
                     }
                     pos = ack_pos.min(data.len());
@@ -2580,6 +2675,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_hex_header_round_trip_zrinit() {
+        // `data[0]` here is arbitrary codec payload, NOT a flags field: this
+        // exercises the hex header round trip and never reaches the sender.
+        // On a real ZRINIT data[0..2] is ZP0/ZP1, the receiver's buffer
+        // length, and ZF0 is data[3] -- six mock receivers in this file had
+        // the flags at data[0] and only survived because nothing read it.
         let bytes = build_hex_header(ZRINIT, [CANFDX | CANOVIO | CANFC32, 0, 0, 0]);
         let (mut r, mut w) = tokio::io::duplex(1024);
         w.write_all(strip_hex_header_trailer(&bytes)).await.unwrap();
@@ -3234,7 +3334,7 @@ mod tests {
         let (mut s_read, mut s_write) = tokio::io::split(sender_half);
         let (mut m_read, mut m_write) = tokio::io::split(mock_half);
 
-        let zrinit = build_hex_header(ZRINIT, [CANFDX | CANOVIO | CANFC32, 0, 0, 0]);
+        let zrinit = build_hex_header(ZRINIT, [0, 0, 0, CANFDX | CANOVIO | CANFC32]);
         let zabort = build_hex_header(ZABORT, [0, 0, 0, 0]);
         m_write.write_all(&zrinit).await.unwrap();
         m_write.write_all(&zabort).await.unwrap();
@@ -3987,6 +4087,164 @@ mod tests {
         }
     }
 
+    // ─── Sender honors a receiver's advertised buffer ────────
+
+    #[test]
+    fn test_the_window_comes_from_the_advertised_buffer() {
+        // Zero means "no limit stated" -- what lrzsz and every reference peer
+        // here sends, so the common path must be untouched: full-size
+        // subpackets, streamed inside one ZDATA frame with ZCRCQ.
+        let unlimited = RxWindow::from_zrinit(0);
+        assert_eq!(unlimited.chunk, SUBPACKET_DATA_SIZE);
+        assert!(!unlimited.segmented);
+        assert_eq!(unlimited.mid_file_marker(), ZCRCQ);
+
+        // A stated buffer is taken at face value, NOT halved.  What it bounds
+        // is the receiver's decoded file buffer (`numdata` in NovaTerm's
+        // `zrdata`), and ZDLE escaping does not consume that -- the escapes
+        // are undone before a byte is counted.
+        let nova = RxWindow::from_zrinit(1024);
+        assert_eq!(nova.chunk, 1024);
+        // …and a stated buffer changes the marker, which is the half of §8.2
+        // that a size alone cannot express.
+        assert!(nova.segmented);
+        assert_eq!(nova.mid_file_marker(), ZCRCW);
+
+        assert_eq!(RxWindow::from_zrinit(256).chunk, 256);
+        // Never below the floor -- a tiny advertisement must not reduce the
+        // transfer to one escape-pair at a time.
+        assert_eq!(RxWindow::from_zrinit(8).chunk, MIN_SUBPACKET_DATA_SIZE);
+        assert_eq!(RxWindow::from_zrinit(1).chunk, MIN_SUBPACKET_DATA_SIZE);
+        // Never above our own size, however generous the receiver claims --
+        // but a generous claim is still a claim, so it stays segmented.
+        let huge = RxWindow::from_zrinit(1 << 20);
+        assert_eq!(huge.chunk, SUBPACKET_DATA_SIZE);
+        assert!(huge.segmented);
+    }
+
+    /// A receiver that states a buffer in ZRINIT ZP0/ZP1 must be fed the way
+    /// Forsberg §8.2 says: segments no larger than that buffer, each ended
+    /// with **ZCRCW** and followed by a fresh ZDATA header, never a ZCRCQ
+    /// stream inside one frame.
+    ///
+    /// Both halves are load-bearing against a real receiver.  NovaTerm 9.6c
+    /// advertises 1024 and, in its default non-streaming configuration,
+    /// commits a subpacket to disk only on the ZCRCW path (`rzprog42`); its
+    /// ZCRCQ path ACKs without writing and then zeroes its buffer count, so a
+    /// conforming ZCRCQ stream is accepted, acknowledged, and silently lost
+    /// bar the final subpacket.
+    #[tokio::test]
+    async fn test_sender_segments_for_a_receiver_that_states_a_buffer() {
+        const ADVERTISED: usize = 256;
+
+        let (sender_half, mock_half) = tokio::io::duplex(1 << 18);
+        let (s_read, s_write) = tokio::io::split(sender_half);
+        let (mut m_read, mut m_write) = tokio::io::split(mock_half);
+
+        // Every byte value repeated, so a good share of the payload escapes
+        // and the decoded length is nowhere near the wire length.
+        let payload: Vec<u8> = (0..4096u32).map(|i| (i & 0xFF) as u8).collect();
+        let sender = tokio::spawn(async move {
+            let (mut s_read, mut s_write) = (s_read, s_write);
+            let batch: [(&str, &[u8]); 1] = [("buf.bin", &payload)];
+            zmodem_send(&mut s_read, &mut s_write, &batch, false, false).await
+        });
+
+        let mut st = ReadState::default();
+        loop {
+            match read_header(&mut m_read, false, &mut st, false).await {
+                Ok(h) if h.frame == ZRQINIT => break,
+                Ok(_) => continue,
+                Err(e) => panic!("reading ZRQINIT: {}", e),
+            }
+        }
+        // ZP0/ZP1 little endian in data[0..2]; ZF0 stays at data[3].
+        let zp = (ADVERTISED as u16).to_le_bytes();
+        m_write
+            .write_all(&build_hex_header(ZRINIT, [zp[0], zp[1], 0, CANFDX]))
+            .await
+            .unwrap();
+        loop {
+            match read_header(&mut m_read, false, &mut st, false).await {
+                Ok(h) if h.frame == ZFILE => {
+                    let _ = read_subpacket(&mut m_read, false, &mut st, h.crc_kind,
+                                           MAX_SUBPACKET_DATA, 5).await;
+                    m_write.write_all(&build_hex_header(ZRPOS, [0, 0, 0, 0])).await.unwrap();
+                    break;
+                }
+                Ok(_) => continue,
+                Err(e) => panic!("reading ZFILE: {}", e),
+            }
+        }
+
+        // Read the data phase the way the receiver does -- header, subpacket,
+        // ZACK -- so the ZDATA-per-segment claim is tested by *requiring* a
+        // header between segments rather than by scanning for one.
+        let mut segments: Vec<(usize, u8)> = Vec::new();
+        let mut got = Vec::new();
+        for _ in 0..40 {
+            let h = match tokio::time::timeout(
+                tokio::time::Duration::from_secs(5),
+                read_header(&mut m_read, false, &mut st, false),
+            )
+            .await
+            {
+                Ok(Ok(h)) => h,
+                _ => break,
+            };
+            if h.frame == ZEOF {
+                break;
+            }
+            assert_eq!(
+                h.frame, ZDATA,
+                "expected a ZDATA header before each segment, got frame 0x{:02X}",
+                h.frame
+            );
+            assert_eq!(
+                h.position() as usize,
+                got.len(),
+                "ZDATA position must resume where the last segment ended"
+            );
+            let sub = match read_subpacket(&mut m_read, false, &mut st, h.crc_kind,
+                                           MAX_SUBPACKET_DATA, 5).await {
+                Ok(v) => v,
+                Err(e) => panic!("reading a data subpacket: {}", e),
+            };
+            let marker = sub.end_marker;
+            segments.push((sub.data.len(), marker));
+            got.extend_from_slice(&sub.data);
+            if marker == ZCRCE {
+                break;
+            }
+            let ack = (got.len() as u32).to_le_bytes();
+            m_write.write_all(&build_hex_header(ZACK, ack)).await.unwrap();
+        }
+        sender.abort();
+
+        assert!(segments.len() > 1, "expected several segments, got {:?}", segments);
+        for (n, (len, marker)) in segments.iter().enumerate() {
+            assert!(
+                *len <= ADVERTISED,
+                "segment #{} carried {} decoded bytes, over the receiver's \
+                 advertised {}-byte buffer",
+                n + 1, len, ADVERTISED
+            );
+            let last = n + 1 == segments.len();
+            let want = if last && *marker == ZCRCE { ZCRCE } else { ZCRCW };
+            assert_eq!(
+                *marker, want,
+                "segment #{} ended with 0x{:02X}; a stated buffer means ZCRCW \
+                 (0x{:02X}) on every segment but the file's last",
+                n + 1, marker, ZCRCW
+            );
+        }
+        // The bytes that did arrive are the file's, in order -- a segmenting
+        // bug that dropped or repeated a chunk would still satisfy the size
+        // and marker checks above.
+        let expect: Vec<u8> = (0..got.len() as u32).map(|i| (i & 0xFF) as u8).collect();
+        assert_eq!(got, expect, "segmented data did not reassemble in order");
+    }
+
     // ─── Sender honors a receiver's ESCCTL request ───────────
 
     #[tokio::test]
@@ -4208,11 +4466,11 @@ mod tests {
         let (mut s_read, mut s_write) = tokio::io::split(sender_half);
         let (mut m_read, mut m_write) = tokio::io::split(mock_half);
 
-        let zrinit = build_hex_header(ZRINIT, [CANFDX | CANOVIO | CANFC32, 0, 0, 0]);
+        let zrinit = build_hex_header(ZRINIT, [0, 0, 0, CANFDX | CANOVIO | CANFC32]);
         let zrpos_at = build_hex_header(ZRPOS, start_at.to_le_bytes());
         let zack_after_first_sub = build_hex_header(ZACK, 1536u32.to_le_bytes());
         let zrinit_after_eof =
-            build_hex_header(ZRINIT, [CANFDX | CANOVIO | CANFC32, 0, 0, 0]);
+            build_hex_header(ZRINIT, [0, 0, 0, CANFDX | CANOVIO | CANFC32]);
         let zfin = build_hex_header(ZFIN, [0, 0, 0, 0]);
         m_write.write_all(&zrinit).await.unwrap();
         m_write.write_all(&zrpos_at).await.unwrap();
@@ -4255,14 +4513,14 @@ mod tests {
         let (mut m_read, mut m_write) = tokio::io::split(mock_half);
 
         let ack_1024 = build_hex_header(ZACK, 1024u32.to_le_bytes());
-        m_write.write_all(&build_hex_header(ZRINIT, [CANFDX | CANOVIO | CANFC32, 0, 0, 0])).await.unwrap();
+        m_write.write_all(&build_hex_header(ZRINIT, [0, 0, 0, CANFDX | CANOVIO | CANFC32])).await.unwrap();
         m_write.write_all(&build_hex_header(ZRPOS, 0u32.to_le_bytes())).await.unwrap();
         m_write.write_all(&ack_1024).await.unwrap(); // gates initial subpacket #1
         // Post-ZEOF: ask the sender to resend from 0 once, ACK its resent
         // mid-frame subpacket, then accept.
         m_write.write_all(&build_hex_header(ZRPOS, 0u32.to_le_bytes())).await.unwrap();
         m_write.write_all(&ack_1024).await.unwrap(); // gates recovery subpacket #1
-        m_write.write_all(&build_hex_header(ZRINIT, [CANFDX | CANOVIO | CANFC32, 0, 0, 0])).await.unwrap();
+        m_write.write_all(&build_hex_header(ZRINIT, [0, 0, 0, CANFDX | CANOVIO | CANFC32])).await.unwrap();
         m_write.write_all(&build_hex_header(ZFIN, [0, 0, 0, 0])).await.unwrap();
 
         // Capture ALL sender output so we can prove the recovery actually
@@ -4316,7 +4574,7 @@ mod tests {
 
         // Negotiation ZRINIT; after inspecting the ZFILE we ZSKIP + ZFIN so
         // the sender winds down promptly.
-        m_write.write_all(&build_hex_header(ZRINIT, [CANFDX | CANOVIO | CANFC32, 0, 0, 0])).await.unwrap();
+        m_write.write_all(&build_hex_header(ZRINIT, [0, 0, 0, CANFDX | CANOVIO | CANFC32])).await.unwrap();
 
         let send = tokio::spawn(async move {
             let batch: [(&str, &[u8]); 1] = [("bin.dat", &data)];
