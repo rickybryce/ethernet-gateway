@@ -1322,7 +1322,13 @@ pub(crate) async fn xmodem_send(
             };
             match response {
                 Resp::Byte(ACK) => {
-                    if verbose && (block_idx < 3 || retries > 0) {
+                    // First three, any retry, and the LAST -- so the log has an
+                    // unambiguous end.  Logging only the opening blocks makes a
+                    // completed transfer and a stalled one look identical: this
+                    // trace ended at "block #3 ACK" on a transfer that was
+                    // byte-perfect, and was read as a stall at block 3 twice.
+                    let is_last = offset + block_size >= padded.len();
+                    if verbose && (block_idx < 3 || retries > 0 || is_last) {
                         glog!("XMODEM send: block #{} ACK (retries={}, size={})",
                             block_idx + 1, retries, block_size);
                     }
@@ -1390,6 +1396,9 @@ pub(crate) async fn xmodem_send(
         .await
         {
             Ok(Ok(ACK)) => {
+                if verbose { glog!(
+                    "XMODEM send: EOT ACKed — complete, {} block(s), {} bytes",
+                    block_idx, data.len()); }
                 // YMODEM end-of-batch: after EOT is ACKed, the receiver
                 // sends one more 'C' and expects an empty block 0
                 // (filename starts with NUL) meaning "no more files."
