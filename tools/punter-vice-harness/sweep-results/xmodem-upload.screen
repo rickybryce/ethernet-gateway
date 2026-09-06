@@ -1,19 +1,22 @@
   answering the upload dialogs:
   dialog: name prompt -> puntest
-    |            .modem-1k upload|
+    |           .modem-... upload|
     | .evice: 10,0          .ranslation: ...|
     | .ile:|
     |........................................|
-    |                ........................|
-    |.................|
+    |             ...........................|
+    |..............|
   -> done
-|            .modem-1k upload|
+|           .modem-... upload|
 | .evice: 10,0          .ranslation: ...|
 | .ile: puntest|
 | .ype: seq|
 | .ize: 7 blocks (1778 bytes)|
-| .ytes sent:           .etries:|
+| .ytes sent: 1775      .etries:|
 |........................................|
-|                ........................|
-|.................|
+|an..dkry '.5<.........bipw.%,3:.........|
+|.gnu.#*18?.........elsz!(/6=.... ....cjq|
+|x.&-4;.........ahov.$+29..........zzzzzz|
+|zzzzzzzzzzz.6...........................|
+|..............|
 |            .old .= to abort|

@@ -27,7 +27,7 @@ archive() { # proto dir
 }
 
 verify() { # proto dir
-    local proto="$1" dir="$2" got=""
+    local proto="$1" dir="$2"
     if [ "$dir" = download ]; then
         cp -f run/xfer.d64 "$OUT/$proto-$dir.d64" 2>/dev/null || return 1
         python3 d64read.py "$OUT/$proto-$dir.d64" > "$OUT/$proto-$dir.dir" 2>&1
@@ -39,17 +39,17 @@ verify() { # proto dir
         python3 verify-run.py payloads/PUNTEST.SEQ "$OUT/$proto-$dir.d64"
         return $?
     else
-        # The upload name is built by run-transfer.py as <first 6 of proto>up.seq
-        local f
-        f=$(ls -t run/ethernetgateway-data/transfer/ 2>/dev/null | grep -i 'up' | head -1)
-        [ -z "$f" ] && return 1
-        cp -f "run/ethernetgateway-data/transfer/$f" "$OUT/$proto-$dir.bin"
-        got="$OUT/$proto-$dir.bin"
+        # **Never select the uploaded file by name either.**  The gateway
+        # saves the first file of a batch under the SENDER's own name
+        # (`file_transfer_upload`, idx == 0), so a ZMODEM or YMODEM upload
+        # lands as whatever NovaTerm called it and not as the name typed at
+        # the Filename prompt -- a sweep matching that name reports a
+        # byte-perfect upload as a failure.  verify-upload.py identifies it by
+        # provenance and archives what it graded.
+        python3 verify-upload.py payloads/PUNTEST.SEQ \
+            run/ethernetgateway-data/transfer payloads "$OUT/$proto-$dir."
+        return $?
     fi
-    [ -s "$got" ] || return 1
-    if cmp -s "$got" payloads/PUNTEST.SEQ; then echo IDENTICAL; return 0; fi
-    echo "DIFFERS ($(stat -c%s "$got") bytes vs $(stat -c%s payloads/PUNTEST.SEQ))"
-    return 1
 }
 
 for spec in "$@"; do

@@ -24,7 +24,17 @@ sleep 3
 # that question is asked inside the gateway's 45-second window.
 c1541 -format "xfer,01" d64 run/xfer.d64 >/dev/null 2>&1
 c1541 -attach run/xfer.d64 -write payloads/PUNTEST.SEQ "puntest,s" >/dev/null 2>&1
-rm -f run/ethernetgateway-data/transfer/*up.seq run/ethernetgateway-data/transfer/*up*.usr
+# **Clear the slate; do not pattern-match it.**  This used to delete
+# `*up.seq` and `*up*.usr`, but the gateway saves an upload under the
+# SENDER's name when the protocol carries one, and validate_filename drops
+# the dot -- so a YMODEM upload landed as `ymodemupseq` and `puntest`, neither
+# of which matched, and both survived into the next run.  The sweep identifies
+# this run's output as "whatever is not seeded", so it then graded the
+# leftovers: an XMODEM run that saved nothing at all was reported as a PASS,
+# twice.  Everything removed here is either re-seeded just below or placed by
+# the gateway itself on first launch.
+find run/ethernetgateway-data/transfer -maxdepth 1 -type f \
+    ! -name 'EGT8080.COM' ! -name 'EGT80.COM' -delete
 # Refresh the payloads unconditionally.  start-gateway.sh seeds them only when
 # absent, which is right for a long-lived rig and wrong for a test: changing
 # payloads/PUNTEST.SEQ then had no effect, and an experiment that varied the

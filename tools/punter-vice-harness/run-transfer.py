@@ -36,6 +36,58 @@ def started(nt):
     return any('ytes recv' in l or 'ytes rec' in l for l in scr)
 
 
+def answer_upload_dialogs(nt, name):
+    """Answer whatever NovaTerm puts up on the way into an upload.
+
+    There are up to three dialogs and which of them appear depends on the
+    protocol, so this reads the screen and responds rather than replaying a
+    fixed key sequence.  A fixed sequence is exactly what failed: the batch
+    protocols open a *settings* dialog (Device / Translation / Pattern match)
+    BEFORE the file selector, so a blind 'puntest\n' was swallowed as the
+    RETURN that dismisses it, the selector came up behind, the rest of the
+    name went to the terminal, and nothing was ever selected.  The gateway sat
+    resending ZRINIT for the whole window and the run read as a ZMODEM
+    failure, with the transfer never started at all.
+
+    Each state is announced, because the screen is the only record of what was
+    asked and a run that answers the wrong dialog looks identical to one the
+    gateway failed.
+    """
+    typed_name = False
+    for _ in range(6):
+        scr = [l for l in nt.text() if l.strip()]
+        blob = ' '.join(scr)
+        if 'irectory' in blob and 'elected' in blob:
+            # The two-column file selector the batch protocols use: they carry
+            # the name in band, so NovaTerm picks the file rather than asking
+            # for one.  f3 adds the highlighted entry to "selected", f7 starts.
+            print('  dialog: file selector -> f3, f7', flush=True)
+            nt.press('F3', 1.5)
+            nt.press('F7', 3.0)
+            return 'selector'
+        if 'attern match' in blob:
+            print('  dialog: upload settings -> RETURN', flush=True)
+            nt.type('\n', 2.5)
+            continue
+        if 'prg' in blob:                        # "Type (prg,seq,usr):"
+            print('  dialog: file type -> s', flush=True)
+            nt.type('s\n', 1.5)
+            continue
+        if 'eplace' in blob:                     # "Replace?"
+            print('  dialog: replace -> y', flush=True)
+            nt.type('y', 1.5)
+            continue
+        if not typed_name:
+            print('  dialog: name prompt -> %s' % name, flush=True)
+            for l in scr[-6:]:
+                print('    |%s|' % l, flush=True)
+            nt.type(name + '\n', 2.5)
+            typed_name = True
+            continue
+        return 'done'
+    return 'gave up'
+
+
 def set_protocol(nt, index):
     nt.keys.focus(); nt.keys.combo('Tab', 'p'); time.sleep(8.0)
     here = 0                     # the list always opens on Zmodem
@@ -109,46 +161,33 @@ def main():
         time.sleep(1.0)
         nt.keys.focus(); nt.keys.combo('Tab', 'u')
         time.sleep(5.0)
-        # **Ask the dialog what it wants**, exactly as the download path does.
-        # Typing 'puntest' blindly is what made every non-Punter upload fail:
-        # the gateway sat resending ZRINIT while NovaTerm's dialog waited for
-        # something else, and the run read as a protocol failure when the
-        # transfer had never been started at all.  Dump the dialog either way
-        # -- the screen is the only record of what it asked.
-        dlg = [l for l in nt.text() if l.strip()]
-        print("  upload dialog:", flush=True)
-        for l in dlg[-8:]:
-            print('    |%s|' % l, flush=True)
-        selector = (any('irectory' in l for l in dlg)
-                    and any('elected' in l for l in dlg))
-        if selector:
-            # The batch protocols (ZMODEM, YMODEM) carry the name in band, so
-            # NovaTerm shows a two-column file SELECTOR instead of asking for
-            # one: f3 adds the highlighted entry to "selected", f7 starts.
-            # Typing a filename here goes to the terminal, the upload never
-            # begins, and the gateway reports a negotiation timeout -- which
-            # reads as a protocol defect rather than as a dialog we never
-            # answered.
-            nt.press('F3', 1.5)
-            nt.press('F7', 3.0)
-        else:
-            nt.type('puntest\n', 3.0)
-        # Follow-ups differ per protocol, and every pause here is spent
-        # against the gateway's negotiation window.
-        for _ in range(3):
-            scr = nt.text()
-            if any('prg' in l for l in scr):
-                nt.type('s\n', 1.2)
-            elif any('eplace' in l for l in scr):
-                nt.type('y', 1.2)
-            else:
-                break
+        print("  answering the upload dialogs:", flush=True)
+        print("  ->", answer_upload_dialogs(nt, 'puntest'), flush=True)
 
+    # **A standing instruction is not an outcome.**  This used to break on
+    # 'bort', which matches "hold C= to abort" -- the instruction NovaTerm
+    # prints across the whole transfer -- so the run returned about ten
+    # seconds in and the sweep graded the transfer directory while the
+    # transfer was still running.  An XMODEM upload that completed
+    # byte-perfectly was reported as "the upload never reached the gateway".
+    #
+    # So: a real outcome word, or a screen that has stopped changing.  The
+    # settled check is what covers the protocols whose screen says nothing at
+    # the end -- our XMODEM receiver waits out a 20-second silence before
+    # accepting an EOT NAK the sender never answers, and the C64 is quiet for
+    # all of it while the file has yet to be written.
+    last, still = None, 0
     for _ in range(18):
         time.sleep(10)
         s = nt.text()
-        if any('omplete' in l or 'rror' in l or 'bort' in l or 'ailed' in l for l in s):
+        if any('omplete' in l or 'rror' in l or 'ailed' in l for l in s):
             break
+        if s == last:
+            still += 1
+            if still >= 3:
+                break
+        else:
+            last, still = s, 0
     for l in nt.text():
         if l.strip():
             print('|%s|' % l)
