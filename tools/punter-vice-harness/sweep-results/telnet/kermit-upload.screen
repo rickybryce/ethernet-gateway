@@ -1,0 +1,21 @@
+  answering the upload dialogs:
+  dialog: upload settings -> RETURN
+  dialog: file selector -> f3, f7
+  -> selector
+| :.:.:.:.:.:.:  2400           00:01:30|
+|  .  ....../......  128/1., auto|
+|  .  ......         1., autostart|
+|  .  ......         any flavor, auto|
+|  .  ......         .1 ...../.ovaterm|
+|  .ick one, or <- to cancel: k|
+|  .eady to receive: kermitupseq|
+|  .ax file size: 8 ..|
+|  .tart ...... send from your terminal n|
+|ow.|
+|  .tart transfer within 300 seconds.|
+|  <- to cancel|
+|*.ovaterm: .iles sent: 1|
+|  .pload complete!|
+|  1775 bytes, 14 blocks, 51.1s|
+|  .eer: .nknown .ermit (unidentified)|
+|  .ress any key to continue.|
