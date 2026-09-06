@@ -8,18 +8,31 @@ protocol menu, and the key the gateway's transfer menu wants.  Keeping the two
 in one table is the point -- running a Punter test against a Zmodem receiver
 looks exactly like a protocol defect, and NovaTerm resets to Zmodem on load.
 """
-import sys, time, novaterm
+import re, sys, time, novaterm
 
-# name -> (index in NovaTerm's Select-protocol list, gateway menu key)
+# NovaTerm's status line carries a running session clock, hh:mm:ss.
+CLOCK = re.compile(r'\d\d:\d\d:\d\d')
+
+# name -> (index in NovaTerm's Select-protocol list, download key, upload key)
 # NovaTerm's list, in order: Zmodem, Ymodem batch, Ymodem-g, Xmodem-CRC,
 # Xmodem-1k, Xmodem-1k-g, Punter, Multi-Punter, Kermit, WXmodem recv, Quit.
+#
+# **The gateway's two menus do not offer the same keys, so a protocol needs a
+# key per direction.**  Download is the gateway choosing how to send and
+# offers `X 1 Y Z K P`; upload is the gateway receiving, where 1K is the
+# *sender's* choice detected per block from STX, so it offers only
+# `X Y Z K P`.  XMODEM-1K is the one asymmetry, and a single-key table sent
+# `1` at the upload prompt, which is not a choice there: the gateway stayed at
+# its prompt, never armed a receiver, and NovaTerm sat on its transfer screen
+# with nothing listening.  Nothing in the run said so -- the log had no
+# `Upload:` line at all, and the failure read as XMODEM-1K being broken.
 PROTOCOLS = {
-    'zmodem':    (0, 'z'),
-    'ymodem':    (1, 'y'),
-    'xmodem':    (3, 'x'),
-    'xmodem1k':  (4, '1'),
-    'punter':    (6, 'p'),
-    'kermit':    (8, 'k'),
+    'zmodem':    (0, 'z', 'z'),
+    'ymodem':    (1, 'y', 'y'),
+    'xmodem':    (3, 'x', 'x'),
+    'xmodem1k':  (4, '1', 'x'),
+    'punter':    (6, 'p', 'p'),
+    'kermit':    (8, 'k', 'k'),
 }
 
 def started(nt):
@@ -102,7 +115,8 @@ def main():
         return 2
     name, direction = sys.argv[1], sys.argv[2]
     dial = sys.argv[3] if len(sys.argv) > 3 else '1'
-    index, key = PROTOCOLS[name]
+    index, dl_key, ul_key = PROTOCOLS[name]
+    key = dl_key if direction == 'download' else ul_key
 
     nt = novaterm.NovaTerm()
     nt.ensure_terminal_mode()
@@ -176,18 +190,28 @@ def main():
     # the end -- our XMODEM receiver waits out a 20-second silence before
     # accepting an EOT NAK the sender never answers, and the C64 is quiet for
     # all of it while the file has yet to be written.
+    # The settled check must ignore NovaTerm's session clock, which ticks
+    # once a second: comparing the whole screen, it never compares equal and
+    # the branch is dead -- every run without an outcome word burned the full
+    # 180 s instead of ~30.  Drop the line the clock is ON, found by matching
+    # the clock rather than by its position, since the only evidence for the
+    # position is dumps that print non-blank lines and so cannot say what
+    # index anything really has.  Normalising more widely (stripping digits,
+    # say) would blind this to the byte counter, which is the one number whose
+    # movement means the transfer is still running.
     last, still = None, 0
     for _ in range(18):
         time.sleep(10)
         s = nt.text()
         if any('omplete' in l or 'rror' in l or 'ailed' in l for l in s):
             break
-        if s == last:
+        body = [l for l in s if not CLOCK.search(l)]
+        if body == last:
             still += 1
             if still >= 3:
                 break
         else:
-            last, still = s, 0
+            last, still = body, 0
     for l in nt.text():
         if l.strip():
             print('|%s|' % l)

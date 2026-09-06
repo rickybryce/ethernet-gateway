@@ -1,0 +1,88 @@
+=============== xmodem1k upload over telnet
+  answering the upload dialogs:
+  dialog: name prompt -> puntest
+    |            .modem-1k upload|
+    | .evice: 10,0          .ranslation: ...|
+    | .ile:|
+    |........................................|
+    |                ........................|
+    |.................|
+  -> done
+|            .modem-1k upload|
+| .evice: 10,0          .ranslation: ...|
+| .ile: puntest|
+| .ype: seq|
+| .ize: 7 blocks (1778 bytes)|
+| .ytes sent:           .etries:|
+|........................................|
+|                ........................|
+|.................|
+|            .old .= to abort|
+--- bytes:
+FAIL  nothing new in run/ethernetgateway-data/transfer — the upload never reached the gateway (seeded: ['EGT80.COM', 'EGT8080.COM', 'HELLO.PRG', 'PUNTEST.SEQ', 'TESTDATA.SEQ'])
+    FAIL
+=============== ymodem upload over telnet
+  dialog: file selector -> f3, f7
+  -> selector
+| :.:.:.:.:.:.:  2400           00:01:30|
+|=======================================|
+|  .  ....../......  128/1., auto|
+|  .  ......         1., autostart|
+|  .  ......         any flavor, auto|
+|  .  ......         .1 ...../.ovaterm|
+|  .ick one, or <- to cancel: y|
+|  .eady to receive: ymodemupseq|
+|  .ax file size: 8 ..|
+|  .tart ....../...... send from your ter|
+|minal now.|
+|  .tart transfer within 45 seconds.|
+|  <- to cancel|
+|c|
+|*.ovaterm: .iles sent: 1|
+|  .pload complete!|
+|  1778 bytes, 14 blocks, 53.9s|
+|  .ress any key to continue.|
+--- bytes:
+PASS  ymodemupseq: 1775 bytes identical + 3 bytes of SUB padding (XMODEM has no length field)
+=============== punter upload over telnet
+    |........................................|
+    |               .........................|
+    |................|
+  -> done
+| :.:.:.:.:.:.:  2400           00:05:19|
+|=======================================|
+|  ...... ...... ........|
+|=======================================|
+|  .  ....../......  128/1., auto|
+|  .  ......         1., autostart|
+|  .  ......         any flavor, auto|
+|  .  ......         .1 ...../.ovaterm|
+|  .ick one, or <- to cancel: p|
+|  .eady to receive: punterupseq|
+|  .ax file size: 8 ..|
+|  .tart ...... send from your terminal n|
+|ow.|
+|  .tart transfer within 45 seconds.|
+|  <- to cancel|
+|googoo|
+--- bytes:
+PASS  punterupseq.usr: 1775 bytes identical
+=============== xmodem download over telnet
+| :.:.:.:.:.:.:  2400           00:05:29|
+|=======================================|
+|  ...... ........|
+|=======================================|
+|  .ile: ...........|
+|  .ize: 1775 bytes|
+|  .  ......     128-byte blocks|
+|  1  ......-1.  1024-byte blocks|
+|  .  ......     name+size hdr, 1.|
+|  .  ......     autostart, 1.|
+|  .  ......     any flavor, auto|
+|  .  ......     .1 ...../.ovaterm|
+|  .ick one, or <- to cancel: x|
+|  .tart ...... receive now.|
+|  .tart transfer within 45 seconds.|
+|  <- to cancel|
+--- bytes:
+PASS  xmodem-download.d64: 1775 bytes identical (entry 'XMODEM', type 01)
