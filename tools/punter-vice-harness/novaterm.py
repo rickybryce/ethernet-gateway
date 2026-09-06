@@ -78,6 +78,70 @@ class NovaTerm:
     def type(self, s, settle=0.8):
         self.keys.focus(); self.keys.type(s); time.sleep(settle)
 
+    def inst_del(self, settle=3.0):
+        """Press the C64's INST/DEL key, which sends PETSCII 0x14.
+
+        **Not `type(chr(0x14))`.**  That looks like it sends the byte and does
+        nothing at all: `XK.string_to_keysym` has no symbol for a raw control
+        character, so the lookup yields keycode 0 and no key is pressed.  The
+        gateway then detects the terminal from whatever byte arrives next and
+        calls it ASCII -- which is a wrong answer that looks like a wrong
+        setting.  X has a name for this key; use it.
+        """
+        self.press('BackSpace', settle)
+
+    def hangup(self, tries=3):
+        """Drop the call and **confirm** it dropped.
+
+        Every run that skipped this typed its dial string into whatever menu
+        the previous session had left on screen -- `atdt ethernetgateway`
+        became a `t` selecting Telnet Gateway and the rest going into its Host
+        field.  A dial is only safe from a known state, and the only evidence
+        of that state is NovaTerm saying so.
+        """
+        def on_hook():
+            lines = [l.strip() for l in self.text() if l.strip()]
+            if any("no carrier" in l for l in lines):
+                return True
+            # `ATH` answered with `OK` and nothing after it: the modem is in
+            # command mode and on-hook.  Requiring "no carrier" was wrong --
+            # that only appears when there was a call to drop, so a already-
+            # idle modem could never satisfy it.
+            return bool(lines) and lines[-1] == "ok"
+
+        for attempt in range(tries):
+            if on_hook():
+                return True
+            if attempt == 0:
+                # NovaTerm's own hangup drops DTR, and **a socat PTY carries no
+                # modem control lines at all**, so on this rig it says "Hanging
+                # up..." and nothing happens.  The Hayes in-band escape does
+                # not need DTR: `+++`, a guard time, then `ATH`.
+                self.keys.focus()
+                self.keys.combo("Tab", "h")
+                time.sleep(3.0)
+            else:
+                self.type("+++", 2.5)      # guard time either side, no CR
+                self.type("ath\n", 3.0)
+        return on_hook()
+
+    def dial(self, number="ethernetgateway", settle=9.0):
+        """Hang up, then dial, from a state we have checked rather than assumed."""
+        if not self.hangup():
+            raise RuntimeError("could not get to 'no carrier'; screen: %r"
+                               % [l for l in self.text() if l.strip()][-4:])
+        self.type("atdt %s\n" % number, settle)
+
+    def at_menu(self):
+        """Whether NovaTerm is showing its main menu (rather than terminal mode)."""
+        return self.selected() is not None
+
+    def ensure_terminal_mode(self):
+        """Get to terminal mode from wherever we are, without assuming."""
+        if self.at_menu():
+            self.choose("terminal mode")
+            time.sleep(2.0)
+
     def choose(self, name, rows=MAIN_ROWS, items=MAIN_ITEMS):
         """Move the highlight onto `name` and press RETURN."""
         want = items.index(name)
