@@ -12,12 +12,23 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROTO="${1:?protocol}"; DIR="${2:?download|upload}"; LINK="${3:-telnet}"
 cd "$HERE"
 
-for p in $(pgrep -x x64sc); do kill "$p" 2>/dev/null; done
+# **Scope the kill to this harness's own emulator.**  A bare `pgrep -x x64sc`
+# kills every VICE on the machine, including one a developer has open for
+# something else -- the gateway two lines down is already identified by its
+# working directory, which is this project's documented rule, and the same
+# rule applies here.  VICE is started from this directory, so its cwd names it.
+for p in $(pgrep -x x64sc); do
+    d=$(readlink /proc/$p/cwd 2>/dev/null)
+    case "$d" in *punter-vice-harness*) kill "$p" 2>/dev/null;; esac
+done
 for p in $(pgrep -x ethernetgateway); do
     d=$(readlink /proc/$p/cwd 2>/dev/null)
     case "$d" in *punter-vice-harness*) kill "$p" 2>/dev/null;; esac
 done
-pkill -x tcpser 2>/dev/null
+for p in $(pgrep -x tcpser); do
+    d=$(readlink /proc/$p/cwd 2>/dev/null)
+    case "$d" in *punter-vice-harness*) kill "$p" 2>/dev/null;; esac
+done
 sleep 3
 
 # A fresh transfer disk every time: NovaTerm asks "Replace?" otherwise, and

@@ -58,11 +58,23 @@ verify() { # proto dir
     fi
 }
 
+# **The exit status has to mean something.**  This loop used to end each run
+# with `verify ... || echo FAIL`, which succeeds, and nothing accumulated a
+# status -- so the script exited 0 however many runs had failed, and any CI
+# wrapper checking `$?` would have read a clean pass off a sweep where every
+# byte comparison failed.  That is the same "a gate that passes without
+# running" class these harness comments were written to prevent.
+rc=0
 for spec in "$@"; do
     proto="${spec%%:*}"; dir="${spec##*:}"
     echo "=============== $proto $dir over $LINK"
     ./one-run.sh "$proto" "$dir" "$LINK" > "$OUT/$proto-$dir.screen" 2>&1
     tail -20 "$OUT/$proto-$dir.screen"
     archive "$proto" "$dir"
-    echo "--- bytes:"; verify "$proto" "$dir" || echo "    FAIL"
+    echo "--- bytes:"
+    if ! verify "$proto" "$dir"; then
+        echo "    FAIL"
+        rc=1
+    fi
 done
+exit "$rc"

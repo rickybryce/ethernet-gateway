@@ -727,6 +727,20 @@
                     four times over, long runs of CAN, XON, XOFF, SUB, CR, LF, FF, DEL and
                     BS, and a tail spanning a 255-byte block boundary.
                 </p>
+                <p>
+                    All twenty-four paths &mdash; six protocols, both directions, both
+                    links &mdash; compared byte for byte against that payload. A download
+                    is read back out of the C64's own disk image and is identified by the
+                    <strong>unclosed</strong> directory entry rather than by name, because
+                    the transfer disk is seeded with a file of the same name before every
+                    run and a name match grades the seed. YMODEM's upload arrives with
+                    three bytes of trailing <code>SUB</code>, and the XMODEM family's with
+                    padding to the next 128-byte boundary: neither protocol carries an
+                    exact length from this sender &mdash; NovaTerm's YMODEM block 0 states
+                    a <em>block-count estimate</em> (7 &times; 254 = 1778) rather than the
+                    true 1775 &mdash; so the padding is correct behaviour and is reported
+                    with its byte count rather than trimmed away.
+                </p>
                 <table class="ref-table">
                     <thead><tr><th>Protocol</th><th>Link</th><th>Direction</th><th>Result</th></tr></thead>
                     <tbody>
@@ -734,6 +748,26 @@
                         <tr><td>Punter C1</td><td>Serial (PTY, 2400)</td><td>Upload &mdash; C64 &rarr; gateway</td><td class="ok">identical, 0 bad blocks</td></tr>
                         <tr><td>Punter C1</td><td>Telnet (tcpser ip232)</td><td>Download &mdash; gateway &rarr; C64</td><td class="ok">identical, 0 bad blocks</td></tr>
                         <tr><td>Punter C1</td><td>Telnet (tcpser ip232)</td><td>Upload &mdash; C64 &rarr; gateway</td><td class="ok">identical, 0 bad blocks</td></tr>
+                        <tr><td>XMODEM</td><td>Serial (PTY, 2400)</td><td>Download &mdash; gateway &rarr; C64</td><td class="ok">identical</td></tr>
+                        <tr><td>XMODEM</td><td>Serial (PTY, 2400)</td><td>Upload &mdash; C64 &rarr; gateway</td><td class="ok">identical</td></tr>
+                        <tr><td>XMODEM</td><td>Telnet (tcpser ip232)</td><td>Download &mdash; gateway &rarr; C64</td><td class="ok">identical</td></tr>
+                        <tr><td>XMODEM</td><td>Telnet (tcpser ip232)</td><td>Upload &mdash; C64 &rarr; gateway</td><td class="ok">identical</td></tr>
+                        <tr><td>XMODEM-1K</td><td>Serial (PTY, 2400)</td><td>Download &mdash; gateway &rarr; C64</td><td class="ok">identical</td></tr>
+                        <tr><td>XMODEM-1K</td><td>Serial (PTY, 2400)</td><td>Upload &mdash; C64 &rarr; gateway</td><td class="ok">identical</td></tr>
+                        <tr><td>XMODEM-1K</td><td>Telnet (tcpser ip232)</td><td>Download &mdash; gateway &rarr; C64</td><td class="ok">identical</td></tr>
+                        <tr><td>XMODEM-1K</td><td>Telnet (tcpser ip232)</td><td>Upload &mdash; C64 &rarr; gateway</td><td class="ok">identical</td></tr>
+                        <tr><td>YMODEM</td><td>Serial (PTY, 2400)</td><td>Download &mdash; gateway &rarr; C64</td><td class="ok">identical</td></tr>
+                        <tr><td>YMODEM</td><td>Serial (PTY, 2400)</td><td>Upload &mdash; C64 &rarr; gateway</td><td class="ok">identical</td></tr>
+                        <tr><td>YMODEM</td><td>Telnet (tcpser ip232)</td><td>Download &mdash; gateway &rarr; C64</td><td class="ok">identical</td></tr>
+                        <tr><td>YMODEM</td><td>Telnet (tcpser ip232)</td><td>Upload &mdash; C64 &rarr; gateway</td><td class="ok">identical</td></tr>
+                        <tr><td>ZMODEM</td><td>Serial (PTY, 2400)</td><td>Download &mdash; gateway &rarr; C64</td><td class="ok">identical</td></tr>
+                        <tr><td>ZMODEM</td><td>Serial (PTY, 2400)</td><td>Upload &mdash; C64 &rarr; gateway</td><td class="ok">identical</td></tr>
+                        <tr><td>ZMODEM</td><td>Telnet (tcpser ip232)</td><td>Download &mdash; gateway &rarr; C64</td><td class="ok">identical</td></tr>
+                        <tr><td>ZMODEM</td><td>Telnet (tcpser ip232)</td><td>Upload &mdash; C64 &rarr; gateway</td><td class="ok">identical</td></tr>
+                        <tr><td>Kermit</td><td>Serial (PTY, 2400)</td><td>Download &mdash; gateway &rarr; C64</td><td class="ok">identical</td></tr>
+                        <tr><td>Kermit</td><td>Serial (PTY, 2400)</td><td>Upload &mdash; C64 &rarr; gateway</td><td class="ok">identical</td></tr>
+                        <tr><td>Kermit</td><td>Telnet (tcpser ip232)</td><td>Download &mdash; gateway &rarr; C64</td><td class="ok">identical</td></tr>
+                        <tr><td>Kermit</td><td>Telnet (tcpser ip232)</td><td>Upload &mdash; C64 &rarr; gateway</td><td class="ok">identical</td></tr>
                     </tbody>
                 </table>
                 <div class="callout callout-warn">

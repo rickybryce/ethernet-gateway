@@ -708,8 +708,8 @@
                     <tr><th>Terminator</th><th>Byte</th><th>Meaning</th></tr>
                     <tr><td><code>ZCRCE</code></td><td><code>h</code></td><td>End of frame, no more data this frame, no ACK. <em>(The gateway's final data subpacket.)</em></td></tr>
                     <tr><td><code>ZCRCG</code></td><td><code>i</code></td><td>More data follows, streaming &mdash; no ACK.</td></tr>
-                    <tr><td><code>ZCRCQ</code></td><td><code>j</code></td><td>More data follows, ACK required (mid-frame flow control). <em>(Each non-final data subpacket the gateway sends.)</em></td></tr>
-                    <tr><td><code>ZCRCW</code></td><td><code>k</code></td><td>End of frame, more data next frame, ACK required. <em>(The gateway's ZFILE name/size subpacket.)</em></td></tr>
+                    <tr><td><code>ZCRCQ</code></td><td><code>j</code></td><td>More data follows, ACK required (mid-frame flow control). <em>(Each non-final data subpacket the gateway sends &mdash; when the receiver stated no buffer limit.)</em></td></tr>
+                    <tr><td><code>ZCRCW</code></td><td><code>k</code></td><td>End of frame, more data next frame, ACK required. <em>(The gateway's ZFILE name/size subpacket &mdash; and every non-final data subpacket when the receiver <strong>did</strong> state a buffer limit.)</em></td></tr>
                 </table>
             </div>
 
@@ -782,6 +782,7 @@
                         <li>The gateway sends a <code>ZFILE</code> header followed by a subpacket carrying the <strong>filename and exact size</strong> (and mtime / mode when known), terminated with <code>ZCRCW</code>.</li>
                         <li>The receiver replies <code>ZRPOS(0)</code> to accept and start at byte 0 &mdash; or <code>ZSKIP</code> to decline this file, or a non-zero <code>ZRPOS</code> to <strong>resume</strong> a partial file.</li>
                         <li>The gateway sends a <code>ZDATA</code> header at that offset, then streams 1024-byte data subpackets, each non-final one <code>ZCRCQ</code>-terminated and waiting for the receiver's <code>ZACK</code> before the next (the last closes the frame with <code>ZCRCE</code>) &mdash; the stop-and-wait cadence.</li>
+                        <li><strong>Unless the receiver stated a buffer length</strong> in its <code>ZRINIT</code> (the <code>ZP0</code>/<code>ZP1</code> field). A non-zero value means the receiver cannot overlap serial and disk I/O, and Forsberg &sect;8.2 attaches a behaviour to it as well as a size: the sender sends segments no larger than that buffer, ends each with <code>ZCRCW</code> rather than <code>ZCRCQ</code>, and opens a fresh <code>ZDATA</code> frame for the next one. The figure is taken at face value &mdash; it bounds <em>decoded</em> bytes, and ZDLE escaping is undone before a byte is counted. Zero means &ldquo;no limit stated&rdquo;, which is what most modern peers send, so the streaming form above is the common case.</li>
                         <li>If the receiver detects an error it sends <code>ZRPOS(offset)</code>; the gateway seeks back to that byte offset and resumes from there.</li>
                         <li>At end of file the gateway sends <code>ZEOF(length)</code>. The receiver answers <code>ZRINIT</code> (ready for the next file).</li>
                         <li>With no more files the gateway sends <code>ZFIN</code>; the receiver returns <code>ZFIN</code>; the gateway sends the <code>"OO"</code> over-and-out trailer and the session ends.</li>

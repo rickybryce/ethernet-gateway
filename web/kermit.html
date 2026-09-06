@@ -650,8 +650,9 @@
                     single <code>NAK</code> to solicit the server's Send-Init
                     (<code>S</code>). The gateway <em>waits</em> for that poke and
                     answers it with exactly one <code>S</code> — nothing is
-                    retransmitted — but the client still tallies the <code>NAK</code>
-                    it sent to get things moving. The poke fires the instant the
+                    retransmitted while the client answers promptly, as a
+                    receiver-driven client does — but the client still tallies
+                    the <code>NAK</code> it sent to get things moving. The poke fires the instant the
                     client becomes a receiver, before our <code>S</code> could reach
                     it, so there is no spec-compliant way for the server to suppress
                     it. <strong>Uploads read <em>0 retries</em></strong> because

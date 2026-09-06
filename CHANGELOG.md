@@ -11,6 +11,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **ZMODEM ignored the buffer length a receiver advertises, and could lose
+  almost the whole file to a receiver that states one.**  `ZRINIT`'s
+  `ZP0`/`ZP1` field was read as nothing at all: the sender always streamed
+  full 1024-byte `ZCRCQ` subpackets inside one `ZDATA` frame.  Forsberg
+  &sect;8.2 attaches a *behaviour* to a non-zero buffer length and not only a
+  size -- a receiver that cannot overlap serial and disk I/O states its
+  buffer, and the sender must send `ZCRCW` segments and wait for a `ZACK`
+  between them.
+
+  Measured against NovaTerm 9.6c, which states 1024 and, in its default
+  configuration, commits a subpacket to disk only on the `ZCRCW` path.  Its
+  `ZCRCQ` path acknowledges *without* writing and then resets its buffer, so
+  each subpacket overwrote the one before it: a conforming stream was
+  accepted, acknowledged and silently lost bar the final subpacket -- a short,
+  wrong file rather than an error at either end.  A receiver that states no
+  limit (zero, which is what most modern peers send) is unaffected.
+
+- **XMODEM discarded a completely received file when the receiver's EOT
+  verification went unanswered.**  The receiver NAKs the first `EOT` and
+  accepts end-of-file only on a resent one, which guards against a stray
+  `0x04` from line noise truncating a file.  A sender that never resends the
+  `EOT` was therefore stranded: this end NAKed to `xmodem_max_retries`, sent
+  `CAN CAN CAN` and threw away a file whose every block had arrived with a
+  good CRC.  Measured against NovaTerm 9.6c, which does not resend it -- a
+  1775-byte upload was lost in full while the C64 reported "bytes sent: 1775"
+  and no error.
+
+  The guard is intact, because the two cases are distinguishable: a *noise*
+  `EOT` leaves the sender waiting for an `ACK` it has not had, so the NAK
+  draws a retransmitted block, and silence is not one of its possible
+  answers.  Only a sender with nothing left to send says nothing.
+
+- **YMODEM began the data phase a step ahead of the receiver.**  The sender
+  took a duplicate `ACK` of block 0 for the receiver's data-phase `C` and
+  started sending; the real `C` then landed inside the next block's response
+  window, and the transfer failed after repeated NAKs.  Measured against
+  NovaTerm 9.6c, which answers block 0 with `ACK ACK` and sends its `C` about
+  three seconds later.
+
+- **Kermit could only reach a receiver that was ready at one particular
+  instant, and only one that pokes.**  Two faults, the first hiding the
+  second.  The Send-Init was sent *once*: the wait for its acknowledgement was
+  given the whole `kermit_negotiation_timeout` window, so it was never
+  retransmitted and the retry limit could not come into play -- the download
+  screen promises "Start transfer within N seconds" and only the first moment
+  of it was honoured.  And the wait for the receiver's initiating NAK was
+  itself unbounded, so a receiver that never pokes was never sent to at all.
+
+  Kermit's initiating NAK is a *prompt*, not a precondition; a receiver that
+  waits silently for the Send-Init is behaving correctly, and NovaTerm 9.6c
+  does exactly that.  The two ends deadlocked until it gave up, sent an Error
+  packet and returned to terminal mode, at which point our Send-Init arrived
+  at a command line and printed as garbage -- the very failure the wait was
+  added to prevent.  The Send-Init is now retransmitted, the poke wait is
+  bounded, and the classic-capabilities fallback is retried across the window
+  the user was actually promised.
+
+- **An XMODEM send that finished logged nothing to say so.**  The verbose gate
+  reported only the first three blocks and any retry, and the send path had no
+  completion line at all, so a successful transfer's log ended at "block #3
+  ACK" and went quiet -- indistinguishable from a stall, and read as one more
+  than once.
+
 - **The gateway refused RFC 856 BINARY while already sending binary.**  A file
   transfer's bytes are 8-bit data, and this server has always treated them that
   way -- `tnio` applies no NVT CR-NUL stuffing, by explicit decision.  But the
