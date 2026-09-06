@@ -62,6 +62,35 @@ const MAX_COMMA_PAUSE: Duration = Duration::from_secs(60);
 /// we allow 256 to be generous.  Bytes beyond this limit are silently dropped.
 const MAX_CMD_LEN: usize = 256;
 
+/// Fold a Commodore's SHIFTED letters into ASCII for AT command entry.
+///
+/// PETSCII puts unshifted letters at `0x41..=0x5A`, where they are already
+/// ASCII, and shifted ones at `0xC1..=0xDA` -- and a C64's own uppercase is
+/// the shifted set.  The command reader accepts printable ASCII only, so every
+/// letter of a shifted command was dropped and only the digits and punctuation
+/// reached the parser.  Measured: NovaTerm 9.6c's stored init string
+/// `ATE1M1V1X4&C1&D2&K3S0=0S11=50` arrived as `1114&1&2&30=011=50` and was
+/// refused, so echo, verbose and extended result codes, DCD/DTR handling and
+/// S0/S11 were silently never applied.  It went unnoticed because the dial
+/// string NovaTerm *generates* is plain ASCII -- only what a user types is
+/// shifted, so dialling worked while configuring did not.
+///
+/// Only the letters fold, so nothing an ASCII terminal sends is altered, and
+/// the result is ASCII by construction -- which is exactly what the caller's
+/// filter and the byte-offset tokenizer in `parse_at_command` require.  A raw
+/// high byte pushed through `as char` would become a multi-byte UTF-8
+/// sequence that tokenizer cannot slice, which is why the bytes were dropped
+/// rather than kept; folding removes the reason instead of the letters.
+///
+/// This is the rule `is_command_backspace` already follows: what a key means
+/// belongs to the keyboard, not to a mode flag the user has to find first.
+fn fold_petscii_command_byte(byte: u8) -> u8 {
+    match byte {
+        0xC1..=0xDA => byte - 0x80,
+        _ => byte,
+    }
+}
+
 /// Number of S-registers (S0 through S26).  S0-S12 are the Hayes Smartmodem
 /// 2400 set; S13-S26 cover the V.series extensions most often referenced by
 /// retro terminal software.  Registers beyond S12 that have no emulator
@@ -3497,6 +3526,10 @@ fn command_mode_tick(state: &mut ModemState) -> bool {
     match state.port.read(&mut buf) {
         Ok(1) => {
             let byte = buf[0];
+            // Folded once here so the accumulation branch below is a plain
+            // condition: a Commodore's shifted letters become ASCII, and
+            // everything else is untouched.  See `fold_petscii_command_byte`.
+            let folded = fold_petscii_command_byte(byte);
             state.last_data_time = Instant::now();
             state.plus_count = 0;
 
@@ -3566,16 +3599,24 @@ fn command_mode_tick(state: &mut ModemState) -> bool {
                     let cmd = state.last_command.clone();
                     process_at_command(state, &cmd);
                 }
-            } else if byte.is_ascii() && byte >= 0x20 && state.cmd_buffer.len() < MAX_CMD_LEN {
+            } else if folded.is_ascii()
+                && folded >= 0x20
+                && state.cmd_buffer.len() < MAX_CMD_LEN
+            {
+                // Echo the byte the user actually typed, not the folded one:
+                // the fold is for our parser, and a terminal should see back
+                // exactly what it sent.
                 if state.echo {
                     let _ = state.port.write_all(&[byte]);
                 }
-                state.cmd_buffer.push(byte as char);
+                state.cmd_buffer.push(folded as char);
             }
-            // Control characters (< 0x20) and non-ASCII bytes (>= 0x80) are
-            // ignored: AT commands are ASCII, and `byte as char` on a high
+            // Control characters (< 0x20) and the remaining non-ASCII bytes
+            // are ignored: AT commands are ASCII, and `byte as char` on a high
             // byte would push a multi-byte UTF-8 sequence the byte-offset
-            // tokenizer in parse_at_command can't slice safely.
+            // tokenizer in parse_at_command can't slice safely.  A Commodore's
+            // shifted letters are folded to ASCII first rather than dropped --
+            // see `fold_petscii_command_byte`.
         }
         // EOF: with the read timeout set (see `open_port`) an idle read is
         // `Err(TimedOut)` below, so `Ok(0)` means the device closed rather
@@ -6386,17 +6427,26 @@ fn ring_loop(state: &mut ModemState, progress: &tokio::sync::mpsc::Sender<u8>) -
             let mut buf = [0u8; 1];
             if let Ok(1) = state.port.read(&mut buf) {
                 let byte = buf[0];
+                // Folded once here so the accumulation branch below is a plain
+                // condition: a Commodore's shifted letters become ASCII, and
+                // everything else is untouched.  See `fold_petscii_command_byte`.
+                let folded = fold_petscii_command_byte(byte);
                 if byte == b'\r' || byte == b'\n' {
                     let cmd = std::mem::take(&mut state.cmd_buffer);
                     let cmd = cmd.trim().to_ascii_uppercase();
                     if cmd == "ATA" {
                         return RingOutcome::Answered;
                     }
-                } else if byte.is_ascii() && byte >= 0x20 && state.cmd_buffer.len() < MAX_CMD_LEN {
+                } else if folded.is_ascii()
+                    && folded >= 0x20
+                    && state.cmd_buffer.len() < MAX_CMD_LEN
+                {
                     // ASCII printable only — see command_mode_tick: a high
                     // byte pushed via `byte as char` would leave a multi-byte
                     // sequence in cmd_buffer that a later parse can't slice.
-                    state.cmd_buffer.push(byte as char);
+                    // A Commodore's shifted letters fold to ASCII rather than
+                    // being dropped, so `ATA` typed on a C64 answers the ring.
+                    state.cmd_buffer.push(folded as char);
                 }
             }
         }
@@ -9135,6 +9185,58 @@ mod tests {
             vec![AtResult::Ok, AtResult::PetsciiSet(1)]
         );
         assert!(!echo);
+    }
+
+    /// A Commodore types AT commands in SHIFTED PETSCII, and every letter of
+    /// them used to be dropped.
+    ///
+    /// Measured against NovaTerm 9.6c: its stored init string arrived as
+    /// `1114&1&2&30=011=50` -- the digits and punctuation of
+    /// `ATE1M1V1X4&C1&D2&K3S0=0S11=50` with all eleven letters gone -- and was
+    /// refused, so none of what it configures was ever applied.  It went
+    /// unnoticed because the dial string NovaTerm generates is plain ASCII, so
+    /// dialling worked while configuring silently did not.
+    #[test]
+    fn test_a_commodores_shifted_at_command_survives() {
+        // The exact bytes NovaTerm sent, read off the wire.
+        let wire: [u8; 29] = [
+            0xC1, 0xD4, 0xC5, 0x31, 0xCD, 0x31, 0xD6, 0x31, 0xD8, 0x34, 0x26,
+            0xC3, 0x31, 0x26, 0xC4, 0x32, 0x26, 0xCB, 0x33, 0xD3, 0x30, 0x3D,
+            0x30, 0xD3, 0x31, 0x31, 0x3D, 0x35, 0x30,
+        ];
+        let folded: String = wire
+            .iter()
+            .map(|&b| fold_petscii_command_byte(b))
+            .filter(|&b| b.is_ascii() && b >= 0x20)
+            .map(|b| b as char)
+            .collect();
+        assert_eq!(
+            folded, "ATE1M1V1X4&C1&D2&K3S0=0S11=50",
+            "a Commodore's shifted AT command must reach the parser intact"
+        );
+
+        // The old filter is what this replaces: keeping only ASCII dropped
+        // every letter.  Pinned so the regression is recognisable.
+        let unfolded: String = wire
+            .iter()
+            .copied()
+            .filter(|&b| b.is_ascii() && b >= 0x20)
+            .map(|b| b as char)
+            .collect();
+        assert_eq!(unfolded, "1114&1&2&30=011=50", "this was the defect");
+
+        // Nothing an ASCII terminal sends is altered -- only 0xC1..=0xDA move.
+        for b in 0x00u8..=0x7F {
+            assert_eq!(fold_petscii_command_byte(b), b, "ASCII must pass through");
+        }
+        // And the fold always yields ASCII, which is what the byte-offset
+        // tokenizer in parse_at_command requires.
+        for b in 0xC1u8..=0xDA {
+            let f = fold_petscii_command_byte(b);
+            assert!(f.is_ascii_uppercase(), "0x{:02X} folded to a non-letter", b);
+        }
+        // A graphics byte is still not a command character.
+        assert!(!fold_petscii_command_byte(0xA0).is_ascii());
     }
 
     #[test]
