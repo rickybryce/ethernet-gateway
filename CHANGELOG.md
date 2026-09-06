@@ -77,10 +77,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   these.  The first sixteen indices of the cube are the basic sixteen and
   translate exactly; the rest is dropped.
 
-- **An unterminated string sequence silenced the terminal.**  The CSI parser
-  has always had a length cap; the OSC/DCS one had none, so a host emitting an
-  unterminated `ESC ]`, or a stray `1B 5D` in a stream, swallowed every byte
-  after it for the rest of the session.
+- **An unterminated string sequence silenced the terminal.**  A host emitting
+  an unterminated `ESC ]`, or a stray `1B 5D` in a stream -- which turns up
+  about once per 64 KB of binary -- swallowed every byte after it for the rest
+  of the session.  Both parsers were missing the bound, the PETSCII one and the
+  ASCII one, and the guard is now shared.
 
 - **The C64's INST/DEL erases in AT command mode whatever the far end speaks.**
   It was accepted only under `AT+PETSCII=1`, so the setting a PETSCII-aware

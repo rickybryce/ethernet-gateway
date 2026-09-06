@@ -2525,11 +2525,6 @@ pub const BACKSPACE_BS: &str = "backspace";
 /// `serial_*_backspace`: the device edits with DEL / rubout (0x7F).
 pub const BACKSPACE_DEL: &str = "rubout";
 
-/// What a port's erase key may be translated to.  Single source of truth for
-/// config validation and all three configuration screens, the way
-/// [`crate::cpm::boot::BACKSPACE_CHOICES`] serves the booted-disk setting -- and
-/// deliberately the same two words for the same two meanings, so an operator
-/// reading the CP/M screen and the serial screen learns one vocabulary.
 /// `serial_*_gateway_petscii`: use the server-wide `gateway_petscii_translate`.
 pub const GW_PETSCII_DEFAULT: &str = "default";
 /// `serial_*_gateway_petscii`: the gateway translates for this Commodore.
@@ -2555,22 +2550,17 @@ pub const GW_PETSCII_CHOICES: &[(&str, &str)] = &[
     (GW_PETSCII_PASSTHROUGH, "Pass through - the board speaks PETSCII"),
 ];
 
+/// What a port's erase key may be translated to.  Single source of truth for
+/// config validation and all three configuration screens, the way
+/// [`crate::cpm::boot::BACKSPACE_CHOICES`] serves the booted-disk setting -- and
+/// deliberately the same two words for the same two meanings, so an operator
+/// reading the CP/M screen and the serial screen learns one vocabulary.
 pub const BACKSPACE_CHOICES: &[(&str, &str)] = &[
     (BACKSPACE_PASSTHROUGH, "Pass through - send what you typed"),
     (BACKSPACE_BS, "Backspace 0x08 - most CP/M, RomWBW"),
     (BACKSPACE_DEL, "Rubout 0x7F - Unix, CP/M 1.x"),
 ];
 
-/// What to show for the current setting.
-///
-/// Resolved through [`backspace_target`] rather than by matching the string, so a
-/// hand-edited typo is *displayed* as the behaviour the wire is really getting --
-/// the same rule as `cpm::boot::backspace_label`, and for the same reason: a
-/// screen that agrees with the config file and disagrees with the hardware is
-/// worse than no screen.
-/// The menu text for a `serial_*_gateway_petscii` value, so all three screens
-/// render one wording.  An unknown value reads as the default, which is what
-/// the resolver does with it.
 /// Resolve a port's `serial_*_gateway_petscii` against the server-wide
 /// `gateway_petscii_translate`.
 ///
@@ -2588,6 +2578,9 @@ pub fn resolve_gw_petscii(port_value: &str, server_wide: bool) -> bool {
     }
 }
 
+/// The menu text for a `serial_*_gateway_petscii` value, so all three screens
+/// render one wording.  An unknown value reads as the default, which is what
+/// the resolver does with it.
 pub fn gw_petscii_label(value: &str) -> &'static str {
     let want = value.trim().to_ascii_lowercase();
     GW_PETSCII_CHOICES
@@ -2597,6 +2590,13 @@ pub fn gw_petscii_label(value: &str) -> &'static str {
         .unwrap_or(GW_PETSCII_CHOICES[0].1)
 }
 
+/// What to show for the current setting.
+///
+/// Resolved through [`backspace_target`] rather than by matching the string, so a
+/// hand-edited typo is *displayed* as the behaviour the wire is really getting --
+/// the same rule as `cpm::boot::backspace_label`, and for the same reason: a
+/// screen that agrees with the config file and disagrees with the hardware is
+/// worse than no screen.
 pub fn backspace_label(value: &str) -> &'static str {
     let want = match backspace_target(value) {
         None => BACKSPACE_PASSTHROUGH,

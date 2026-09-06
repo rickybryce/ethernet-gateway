@@ -9571,3 +9571,85 @@ fn test_the_port_answers_first_and_a_portless_client_falls_back() {
         "an unreadable value must read as the default, as the resolver treats it"
     );
 }
+
+/// The Serial Gateway must never resolve to the Commodore-aware pipe.
+///
+/// `gateway_petscii_translate = false` means *the far end understands
+/// Commodores*. A local serial device never does, so the Serial Gateway
+/// answers this question from the terminal type alone. It briefly did not, to
+/// give an operator a way to switch off the back-arrow rewriting there too,
+/// and that took the case swap and the erase fold with it: a caller who set
+/// the key for a PETSCII-aware BBS on the SSH Gateway then found every shifted
+/// letter reaching their RC2014 as `0xC1..0xDA` with INST/DEL no longer
+/// erasing. It also read the setting of the port the caller *dialled in on*,
+/// which is not the port the bridge is connected to.
+///
+/// A full suite, clippy and CI all passed with that in place, so this is the
+/// only thing standing between it and a repeat.
+#[test]
+fn test_the_serial_gateway_never_becomes_a_commodore_aware_pipe() {
+    let src = include_str!("gateway.rs");
+    let at = src
+        .find("pub(in crate::telnet) async fn run_serial_console_loop")
+        .expect("run_serial_console_loop — renamed?");
+    // Its own body, up to the next function at the same indentation.
+    let end = src[at..]
+        .find("\n    pub(in crate::telnet) async fn ")
+        .map(|i| at + i)
+        .unwrap_or(src.len());
+    let body: String = src[at..end]
+        .lines()
+        .map(|l| match l.find("//") {
+            Some(i) => &l[..i],
+            None => l,
+        })
+        .collect::<Vec<&str>>()
+        .join("\n");
+    assert!(
+        !body.contains("gateway_filter()"),
+        "the Serial Gateway must resolve its filter from the terminal type, \
+         not from `gateway_petscii_translate` — its far end is a local device"
+    );
+    assert!(
+        body.contains("GatewayFilter::Petscii"),
+        "and it must still translate for a Commodore"
+    );
+    // The property the resolver would have broken, stated directly: under
+    // `Raw` nothing is folded, which is exactly what a local device must not
+    // be given.
+    let mut keys = Vec::new();
+    gateway_input_for_remote(0x14, GatewayFilter::Raw, 0x14, &mut keys);
+    assert_eq!(keys, vec![0x14], "Raw passes the erase byte through…");
+    let mut keys = Vec::new();
+    gateway_input_for_remote(0x14, GatewayFilter::Petscii, 0x14, &mut keys);
+    assert_eq!(keys, vec![0x7F], "…where a local device needs ASCII DEL");
+}
+
+/// An unterminated string sequence must not silence an ASCII client either.
+///
+/// `crate::petscii` grew this guard first and this copy was missed, so the fix
+/// was real on the modem path and absent on the one an ASCII terminal uses --
+/// where this function's own header notes that `1B 5D` turns up about once per
+/// 64 KB of binary.  Two parsers, one rule, and only one of them had it.
+#[test]
+fn test_an_unterminated_string_sequence_cannot_silence_an_ascii_client() {
+    let mut st = GatewayOutState::new(GatewayFilter::Ascii);
+    let mut out = Vec::new();
+    let mut wire = vec![0x1B, b']'];
+    wire.extend(std::iter::repeat_n(b'x', crate::petscii::STRING_SEQ_CAP + 8));
+    wire.extend_from_slice(b"visible");
+    filter_gateway_output(&wire, &mut st, &mut out);
+    assert!(
+        out.ends_with(b"visible"),
+        "the line never came back: {:?}",
+        String::from_utf8_lossy(&out)
+    );
+    // A terminated one still costs nothing, however long the run before it.
+    let mut st = GatewayOutState::new(GatewayFilter::Ascii);
+    let mut out = Vec::new();
+    let mut ok = vec![0x1B, b']'];
+    ok.extend(std::iter::repeat_n(b'y', 64));
+    ok.extend_from_slice(b"\x07after");
+    filter_gateway_output(&ok, &mut st, &mut out);
+    assert_eq!(out, b"after".to_vec());
+}

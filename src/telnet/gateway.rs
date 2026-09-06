@@ -221,6 +221,9 @@ pub(in crate::telnet) struct GatewayOutState {
     /// 0=normal, 1=ESC seen, 2=CSI sequence, 3=string sequence,
     /// 4=ESC in string, 5=weighing a title, 6=ESC while weighing one
     state: u8,
+    /// Bytes consumed inside the current string sequence, bounded by
+    /// `crate::petscii::STRING_SEQ_CAP`.  Reset whenever one ends.
+    swallowed: usize,
     held: Vec<u8>,
     /// The PETSCII path's own parser.  It does not share the state machine
     /// below because it does the opposite job: that one decides what to
@@ -250,6 +253,7 @@ impl GatewayOutState {
         Self {
             mode,
             state: 0,
+            swallowed: 0,
             held: Vec::new(),
             petscii: crate::petscii::AnsiToPetscii::new(),
         }
@@ -423,16 +427,34 @@ pub(in crate::telnet) fn filter_gateway_output(
                 }
             }
             3 => {
-                // String sequence: consume until BEL or ESC
+                // String sequence: consume until BEL or ESC -- but not for
+                // ever.  This mode is only reached by an `Ascii` client now,
+                // and it had no bound at all: an unterminated `ESC ]`, or the
+                // stray `1B 5D` this function's own header notes turns up
+                // about once per 64 KB of binary, silenced the rest of that
+                // session.  `crate::petscii` grew the same guard first and
+                // this copy was missed, which is the whole argument for one
+                // parser rather than two -- kept apart here only because the
+                // `Ansi` mode's held-title state has no counterpart there.
+                st.swallowed = st.swallowed.saturating_add(1);
                 if b == 0x07 {
                     st.state = 0;
+                    st.swallowed = 0;
                 } else if b == 0x1B {
                     st.state = 4;
+                } else if st.swallowed >= crate::petscii::STRING_SEQ_CAP {
+                    st.state = 0;
+                    st.swallowed = 0;
                 }
             }
             4 => {
                 // ESC inside string: '\' = ST (end), else resume string
-                st.state = if b == b'\\' { 0 } else { 3 };
+                if b == b'\\' {
+                    st.state = 0;
+                    st.swallowed = 0;
+                } else {
+                    st.state = 3;
+                }
             }
             5 => {
                 // Weighing a candidate title.  Everything here is held, and
@@ -1204,7 +1226,8 @@ impl TelnetSession {
     /// One function so the two network gateways cannot disagree, and so a
     /// third would have to opt out rather than forget.  The Serial Gateway
     /// deliberately does **not** call this: its far end is a local serial
-    /// device, never a board that could recognise a Commodore.
+    /// device, never a board that could recognise a Commodore, and it once
+    /// did call it -- see `run_serial_console_loop` for what that cost.
     fn gateway_filter(&self) -> GatewayFilter {
         match self.terminal_type {
             TerminalType::Petscii => {
@@ -3072,21 +3095,32 @@ impl TelnetSession {
 
         let (mut bridge_read, mut bridge_write) = tokio::io::split(bridge);
 
-        // Resolved before the reader is borrowed, as the other bridges do it.
-        let gw_filter = self.gateway_filter();
         let reader = &mut self.reader;
         let writer = &self.writer;
         let is_petscii = self.terminal_type == TerminalType::Petscii;
-        // **The same resolver as the network gateways**, which it did not use
-        // at first on the grounds that a local serial device can never
-        // recognise a Commodore.  That was true of the setting's first job --
-        // deciding whether the *far end* detects a C64 -- and stopped being
-        // true when it also began deciding whether we rewrite the caller's
-        // KEYS.  The back-arrow became ESC and the cursor keys became CSI on
-        // this bridge too, unconditionally, with no surface anywhere that
-        // could turn it off: a C64 driving an RC2014 could no longer type an
-        // underscore at all.  A special case that cannot be switched off is
-        // worse than one setting understood in one way.
+        // **Terminal type only, and never `gateway_filter()`.**  This bridge
+        // briefly used the shared resolver, to give an operator some way to
+        // switch off the back-arrow and cursor-key rewriting here as well.
+        // That was wrong twice over, and both ways cost a C64 its session:
+        //
+        //   * `gateway_petscii_translate = false` means *the far end
+        //     understands Commodores*.  A local serial device never does, so
+        //     the answer here is always "translate".  Resolving to `Raw` took
+        //     the case swap and the erase fold away with it, and a caller who
+        //     had set the key for a PETSCII-aware BBS on the SSH Gateway then
+        //     found every shifted letter arriving at their RC2014 as
+        //     0xC1..0xDA with INST/DEL no longer erasing.
+        //   * the per-port half is read from `serial_port_id`, the port the
+        //     caller **dialled in on** -- which is not the port this bridge is
+        //     connected to.  There is no sense in which that setting speaks
+        //     for the device on the other end.
+        //
+        // So the key rewriting is unconditional here, deliberately and in
+        // step with every other bridge: a C64's back-arrow is its ESC key
+        // wherever it is typed, WordStar and vi on the far machine both want
+        // one, and the banner says so.  The cost is the underscore, and it is
+        // the same cost the SSH and Telnet Gateways already pay.
+        let gw_filter = if is_petscii { GatewayFilter::Petscii } else { GatewayFilter::Ansi };
         let erase_char = self.erase_char;
         // Idle bound for the bridge (see gateway_ssh): disconnect a
         // half-open client so it can't pin the session's max_sessions

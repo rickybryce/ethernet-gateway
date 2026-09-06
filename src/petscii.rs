@@ -142,7 +142,7 @@ const CSI_PARAM_CAP: usize = 64;
 /// `1B 5D` in a stream, would have silenced the C64's screen for the rest of
 /// the online session with no way back.  Generous enough for a real title and
 /// far short of forever.
-const STRING_SEQ_CAP: usize = 512;
+pub(crate) const STRING_SEQ_CAP: usize = 8192;
 
 /// Translates a remote's ANSI output into PETSCII, one byte at a time.
 ///
