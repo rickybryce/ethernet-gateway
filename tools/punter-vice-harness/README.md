@@ -90,3 +90,49 @@ validates the gateway against itself over TCP.
 ## Cleanup
 
 `run-harness.sh` cleans up on exit. Otherwise: `./stop-harness.sh`.
+
+## Driving NovaTerm without a human
+
+`novaterm.py` reads the C64 through VICE's remote monitor and types at it with
+X11 XTEST.  Both halves had to be established by measurement:
+
+* **The screen is not at `$0400`.**  NovaTerm relocates it to `$8C00` (VIC bank
+  `$8000`), so the reader follows `$D018` and CIA2 `$DD00`.  Assuming the
+  default returns stale memory that looks like a decode bug.
+* **VICE's `keybuf` monitor command does nothing here.**  It stuffs the KERNAL
+  buffer; NovaTerm scans the CIA1 keyboard matrix itself.  Injecting `t` at the
+  main menu changes nothing at all.  X11 XTEST works, because VICE then builds
+  real matrix state.
+* **The main menu remembers where it was left**, so `novaterm.choose()` reads
+  the highlighted row rather than counting keypresses from an assumed top.  The
+  selected row is the one with a wide reverse-video run; every row of the menu
+  box is reversed, so testing bit 7 alone does not distinguish it.
+
+### Terminal-mode commands (C= plus a letter)
+
+Read off NovaTerm's own `C= M` screen -- and worth having written down, because
+finding them by trial costs the call: `C= H` hangs up and `C= C` toggles 40/80
+columns.  **In VICE the C= key is Tab.**
+
+```
+B Pause capture        P Protocol            A Graphics/ASCII mode
+D Download file        R Baud rate           C Toggle 40/80 columns
+E Local echo           S Status line         Q Conference mode
+F Disk blocks free     T Term emulation
+G Execute script       U Upload file
+H Hang up phone        V View directory
+I Initialize modem     W Scroll-ahead
+J Phone off hook       X Send break
+K Show control chars   Y Restore colors
+L Load F-key file      Z Main menu
+N Buffer bytes free    @ Disk command
+O Open/close capture   + Print menu
+- Translate during file transfer
+```
+
+So a Punter download is `C= D` and an upload is `C= U`, with the protocol
+already set to Punter on the shipped disk (Configuration page 1, block size
+255; page 2 has Serial driver = SwiftLink).
+
+**Uploads and downloads use drive 10**, per NovaTerm's Device settings -- so a
+writable image has to be attached there, or the transfer has nowhere to go.
