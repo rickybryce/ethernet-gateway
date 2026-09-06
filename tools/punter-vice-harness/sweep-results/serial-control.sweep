@@ -1,0 +1,18 @@
+=============== punter download over serial
+| :.:.:.:.:.:.:  2400           00:00:00|
+|=======================================|
+|  .... ........|
+|=======================================|
+|  .ir: ethernetgateway-data/transfer/|
+|  .  .pload a file|
+|  .  .ownload a file|
+|  .  .elete a file|
+|  .  .hange directory|
+|  .  .ake directory|
+|  .  .ermit server mode|
+|  .  .ateway .hell|
+|  .  ... escaping .....|
+|  .=.efresh .=.ack .=.elp|
+|ethernet/xfer>|
+--- bytes:
+PASS  punter-download.d64: 1775 bytes identical (entry 'PUNTER', type 02)

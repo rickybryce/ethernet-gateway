@@ -9,7 +9,13 @@
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; cd "$HERE"
 LINK="${LINK:-telnet}"
-OUT="${OUT:-$HERE/sweep-results}"
+# **The link belongs in the path.**  Results were written as
+# `<proto>-<dir>.*` with nothing naming the transport, so running the serial
+# sweep silently overwrote the telnet evidence for the same nine paths -- the
+# disks, the screens and the wire traces all replaced, with the run reporting
+# nothing amiss.  Evidence that a later run can quietly destroy is not
+# evidence.
+OUT="${OUT:-$HERE/sweep-results/$LINK}"
 mkdir -p "$OUT"
 
 # Keep the evidence.  `one-run.sh` truncates gateway.log and tcpser.log on

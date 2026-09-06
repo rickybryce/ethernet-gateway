@@ -1,0 +1,189 @@
+=============== xmodem download over serial
+| :.:.:.:.:.:.:  2400           00:00:00|
+|=======================================|
+|  ...... ........|
+|=======================================|
+|  .ile: ...........|
+|  .ize: 1775 bytes|
+|  .  ......     128-byte blocks|
+|  1  ......-1.  1024-byte blocks|
+|  .  ......     name+size hdr, 1.|
+|  .  ......     autostart, 1.|
+|  .  ......     any flavor, auto|
+|  .  ......     .1 ...../.ovaterm|
+|  .ick one, or <- to cancel: x|
+|  .tart ...... receive now.|
+|  .tart transfer within 45 seconds.|
+|  <- to cancel|
+--- bytes:
+PASS  xmodem-download.d64: 1775 bytes identical (entry 'XMODEM', type 01)
+=============== xmodem1k download over serial
+| :.:.:.:.:.:.:  2400           00:00:00|
+|=======================================|
+|  ...... ........|
+|=======================================|
+|  .ile: ...........|
+|  .ize: 1775 bytes|
+|  .  ......     128-byte blocks|
+|  1  ......-1.  1024-byte blocks|
+|  .  ......     name+size hdr, 1.|
+|  .  ......     autostart, 1.|
+|  .  ......     any flavor, auto|
+|  .  ......     .1 ...../.ovaterm|
+|  .ick one, or <- to cancel: 1|
+|  .tart ......-1. receive now.|
+|  .tart transfer within 45 seconds.|
+|  <- to cancel|
+--- bytes:
+PASS  xmodem1k-download.d64: 1775 bytes identical + 17 bytes of SUB padding (XMODEM has no length field) (entry 'XMODEM1K', type 01)
+=============== ymodem download over serial
+| :.:.:.:.:.:.:  2400           00:00:00|
+|=======================================|
+|  ........ ....|
+|=======================================|
+|   #. .ilename               .ize|
+|  ------------------------------------|
+|   1. ...80....              17.6 ..|
+|   2. ...8080....            18.0 ..|
+|   3. .........              22 .|
+|   4. ...........            1.7 ..|
+|   5. ............           79 .|
+|  .age 1 of 1|
+|  .=.ack . .=.elp . <-=.ain|
+|  .elect #:|
+--- bytes:
+PASS  ymodem-download.d64: 1775 bytes identical (entry 'ÐÕÎÔÅÓÔ.ÓÅÑ', type 01)
+=============== zmodem download over serial
+| :.:.:.:.:.:.:  2400           00:00:00|
+|=======================================|
+|  ........ ....|
+|=======================================|
+|   #. .ilename               .ize|
+|  ------------------------------------|
+|   1. ...80....              17.6 ..|
+|   2. ...8080....            18.0 ..|
+|   3. .........              22 .|
+|   4. ...........            1.7 ..|
+|   5. ............           79 .|
+|  .age 1 of 1|
+|  .=.ack . .=.elp . <-=.ain|
+|  .elect #: modem|
+|  .nter a number, ., ., ., or ..|
+|  .ress any key to continue.|
+--- bytes:
+PASS  zmodem-download.d64: 1775 bytes identical (entry 'ÐÕÎÔÅÓÔ.ÓÅÑ', type 02)
+=============== punter upload over serial
+    |........................................|
+    |               .........................|
+    |................|
+  -> done
+| :.:.:.:.:.:.:  2400           00:00:00|
+|=======================================|
+|  ...... ...... ........|
+|=======================================|
+|  .  ....../......  128/1., auto|
+|  .  ......         1., autostart|
+|  .  ......         any flavor, auto|
+|  .  ......         .1 ...../.ovaterm|
+|  .ick one, or <- to cancel: p|
+|  .eady to receive: punterupseq|
+|  .ax file size: 8 ..|
+|  .tart ...... send from your terminal n|
+|ow.|
+|  .tart transfer within 45 seconds.|
+|  <- to cancel|
+|googoo|
+--- bytes:
+PASS  punterupseq.usr: 1775 bytes identical
+=============== xmodem upload over serial
+  -> done
+| :.:.:.:.:.:.:  2400           00:00:00|
+|=======================================|
+|  ...... ...... ........|
+|=======================================|
+|  .  ....../......  128/1., auto|
+|  .  ......         1., autostart|
+|  .  ......         any flavor, auto|
+|  .  ......         .1 ...../.ovaterm|
+|  .ick one, or <- to cancel: x|
+|  .eady to receive: xmodemupseq|
+|  .ax file size: 8 ..|
+|  .tart ....../...... send from your ter|
+|minal now.|
+|  .tart transfer within 45 seconds.|
+|  <- to cancel|
+|c|
+|  .pload complete!|
+|  1775 bytes, 14 blocks, 53.0s|
+|  .ress any key to continue.|
+--- bytes:
+PASS  xmodemupseq: 1775 bytes identical
+=============== xmodem1k upload over serial
+  -> done
+| :.:.:.:.:.:.:  2400           00:00:00|
+|=======================================|
+|  ...... ...... ........|
+|=======================================|
+|  .  ....../......  128/1., auto|
+|  .  ......         1., autostart|
+|  .  ......         any flavor, auto|
+|  .  ......         .1 ...../.ovaterm|
+|  .ick one, or <- to cancel: x|
+|  .eady to receive: xmodemupseq|
+|  .ax file size: 8 ..|
+|  .tart ....../...... send from your ter|
+|minal now.|
+|  .tart transfer within 45 seconds.|
+|  <- to cancel|
+|c|
+|  .pload complete!|
+|  1775 bytes, 14 blocks, 53.6s|
+|  .ress any key to continue.|
+--- bytes:
+PASS  xmodemupseq: 1775 bytes identical
+=============== ymodem upload over serial
+  dialog: file selector -> f3, f7
+  -> selector
+| :.:.:.:.:.:.:  2400           00:00:00|
+|=======================================|
+|  .  ....../......  128/1., auto|
+|  .  ......         1., autostart|
+|  .  ......         any flavor, auto|
+|  .  ......         .1 ...../.ovaterm|
+|  .ick one, or <- to cancel: y|
+|  .eady to receive: ymodemupseq|
+|  .ax file size: 8 ..|
+|  .tart ....../...... send from your ter|
+|minal now.|
+|  .tart transfer within 45 seconds.|
+|  <- to cancel|
+|c|
+|*.ovaterm: .iles sent: 1|
+|  .pload complete!|
+|  1778 bytes, 14 blocks, 54.1s|
+|  .ress any key to continue.|
+--- bytes:
+PASS  ymodemupseq: 1775 bytes identical + 3 bytes of SUB padding (XMODEM has no length field)
+=============== zmodem upload over serial
+  dialog: upload settings -> RETURN
+  dialog: file selector -> f3, f7
+  -> selector
+| :.:.:.:.:.:.:  2400           00:00:00|
+|  .ick one, or <- to cancel: z|
+|  .eady to receive: zmodemupseq|
+|  .ax file size: 8 ..|
+|  .tart ...... send from your terminal n|
+|ow.|
+|  (.xtra.utty: .ile .ransfer > .modem >|
+|.end. .ther clients vary.)|
+|  .tart transfer within 45 seconds.|
+|  <- to cancel|
+|..|
+|**b0100000023..50|
+|**b0100000023..50|
+|*.ovaterm: .iles sent: 1|
+|  .pload complete!|
+|  1775 bytes, 14 blocks, 55.5s|
+|  .ress any key to continue.|
+--- bytes:
+PASS  puntest: 1775 bytes identical

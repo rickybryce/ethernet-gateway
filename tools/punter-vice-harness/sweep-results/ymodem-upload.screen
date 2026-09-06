@@ -2,7 +2,7 @@
   dialog: upload settings -> RETURN
   dialog: file selector -> f3, f7
   -> selector
-| :.:.:.:.:.:.:  2400           00:01:30|
+| :.:.:.:.:.:.:  2400           00:00:00|
 |=======================================|
 |  .  ....../......  128/1., auto|
 |  .  ......         1., autostart|
@@ -18,5 +18,5 @@
 |c|
 |*.ovaterm: .iles sent: 1|
 |  .pload complete!|
-|  1778 bytes, 14 blocks, 53.9s|
+|  1778 bytes, 14 blocks, 54.1s|
 |  .ress any key to continue.|

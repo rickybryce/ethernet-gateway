@@ -2,19 +2,20 @@
   dialog: upload settings -> RETURN
   dialog: file selector -> f3, f7
   -> selector
-|             .modem upload|
-| .evice: 10,0          .ranslation: ...|
-| .ile: puntest|
-| .ype: seq|
-| .ize: 7 blocks (1778 bytes)|
-| .ytes sent: 1024      .etries:|
-|........................................|
-|.dkry '.5<.........bipw.%,3:..........gn|
-|u.#*18?.........elsz!(/6=.... ....cjqx.&|
-|-4;.........ahov.$+29..........fmt.")07>|
-|.........dkry '.5<.........bipw.%,3:....|
-|......gnu.#*18?.........elsz!(/6=.... ..|
-|..cjqx.&-4;.........ahov.$+29..........f|
-|mt.")07>................................|
-|.................|
-|            .old .= to abort|
+| :.:.:.:.:.:.:  2400           00:00:00|
+|  .ick one, or <- to cancel: z|
+|  .eady to receive: zmodemupseq|
+|  .ax file size: 8 ..|
+|  .tart ...... send from your terminal n|
+|ow.|
+|  (.xtra.utty: .ile .ransfer > .modem >|
+|.end. .ther clients vary.)|
+|  .tart transfer within 45 seconds.|
+|  <- to cancel|
+|..|
+|**b0100000023..50|
+|**b0100000023..50|
+|*.ovaterm: .iles sent: 1|
+|  .pload complete!|
+|  1775 bytes, 14 blocks, 55.5s|
+|  .ress any key to continue.|
