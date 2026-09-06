@@ -55,3 +55,4 @@ EGT8080/tools/__pycache__/
 # tools/punter-vice-harness/__pycache__ -- the same anchoring trap that let a
 # generated key escape .gitignore when the data directory moved.
 __pycache__/
+tools/serial-transfer-smoke/work/
