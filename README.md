@@ -58,8 +58,12 @@ machines can dial it with standard AT commands:
   on mine; configure the serial ports with *stop + aux1 up*). Run IMP8, press
   **T** for terminal mode, then `ATDT :2323` — or `ATDT ethernetgateway` for the
   gateway menu. I used a USB-to-RS232 adapter into the 9-pin connector.
-- **RC2014 / SC126** and similar — also supported. Most machines need a
-  **null-modem** adapter (cross RX/TX).
+- **RC2014 / SC126** and similar — also supported. I use an **FTDI** USB-serial
+  lead onto the board's serial header, where a null-modem adapter does not come
+  into it at all.
+- A **null-modem** adapter (RX and TX crossed) is only a question if you go
+  through a true **RS232** module, and whether one is needed depends on how that
+  module is wired.
 
 See the [manual](http://ethernetgateway.com/index.html) for wiring, DCD/carrier
 options, and the full AT command set.
