@@ -30,6 +30,12 @@ done
 
 cd "$RUN"
 echo "Gateway: telnet 127.0.0.1:2323, transfer_dir=$DATA/transfer, verbose on"
+# That path is only true because the config says
+# `transfer_dir = ethernetgateway-data/transfer`.  A bare `transfer` there
+# resolves against the LAUNCH directory ($RUN) instead, which is beside the
+# data directory rather than inside it -- the payloads seeded above then sit
+# somewhere the gateway never lists, and the download menu offers only the
+# EGT .COM files it places itself.  Measured 2026-09-06.
 echo "Log: $HERE/gateway.log"
 # Use process substitution (not a `| tee` pipeline) so `exec` replaces THIS
 # shell with the gateway — the script's PID then *is* the gateway, so the
