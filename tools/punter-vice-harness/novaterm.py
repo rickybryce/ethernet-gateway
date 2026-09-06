@@ -126,11 +126,34 @@ class NovaTerm:
         self.type("atdt %s\n" % number, settle)
 
     def at_menu(self):
-        """Whether NovaTerm is showing its main menu (rather than terminal mode)."""
-        return self.selected() is not None
+        """Whether NovaTerm is really showing its MAIN menu.
+
+        A highlight alone is not enough: `selected()` looks for a wide
+        reverse-video run in the menu's rows, and any other screen with one
+        there -- a transfer dialog left up by an aborted run, say -- reports a
+        bogus selection, after which the navigation moves the wrong number of
+        rows on the wrong screen.  So check the menu's own words as well.
+        """
+        text = self.text()
+        looks_right = any("erminal mode" in l for l in text) and \
+                      any("onfiguration" in l for l in text)
+        return looks_right and self.selected() is not None
 
     def ensure_terminal_mode(self):
-        """Get to terminal mode from wherever we are, without assuming."""
+        """Get to terminal mode from wherever we are, without assuming.
+
+        `C= Z` returns to the main menu from anywhere in terminal mode, so a
+        screen left behind by an aborted transfer is recoverable without
+        restarting NovaTerm.
+        """
+        if self.at_menu():
+            self.choose("terminal mode")
+            time.sleep(2.0)
+            return
+        # Not terminal mode and not the menu: shake off whatever dialog is up.
+        for _ in range(3):
+            self.press("Return", 1.0)
+        time.sleep(1.5)
         if self.at_menu():
             self.choose("terminal mode")
             time.sleep(2.0)
