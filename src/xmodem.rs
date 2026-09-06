@@ -1168,21 +1168,58 @@ pub(crate) async fn xmodem_send(
             state,
         )
         .await?;
-        // Wait for the receiver's second 'C' (data-phase request).
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(block_timeout),
-            nvt_read_byte(reader, is_tcp, state),
-        )
-        .await
-        {
-            Ok(Ok(b)) if b == CRC_REQUEST => {
-                if verbose { glog!("XMODEM send: got second 'C' after block 0"); }
-            }
-            Ok(Ok(b)) => {
-                if verbose { glog!("XMODEM send: expected 'C' after block 0 got 0x{:02X}", b); }
-            }
-            _ => {
+        // Wait for the receiver's second 'C' -- its data-phase request --
+        // through anything that is not one.
+        //
+        // YMODEM's receiver opens the data phase with 'C'.  A duplicate ACK
+        // of block 0 is not that request, and starting to send on it puts the
+        // sender a step ahead of the receiver for the rest of the transfer.
+        //
+        // MEASURED on the wire against NovaTerm 9.6c: it answers block 0 with
+        // ACK ACK, and sends its 'C' about three seconds later.  A single read
+        // took the second ACK for the answer, sent block 1 early, and the real
+        // 'C' then landed inside block 2's response window -- block 2 was NAKed
+        // nine times and the receiver cancelled.  Waiting for the 'C' puts the
+        // two back in step.
+        //
+        // Bounded twice over, because not every receiver emits the second 'C':
+        // the whole wait shares one deadline, and a talkative peer is capped by
+        // MAX_PRE_DATA_BYTES.  Either way we fall through and send rather than
+        // hang.
+        const MAX_PRE_DATA_BYTES: u32 = 8;
+        let c_deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_secs(block_timeout);
+        let mut absorbed = 0u32;
+        loop {
+            let remaining = c_deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
                 if verbose { glog!("XMODEM send: timed out waiting for second 'C' after block 0"); }
+                break;
+            }
+            match tokio::time::timeout(remaining, nvt_read_byte(reader, is_tcp, state)).await {
+                Ok(Ok(b)) if b == CRC_REQUEST => {
+                    if verbose { glog!("XMODEM send: got second 'C' after block 0"); }
+                    break;
+                }
+                Ok(Ok(b)) => {
+                    if is_can_abort(b, state) {
+                        if verbose { glog!("XMODEM send: CAN×2 abort while awaiting the data-phase 'C'"); }
+                        return Err("Transfer cancelled by receiver".into());
+                    }
+                    absorbed += 1;
+                    if verbose { glog!(
+                        "XMODEM send: awaiting data-phase 'C', absorbed 0x{:02X} ({} of {})",
+                        b, absorbed, MAX_PRE_DATA_BYTES); }
+                    if absorbed >= MAX_PRE_DATA_BYTES {
+                        if verbose { glog!("XMODEM send: no data-phase 'C' after {} bytes, sending anyway",
+                            MAX_PRE_DATA_BYTES); }
+                        break;
+                    }
+                }
+                _ => {
+                    if verbose { glog!("XMODEM send: timed out waiting for second 'C' after block 0"); }
+                    break;
+                }
             }
         }
     }
@@ -2611,6 +2648,113 @@ mod tests {
             "the sender must give up on its own budget, not wait out the peer \
              (took {elapsed:?}, peer flooded for {FLOOD_SECS}s)"
         );
+    }
+
+    /// A YMODEM receiver opens the data phase with `C`, and the sender must
+    /// wait for it through anything else the receiver says first.
+    ///
+    /// MEASURED on the wire against NovaTerm 9.6c: it answers block 0 with
+    /// **ACK ACK** and sends its `C` about three seconds later.  The sender
+    /// used to do a single read, take that second ACK as the answer, and send
+    /// block 1 early -- so the real `C` arrived inside block 2's response
+    /// window, block 2 was NAKed nine times, and the receiver cancelled.
+    /// `lrzsz`'s `rb` sends ACK then `C` promptly and in that order, which is
+    /// why every existing gate passed while this was broken.
+    ///
+    /// The assertion is the one that matters: **no data block may be on the
+    /// wire before the receiver has asked for one.**
+    #[tokio::test]
+    async fn test_ymodem_sender_waits_for_the_data_phase_request() {
+        let (sender_half, receiver_half) = tokio::io::duplex(65536);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+
+        let original: Vec<u8> = (0..1500u32).map(|i| (i as u8) ^ 0x3C).collect();
+        let orig = original.clone();
+        let hdr = YmodemHeader {
+            filename: "PUNTEST.SEQ".to_string(),
+            size: orig.len() as u64,
+            modtime: None,
+            mode: None,
+        };
+        let send_task = tokio::spawn(async move {
+            xmodem_send(
+                &mut send_read, &mut send_write, &orig,
+                false, false, false, true, Some(hdr),
+            ).await
+        });
+
+        let recv_task = tokio::spawn(async move {
+            raw_write_byte(&mut recv_write, CRC_REQUEST, false).await.unwrap();
+
+            // Block 0.
+            let mut b0 = vec![0u8; 3 + XMODEM_BLOCK_SIZE + 2];
+            recv_read.read_exact(&mut b0).await.unwrap();
+            assert_eq!(b0[0], SOH, "block 0 is a 128-byte block");
+            assert_eq!(b0[1], 0, "block 0 carries block number 0");
+
+            // NovaTerm's answer: ACK, then a second ACK -- and no `C` yet.
+            raw_write_byte(&mut recv_write, ACK, false).await.unwrap();
+            raw_write_byte(&mut recv_write, ACK, false).await.unwrap();
+
+            // The sender must still be waiting.  A byte here is a data block
+            // sent before it was asked for, which is the defect.
+            let mut peek = [0u8; 1];
+            let early = tokio::time::timeout(
+                std::time::Duration::from_millis(600),
+                recv_read.read_exact(&mut peek),
+            ).await;
+            assert!(
+                early.is_err(),
+                "sender sent 0x{:02X} before the data-phase 'C' was requested",
+                peek[0]
+            );
+
+            // Now ask for the data phase, the way NovaTerm eventually does.
+            raw_write_byte(&mut recv_write, CRC_REQUEST, false).await.unwrap();
+
+            // Data blocks: 1K where a full 1024 remains, 128 for the tail.
+            let mut got: Vec<u8> = Vec::new();
+            let mut nums: Vec<u8> = Vec::new();
+            loop {
+                let mut h = [0u8; 1];
+                recv_read.read_exact(&mut h).await.unwrap();
+                if h[0] == EOT {
+                    raw_write_byte(&mut recv_write, ACK, false).await.unwrap();
+                    break;
+                }
+                let size = if h[0] == STX { XMODEM_1K_BLOCK_SIZE } else { XMODEM_BLOCK_SIZE };
+                let mut rest = vec![0u8; 2 + size + 2];
+                recv_read.read_exact(&mut rest).await.unwrap();
+                nums.push(rest[0]);
+                got.extend_from_slice(&rest[2..2 + size]);
+                raw_write_byte(&mut recv_write, ACK, false).await.unwrap();
+            }
+            // End-of-batch: the sender asks again, we answer with a `C` and
+            // take its null block 0.
+            raw_write_byte(&mut recv_write, CRC_REQUEST, false).await.unwrap();
+            let mut tail = vec![0u8; 3 + XMODEM_BLOCK_SIZE + 2];
+            if tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                recv_read.read_exact(&mut tail),
+            ).await.is_ok() {
+                let _ = raw_write_byte(&mut recv_write, ACK, false).await;
+            }
+            (got, nums)
+        });
+
+        let send_result = send_task.await.unwrap();
+        let (got, nums) = recv_task.await.unwrap();
+        send_result.expect("sender must complete once the data phase is requested");
+
+        // 1500 bytes is one 1K block plus a 128-padded tail, so the count is
+        // a property of the payload rather than something to hard-code: what
+        // matters is that the numbering runs 1, 2, 3... with no repeat, since
+        // a resend is exactly what being out of step produced.
+        let expected: Vec<u8> = (1..=nums.len() as u8).collect();
+        assert_eq!(nums, expected, "blocks must be sent once each, in order");
+        assert!(got.len() >= original.len());
+        assert_eq!(&got[..original.len()], &original[..], "payload must arrive intact");
     }
 
     /// Receiver must recover from a CRC-bad YMODEM block 0 by NAKing
