@@ -7,6 +7,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.7] - 2026-09-06
+
+### Added
+
+- **A Commodore is served the colour a host sends, instead of nothing.**  Both
+  PETSCII output paths -- the Telnet and SSH Gateways, and the modem's
+  `AT+PETSCII=1` dial-out -- *stripped* every escape sequence a remote sent, so
+  a C64 got no colour, no cleared screen and no cursor control from any host.
+  Reported against telnetbible.com and true of every board.  They now share one
+  translator: SGR colour, `ESC[2J`, `ESC[H` and `ESC[A`/`B`/`C`/`D` become
+  single PETSCII control bytes, and anything without an equivalent -- cursor
+  addressing, a per-character background -- is still dropped, so the change can
+  only ever *add* output a Commodore never saw.
+
+  The colour table is measured rather than invented.  telnetbible.com was
+  captured rendering one screen twice, once announced as a 7-bit terminal and
+  once as a Commodore, which is a board's own reading of what each of its
+  colours means on a C64: `ESC[34m` is blue `1F`, `ESC[92m` is light green
+  `99`, `ESC[0m` is light grey `9B`.  Only black is chosen rather than
+  observed -- a C64's background is dark blue, so a faithful `90` would be
+  very nearly invisible and it maps to dark grey.
+
+- **`gateway_petscii_translate`, and `serial_*_gateway_petscii` per port** --
+  whether a gateway translates for a Commodore, or steps aside because the far
+  end already understands one.  A board that does its own terminal detection
+  recognises the C64 from its erase byte and serves native PETSCII in its own
+  40-column layout, which is better than any translation of ours because it
+  knows its own content; translating on top of it would case-swap text the
+  board had already swapped.
+
+  It is the same judgement as `AT+PETSCII` on a dialled connection, one link
+  further out, and deliberately shares that key's name and polarity.  It exists
+  because `ATDT` cannot reach everything: a board served only over SSH has no
+  direct-dial route, so the gateway menu is the only place the choice can be
+  made.  Per port because that is where an operator is already thinking about
+  the machine plugged in; `default` defers to the server-wide key, which is
+  what a Commodore arriving over telnet on a WiFi modem uses, having no port to
+  speak for it.
+
+- **A Commodore's cursor keys reach the host.**  They were forwarded raw, and
+  CRSR DOWN is `0x11` -- XON -- so a host with software flow control read a
+  cursor key as permission to resume sending.  They become the ANSI sequences a
+  host understands.
+
+### Changed
+
+- **The back-arrow reaches the remote as ESC.**  A C64 has no key marked ESC
+  and this gateway has always treated the back-arrow as one, at every prompt
+  and on every screen that says to press it twice to disconnect -- but it went
+  out to the far end as `0x5F`, an underscore, so the one key a Commodore user
+  believes is ESC did nothing there.  The cost is that an underscore can no
+  longer be typed at a remote from a C64; `CTRL+:` remains a second ESC, and
+  the gateway banners now say so, which nothing did before.
+
+- **Only the back-arrow ends a PETSCII gateway session.**  `is_esc_key` accepts
+  both `0x1B` and the back-arrow, which is right at a prompt where either
+  should cancel and wrong inside a live bridge, where it made both count toward
+  the double-press that leaves.  A C64 *can* send a real ESC, so pressing it
+  twice at a remote's prompt -- idiomatic in vi and in half the BBS menus in
+  existence -- dropped the connection instead of reaching the host.
+
+### Fixed
+
+- **Extended colour was read as basic colour.**  `ESC[38;5;n` and
+  `ESC[38;2;r;g;b` sub-parameters were matched against the ordinary colour
+  codes: a 256-colour blue arrived yellow, and `ESC[48;5;n` -- a *background*
+  request -- set the foreground.  Any modern host through the SSH Gateway emits
+  these.  The first sixteen indices of the cube are the basic sixteen and
+  translate exactly; the rest is dropped.
+
+- **An unterminated string sequence silenced the terminal.**  The CSI parser
+  has always had a length cap; the OSC/DCS one had none, so a host emitting an
+  unterminated `ESC ]`, or a stray `1B 5D` in a stream, swallowed every byte
+  after it for the rest of the session.
+
+- **The C64's INST/DEL erases in AT command mode whatever the far end speaks.**
+  It was accepted only under `AT+PETSCII=1`, so the setting a PETSCII-aware
+  board needs was the setting that left the key dead while typing `ATDT`.  The
+  echo is chosen from the byte that arrived rather than from a mode flag, so a
+  Commodore and an ASCII terminal both edit correctly on one port with no
+  configuration.
+
+- **The character troubleshooting screen names a shifted Commodore key.**
+  Every control code and cursor key was named and the whole shifted set fell
+  through to a bare hex number.  SHIFT LOCK is a latching key whose effect is
+  asymmetric -- shifted letters are translated back to ASCII everywhere, so
+  menus keep working, while shifted punctuation matches nothing -- so a caller
+  sees most of the product work and two keys die, which reads as a bug in those
+  two keys.  The screen now says `C64 SHIFT-R`, and asks once whether SHIFT
+  LOCK is down.
+
 ## [0.9.6] - 2026-08-29
 
 ### Added
@@ -6449,7 +6540,8 @@ Otherwise the gateway will create fresh files and SSH clients will see a
 - Windows build fix for `GetDiskFreeSpaceExW`.
 - S-register persistence via `AT&W`.
 
-[Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v0.9.6...HEAD
+[Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v0.9.7...HEAD
+[0.9.7]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.9.7
 [0.9.6]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.9.6
 [0.9.5]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.9.5
 [0.9.4]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.9.4
