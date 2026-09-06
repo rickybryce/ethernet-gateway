@@ -43,6 +43,33 @@ cp -f payloads/* run/ethernetgateway-data/transfer/ 2>/dev/null
 
 if [ "$LINK" = serial ]; then
     sed -i 's/^serial_a_enabled = .*/serial_a_enabled = true/' run/ethernetgateway-data/egateway.conf
+    # **Make the wire.**  `serial_a_port` names run/ttyGW and VICE is handed
+    # run/ttyC64; both are symlinks socat creates, and nothing created them --
+    # the first serial run made the pair by hand, and it died at the next
+    # reboot leaving two symlinks pointing at /dev/pts entries that no longer
+    # exist.  VICE then opens nothing and the gateway cannot open its port,
+    # which presents as a serial link that simply does not carry: no CONNECT,
+    # no bytes, and nothing in either log naming a cause.
+    #
+    # It has to happen before the gateway starts, because the gateway opens
+    # its serial port at launch and a missing port is not retried.  `raw` is
+    # not optional: a cooked line discipline maps CR to LF and would corrupt
+    # every block of every protocol, identically on each retry, past any CRC.
+    pkill -f "socat.*ttyGW" 2>/dev/null
+    rm -f run/ttyGW run/ttyC64
+    socat pty,raw,echo=0,link="$HERE/run/ttyGW" \
+          pty,raw,echo=0,link="$HERE/run/ttyC64" > socat.log 2>&1 &
+    # socat creates the links asynchronously; a gateway that wins the race
+    # finds no port at all.  Wait for both, and say so rather than starting a
+    # run that cannot work.
+    for _ in $(seq 1 50); do
+        [ -e run/ttyGW ] && [ -e run/ttyC64 ] && break
+        sleep 0.1
+    done
+    if [ ! -e run/ttyGW ] || [ ! -e run/ttyC64 ]; then
+        echo "FATAL: socat did not create the PTY pair; see socat.log" >&2
+        exit 1
+    fi
     RS=(-rsdev1 "$HERE/run/ttyC64" -rsdev1baud 2400); DIALNO=ethernetgateway
 else
     sed -i 's/^serial_a_enabled = .*/serial_a_enabled = false/' run/ethernetgateway-data/egateway.conf
