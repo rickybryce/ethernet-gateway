@@ -452,20 +452,43 @@ pub(crate) async fn xmodem_receive_batch(
             Ok(Ok(b)) => b,
             Ok(Err(e)) => return Err(e),
             Err(_) => {
-                // Spec receiver recovery (Forsberg/Christensen): a missing or
-                // late block is recovered by NAKing to re-prompt the sender —
-                // which retransmits the block it is still awaiting an ACK for —
-                // not by an immediate abort.  Share the block-error retry
-                // counter so a flapping link is bounded the same way; only
-                // after `max_retries` consecutive failures do we cancel.
-                error_count += 1;
-                if error_count > max_retries {
-                    raw_write_bytes(writer, &[CAN, CAN, CAN], is_tcp).await?;
-                    return Err("Transfer timeout: no data after retries".into());
+                // **A NAKed EOT answered by silence is a finished sender, not
+                // a lost block.**  The two are distinguishable, which is what
+                // lets the spurious-EOT guard survive intact: a *noise* EOT
+                // leaves the sender still awaiting an ACK for the block it
+                // has in flight, so our NAK makes it retransmit and we see a
+                // block, not silence.  A sender that has genuinely finished
+                // has nothing left to send — and not every sender answers
+                // NAK-of-EOT with a second EOT.
+                //
+                // Measured: NovaTerm 9.6c does not.  Its XMODEM upload of a
+                // 1775-byte file delivered all 14 blocks with good CRCs, we
+                // ACKed the last one, it sent EOT, we NAKed to verify, and it
+                // said nothing further — the C64 showing "bytes sent: 1775"
+                // and no error while this end NAKed to `max_retries`, sent
+                // CAN CAN CAN and threw the whole file away.  Accepting a
+                // correctly received file is worth more than insisting on a
+                // confirmation the spec cannot make a sender send.
+                if eot_naked && !file_data.is_empty() {
+                    if verbose { glog!("XMODEM recv: no answer to the EOT NAK — sender is done, accepting"); }
+                    EOT
+                } else {
+                    // Spec receiver recovery (Forsberg/Christensen): a missing
+                    // or late block is recovered by NAKing to re-prompt the
+                    // sender — which retransmits the block it is still awaiting
+                    // an ACK for — not by an immediate abort.  Share the
+                    // block-error retry counter so a flapping link is bounded
+                    // the same way; only after `max_retries` consecutive
+                    // failures do we cancel.
+                    error_count += 1;
+                    if error_count > max_retries {
+                        raw_write_bytes(writer, &[CAN, CAN, CAN], is_tcp).await?;
+                        return Err("Transfer timeout: no data after retries".into());
+                    }
+                    if verbose { glog!("XMODEM recv: inter-block timeout, NAK (retry {}/{})", error_count, max_retries); }
+                    raw_write_byte(writer, NAK, is_tcp).await?;
+                    continue;
                 }
-                if verbose { glog!("XMODEM recv: inter-block timeout, NAK (retry {}/{})", error_count, max_retries); }
-                raw_write_byte(writer, NAK, is_tcp).await?;
-                continue;
             }
         };
 
@@ -3506,6 +3529,63 @@ mod tests {
             data, expected,
             "both blocks must survive — a spurious EOT must not truncate the file",
         );
+    }
+
+    /// **A NAKed EOT answered by silence is a finished sender, not a lost
+    /// block.**  Not every sender resends the EOT: NovaTerm 9.6c answers the
+    /// verification NAK with nothing at all.  This end used to NAK to
+    /// `max_retries`, send CAN CAN CAN and discard a file whose every block
+    /// had arrived with a good CRC — measured, a 1775-byte upload lost in
+    /// full while the C64 reported "bytes sent: 1775" and no error.
+    ///
+    /// This does not weaken the spurious-EOT guard, and the two tests are the
+    /// pair that says why.  A *noise* EOT leaves the sender still waiting for
+    /// an ACK it has not had, so the NAK draws a retransmitted block —
+    /// `test_xmodem_receive_naks_spurious_eot_then_recovers`, directly above,
+    /// which still passes.  Only a sender with nothing left to send answers
+    /// with silence.
+    #[tokio::test(start_paused = true)]
+    async fn test_xmodem_receive_accepts_when_the_eot_nak_goes_unanswered() {
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+
+        let recv_task = tokio::spawn(async move {
+            xmodem_receive(&mut recv_read, &mut recv_write, false, false, false).await
+        });
+
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), CRC_REQUEST);
+        send_write.write_all(&make_crc_data_block(1, 0x41)).await.unwrap();
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), ACK);
+        send_write.write_all(&make_crc_data_block(2, 0x42)).await.unwrap();
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), ACK);
+
+        // End of file.  The receiver NAKs to verify, per Forsberg…
+        raw_write_byte(&mut send_write, EOT, false).await.unwrap();
+        assert_eq!(
+            raw_read_byte(&mut send_read, false).await.unwrap(),
+            NAK,
+            "the first EOT is still NAKed — the guard is unchanged",
+        );
+
+        // …and this sender says nothing further, as NovaTerm does not.
+        // Advance past the block timeout: the receiver must ACK and finish.
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(25)).await;
+        assert_eq!(
+            raw_read_byte(&mut send_read, false).await.unwrap(),
+            ACK,
+            "silence after the EOT NAK must be accepted as end-of-file, not \
+             NAK-looped into a cancel",
+        );
+
+        let (data, _) = recv_task.await.unwrap().expect(
+            "a file whose every block arrived must not be discarded because \
+             the sender did not resend its EOT",
+        );
+        let mut expected = vec![0x41u8; XMODEM_BLOCK_SIZE];
+        expected.extend_from_slice(&[0x42u8; XMODEM_BLOCK_SIZE]);
+        assert_eq!(data, expected, "both blocks must survive");
     }
 
     /// Spec D3: in the data phase, a valid block (good CRC + complement)
