@@ -68,7 +68,21 @@ rc=0
 for spec in "$@"; do
     proto="${spec%%:*}"; dir="${spec##*:}"
     echo "=============== $proto $dir over $LINK"
-    ./one-run.sh "$proto" "$dir" "$LINK" > "$OUT/$proto-$dir.screen" 2>&1
+    # **A run that did not happen must not be graded.**  `one-run.sh` can abort
+    # before it starts anything -- a missing PTY pair, a gateway that will not
+    # launch -- and the transfer directory and the disk image are still sitting
+    # there from the run before.  Grading them reads the PREVIOUS run's result
+    # as this one's, which is the same defect as verifying by name, one level
+    # up: it reported a protocol failure once, and could as easily have
+    # reported a pass.
+    if ! ./one-run.sh "$proto" "$dir" "$LINK" > "$OUT/$proto-$dir.screen" 2>&1; then
+        tail -20 "$OUT/$proto-$dir.screen"
+        archive "$proto" "$dir"
+        echo "--- bytes:"
+        echo "    FAIL — the run itself did not complete; nothing was graded"
+        rc=1
+        continue
+    fi
     tail -20 "$OUT/$proto-$dir.screen"
     archive "$proto" "$dir"
     echo "--- bytes:"

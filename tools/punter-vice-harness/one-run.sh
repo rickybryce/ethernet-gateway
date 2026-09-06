@@ -66,7 +66,17 @@ if [ "$LINK" = serial ]; then
     # its serial port at launch and a missing port is not retried.  `raw` is
     # not optional: a cooked line discipline maps CR to LF and would corrupt
     # every block of every protocol, identically on each retry, past any CRC.
+    # **Wait for the old socat to actually die before making a new pair.**
+    # `pkill` only sends the signal, and socat REMOVES its `link=` symlinks on
+    # the way out -- so killing it, creating a new pair, and letting the old
+    # one exit afterwards has the dying process unlink the symlinks the new one
+    # just made.  The pair then vanishes under a run that had already checked
+    # for it, and the guard below reports a failure that is really a race.
     pkill -f "socat.*ttyGW" 2>/dev/null
+    for _ in $(seq 1 50); do
+        pgrep -f "socat.*ttyGW" >/dev/null 2>&1 || break
+        sleep 0.1
+    done
     rm -f run/ttyGW run/ttyC64
     socat pty,raw,echo=0,link="$HERE/run/ttyGW" \
           pty,raw,echo=0,link="$HERE/run/ttyC64" > socat.log 2>&1 &
@@ -113,4 +123,12 @@ done
 DISPLAY=:0 timeout 60 python3 -c "
 import novaterm,time; nt=novaterm.NovaTerm(); nt.keys.focus(); nt.keys.combo('Alt_L','w'); time.sleep(2)" \
     2>/dev/null >/dev/null
-DISPLAY=:0 timeout 560 python3 run-transfer.py "$PROTO" "$DIR" "$DIALNO" 2>&1 | grep -v "X protocol\|Xlib"
+# **Report the transfer's status, not grep's.**  Ending on a pipe made this
+# script exit with the filter's status: `grep -v` answers 0 when it printed
+# something and 1 when it did not, so a failed run whose output happened to
+# contain a line looked like a success, and a silent success looked like a
+# failure.  `sweep.sh` refuses to grade a run that did not complete, so this
+# status has to be the real one.
+DISPLAY=:0 timeout 560 python3 run-transfer.py "$PROTO" "$DIR" "$DIALNO" 2>&1 \
+    | grep -v "X protocol\|Xlib"
+exit "${PIPESTATUS[0]}"
