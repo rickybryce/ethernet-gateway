@@ -55,7 +55,14 @@ def main():
         time.sleep(1.0)
         nt.keys.focus(); nt.keys.combo('Tab', 'd')
         time.sleep(4.0)
-        nt.type('%s\n' % name[:8], 2.0)     # save-as on the C64
+        # **Ask the dialog what it wants.**  It differs per protocol: Punter
+        # and the XMODEM family prompt for a save-as name, while YMODEM and
+        # ZMODEM carry the name in band and prompt for nothing.  Typing a name
+        # blindly at those two sends it to the terminal instead, the receiver
+        # never starts, and the gateway reports "Timeout waiting for receiver
+        # to start" -- which looks like the protocol failing to negotiate.
+        if any('.ile:' in l or 'ile:' in l for l in nt.text()):
+            nt.type('%s\n' % name[:8], 2.0)
         # NovaTerm's download dialog asks different follow-up questions per
         # protocol, and any pause here is spent against the gateway's
         # 45-second window: answer them immediately or the transfer aborts

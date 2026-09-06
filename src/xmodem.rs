@@ -1271,6 +1271,23 @@ pub(crate) async fn xmodem_send(
                 ReadErr(String),
                 Timeout,
             }
+            // A receiver repeats its start request until data arrives, so a
+            // stray `C` can still be in flight when the first data block goes
+            // out.  **`C` is never a valid response to a block** -- ACK, NAK
+            // and CAN are -- so absorb it and go on waiting for the real one.
+            //
+            // Getting this wrong is not a lost byte, it is a dead transfer.
+            // The sender read the extra `C` as block 1's response, called it
+            // "unexpected", resent the block, and desynchronised into a NAK
+            // loop that never recovered.  Measured against NovaTerm 9.6c,
+            // which sends `C` on a timer after ACKing YMODEM's block 0; lrzsz
+            // does not, which is why every fixture and interop test passed.
+            //
+            // Bounded, because a receiver that only ever sends `C` must still
+            // fall through to the ordinary retry path rather than hold this
+            // loop open by resetting its timeout on every byte.
+            const MAX_STRAY_START_REQUESTS: u32 = 8;
+            let mut stray_c = 0u32;
             let response = loop {
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(block_timeout),
@@ -1285,6 +1302,16 @@ pub(crate) async fn xmodem_send(
                         }
                         if byte == CAN {
                             if verbose { glog!("XMODEM send: single CAN at block #{} treated as line noise", block_idx + 1); }
+                            continue;
+                        }
+                        if byte == CRC_REQUEST {
+                            stray_c += 1;
+                            if verbose { glog!(
+                                "XMODEM send: stale 'C' at block #{} ({} of {}), still waiting for ACK/NAK",
+                                block_idx + 1, stray_c, MAX_STRAY_START_REQUESTS); }
+                            if stray_c >= MAX_STRAY_START_REQUESTS {
+                                break Resp::Timeout;
+                            }
                             continue;
                         }
                         break Resp::Byte(byte);

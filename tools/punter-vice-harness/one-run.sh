@@ -25,6 +25,11 @@ sleep 3
 c1541 -format "xfer,01" d64 run/xfer.d64 >/dev/null 2>&1
 c1541 -attach run/xfer.d64 -write payloads/PUNTEST.SEQ "puntest,s" >/dev/null 2>&1
 rm -f run/ethernetgateway-data/transfer/*up.seq run/ethernetgateway-data/transfer/*up*.usr
+# Refresh the payloads unconditionally.  start-gateway.sh seeds them only when
+# absent, which is right for a long-lived rig and wrong for a test: changing
+# payloads/PUNTEST.SEQ then had no effect, and an experiment that varied the
+# input silently ran against the old one.
+cp -f payloads/* run/ethernetgateway-data/transfer/ 2>/dev/null
 
 if [ "$LINK" = serial ]; then
     sed -i 's/^serial_a_enabled = .*/serial_a_enabled = true/' run/ethernetgateway-data/egateway.conf
