@@ -730,8 +730,10 @@
                 <table class="ref-table">
                     <thead><tr><th>Protocol</th><th>Link</th><th>Direction</th><th>Result</th></tr></thead>
                     <tbody>
-                        <tr><td>Punter C1</td><td>Serial (PTY, 2400)</td><td>Gateway &rarr; C64</td><td class="ok">1775 bytes, 14 blocks, 17.8 s &mdash; identical</td></tr>
-                        <tr><td>Punter C1</td><td>Telnet (tcpser ip232)</td><td>Gateway &rarr; C64</td><td class="ok">identical, 0 bad blocks</td></tr>
+                        <tr><td>Punter C1</td><td>Serial (PTY, 2400)</td><td>Download &mdash; gateway &rarr; C64</td><td class="ok">identical (14 blocks, 17.8 s)</td></tr>
+                        <tr><td>Punter C1</td><td>Serial (PTY, 2400)</td><td>Upload &mdash; C64 &rarr; gateway</td><td class="ok">identical, 0 bad blocks</td></tr>
+                        <tr><td>Punter C1</td><td>Telnet (tcpser ip232)</td><td>Download &mdash; gateway &rarr; C64</td><td class="ok">identical, 0 bad blocks</td></tr>
+                        <tr><td>Punter C1</td><td>Telnet (tcpser ip232)</td><td>Upload &mdash; C64 &rarr; gateway</td><td class="ok">identical, 0 bad blocks</td></tr>
                     </tbody>
                 </table>
                 <div class="callout callout-warn">
@@ -744,6 +746,16 @@
                     got past block 0 through tcpser &mdash; 32 rejections. Agreeing to
                     BINARY, in both directions, took it to zero. The serial path was the
                     control that made this a diagnosis rather than a guess.
+                </div>
+                <div class="callout">
+                    <strong>Two notes on the upload direction.</strong> NovaTerm reports
+                    the file&rsquo;s <em>allocated</em> size &mdash; 7 blocks, 1778 bytes
+                    for a 1775-byte file &mdash; but sends the true length, and the
+                    gateway records 1775. And the saved name is derived, not taken: a
+                    requested <code>puntup.seq</code> is stored as
+                    <code>puntupseq.usr</code>, because CBM names carry no dot and the
+                    extension comes from the Punter <em>type</em> byte, which NovaTerm
+                    declares as USR for a SEQ file.
                 </div>
             </section>
 

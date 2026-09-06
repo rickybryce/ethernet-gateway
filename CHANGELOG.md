@@ -27,6 +27,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   identical on both links.  Affects every binary protocol over telnet, not only
   Punter.
 
+  Punter is now verified against a real Commodore in **all four combinations**
+  -- download and upload, over both a serial link and telnet -- each byte for
+  byte with zero bad blocks, using a payload of every byte value four times
+  over plus runs of CAN, XON, XOFF, SUB, CR, LF, FF, DEL and BS and a tail
+  spanning a block boundary.
+
 ### Added
 
 - **`web/novatermreference.html`** -- a measured reference for NovaTerm 9.6c:
