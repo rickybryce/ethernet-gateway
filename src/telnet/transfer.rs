@@ -25,6 +25,19 @@ impl TelnetSession {
         let dir_str = truncate_path_to_width(&self.transfer_dir_display(), max_dir);
         self.send_line(&format!("  Dir: {}", self.amber(&dir_str)))
             .await?;
+        // The last transfer's outcome, on the first screen the terminal draws
+        // after it -- see `TransferNote`.  Taken, so it shows once and a stale
+        // result can never be read as this visit's.
+        if let Some(note) = self.last_transfer_note.take() {
+            let max_note = if self.terminal_type == TerminalType::Petscii {
+                34
+            } else {
+                74
+            };
+            let line = truncate_to_width(&note.text, max_note);
+            let painted = if note.ok { self.green(&line) } else { self.red(&line) };
+            self.send_line(&format!("  {}", painted)).await?;
+        }
         self.send_line("").await?;
         self.send_line(&format!(
             "  {}  Upload a file",
@@ -1116,6 +1129,10 @@ impl TelnetSession {
                 elapsed.as_secs_f64()
             ))
             .await?;
+            self.last_transfer_note = Some(TransferNote {
+                ok: true,
+                text: format!("Received {} bytes in {:.1}s", bytes, elapsed.as_secs_f64()),
+            });
         } else {
             self.send_line(&format!(
                 "  {}",
@@ -1127,6 +1144,14 @@ impl TelnetSession {
                 ))
             ))
             .await?;
+            self.last_transfer_note = Some(TransferNote {
+                ok: true,
+                text: format!(
+                    "Received {} file(s), {} skipped",
+                    saved.len(),
+                    skipped.len()
+                ),
+            });
             for (name, bytes) in &saved {
                 self.send_line(&format!(
                     "  {} {} ({} bytes)",
@@ -1611,8 +1636,16 @@ impl TelnetSession {
                     elapsed.as_secs_f64()
                 ))
                 .await?;
+                self.last_transfer_note = Some(TransferNote {
+                    ok: true,
+                    text: format!("Sent {} bytes in {:.1}s", data.len(), elapsed.as_secs_f64()),
+                });
             }
             Err(e) => {
+                self.last_transfer_note = Some(TransferNote {
+                    ok: false,
+                    text: format!("Download failed: {}", e),
+                });
                 self.send_line("").await?;
                 self.send_line(&format!(
                     "  {}",
@@ -1633,6 +1666,14 @@ impl TelnetSession {
             }
         }
 
+        // **Drain before asking for a keypress.**  `wait_for_key` reads the
+        // next byte off the same stream the protocol was just using, so a
+        // trailing teardown byte counted as the user pressing a key: measured
+        // with Punter, whose C1 teardown leaves one, the summary was dismissed
+        // and the menu redrawn within a second or two -- while the terminal
+        // was still showing its own transfer display, so nobody ever saw the
+        // result.  A protocol byte is not a keystroke.
+        self.post_transfer_settle().await;
         self.send_line("").await?;
         self.send("  Press any key to continue.").await?;
         self.flush().await?;

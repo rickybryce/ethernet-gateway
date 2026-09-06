@@ -680,6 +680,7 @@ fn make_test_session(terminal_type: TerminalType) -> TelnetSession {
         peer_addr: None,
         transfer_subdir: String::new(),
         xmodem_iac: false,
+        last_transfer_note: None,
         web_lines: Vec::new(),
         web_scroll: 0,
         web_links: Vec::new(),
@@ -736,6 +737,7 @@ pub(in crate::telnet) fn make_test_session_with_peer(
         peer_addr: None,
         transfer_subdir: String::new(),
         xmodem_iac: false,
+        last_transfer_note: None,
         web_lines: Vec::new(),
         web_scroll: 0,
         web_links: Vec::new(),
@@ -9671,4 +9673,79 @@ fn test_an_unterminated_string_sequence_cannot_silence_an_ascii_client() {
     ok.extend_from_slice(b"\x07after");
     filter_gateway_output(&ok, &mut st, &mut out);
     assert_eq!(out, b"after".to_vec());
+}
+
+/// The last transfer's outcome must reach the next screen the terminal draws,
+/// and must do so exactly once.
+///
+/// A vintage terminal takes the screen for a transfer and restores it
+/// afterwards, so the summary printed at the moment a transfer ends is thrown
+/// away -- measured on a C64 under NovaTerm 9.6c, a byte-perfect XMODEM-1K
+/// download left the user looking at the restored "Start XMODEM-1K receive
+/// now" text with nothing to say it had worked.  Carrying the result to the
+/// menu needs no timing guess, which every other fix here would have been.
+#[tokio::test]
+async fn test_the_transfer_outcome_reaches_the_next_menu_once() {
+    let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Petscii);
+    use tokio::io::AsyncReadExt;
+
+    session.last_transfer_note = Some(TransferNote {
+        ok: true,
+        text: "Sent 1775 bytes in 17.8s".into(),
+    });
+    session.render_file_transfer().await.unwrap();
+    session.flush().await.unwrap();
+
+    let mut buf = vec![0u8; 8192];
+    let n = peer.read(&mut buf).await.unwrap();
+    let first = String::from_utf8_lossy(&buf[..n]).to_string();
+    assert!(
+        first.to_ascii_lowercase().contains("1775"),
+        "the menu must state the outcome of the transfer just finished; got:\n{}",
+        first
+    );
+
+    // **Taken, not copied.**  A second visit must not show a stale result as
+    // though it were this visit's -- that is the same defect as grading a run
+    // by a file left over from the run before.
+    assert!(
+        session.last_transfer_note.is_none(),
+        "the note must be cleared once drawn"
+    );
+    session.render_file_transfer().await.unwrap();
+    session.flush().await.unwrap();
+    let n2 = peer.read(&mut buf).await.unwrap();
+    let second = String::from_utf8_lossy(&buf[..n2]).to_string();
+    assert!(
+        !second.contains("1775"),
+        "a drawn note must not appear again on the next menu; got:\n{}",
+        second
+    );
+}
+
+/// Every outcome line has to fit the narrowest screen that shows it.
+///
+/// A PETSCII terminal is 40 columns and `truncate_to_width` does not wrap --
+/// it silently loses the end, which on these lines is the byte count, the
+/// whole point of the message.
+#[test]
+fn test_the_transfer_outcome_fits_a_40_column_screen() {
+    // The widest each phrasing can get with realistic values.
+    let notes = [
+        format!("Sent {} bytes in {:.1}s", u32::MAX, 9999.9),
+        format!("Received {} bytes in {:.1}s", u32::MAX, 9999.9),
+        format!("Received {} file(s), {} skipped", 999, 999),
+    ];
+    for n in &notes {
+        // 34 is the budget render_file_transfer gives the note on PETSCII,
+        // inside a 40-column screen with a two-space indent.
+        let line = truncate_to_width(n, 34);
+        assert!(
+            line.chars().count() <= 34,
+            "{:?} does not fit a PETSCII screen",
+            n
+        );
+    }
+    // A short note is untouched -- the common case must not be elided.
+    assert_eq!(truncate_to_width("Sent 1775 bytes in 17.8s", 34), "Sent 1775 bytes in 17.8s");
 }

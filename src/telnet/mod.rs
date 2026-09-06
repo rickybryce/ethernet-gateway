@@ -931,6 +931,27 @@ pub async fn broadcast_to_sessions(writers: &SessionWriters, msg: &[u8], close: 
 
 // ─── TelnetSession ──────────────────────────────────────────
 
+/// The outcome of the last file transfer, shown once on the next menu draw.
+///
+/// **A vintage terminal takes the screen for a transfer and restores it
+/// afterwards**, so anything printed at the instant a transfer ends is thrown
+/// away: measured on a C64 under NovaTerm 9.6c, a byte-perfect XMODEM-1K
+/// download left the user looking at the restored "Start XMODEM-1K receive
+/// now" text with no sign it had worked.  No amount of waiting fixes that --
+/// the pause before printing was already a guess, and lengthening it only
+/// moves the race.
+///
+/// So the result is carried to the next screen the terminal actually draws.
+/// Whatever it did during the transfer, the menu it returns to says what
+/// happened.  Named fields rather than a `(bool, String)` so the pair cannot
+/// be swapped at a call site.
+pub(in crate::telnet) struct TransferNote {
+    /// Whether the transfer succeeded, which picks the colour.
+    pub(in crate::telnet) ok: bool,
+    /// One line, already phrased for a 40-column screen.
+    pub(in crate::telnet) text: String,
+}
+
 pub(crate) struct TelnetSession {
     reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>,
     writer: SharedWriter,
@@ -951,6 +972,9 @@ pub(crate) struct TelnetSession {
     peer_addr: Option<IpAddr>,
     transfer_subdir: String,
     xmodem_iac: bool,
+    /// Outcome of the last transfer, drawn once by `render_file_transfer`
+    /// and cleared -- see `TransferNote`.
+    pub(in crate::telnet) last_transfer_note: Option<TransferNote>,
     web_lines: Vec<String>,
     web_scroll: usize,
     web_links: Vec<String>,
@@ -1088,6 +1112,7 @@ impl TelnetSession {
             peer_addr: None,
             transfer_subdir: String::new(),
             xmodem_iac: false,
+            last_transfer_note: None,
             web_lines: Vec::new(),
             web_scroll: 0,
             web_links: Vec::new(),
@@ -1149,6 +1174,7 @@ impl TelnetSession {
             peer_addr,
             transfer_subdir: String::new(),
             xmodem_iac: false,
+            last_transfer_note: None,
             web_lines: Vec::new(),
             web_scroll: 0,
             web_links: Vec::new(),
@@ -1226,6 +1252,7 @@ impl TelnetSession {
             peer_addr,
             transfer_subdir: String::new(),
             xmodem_iac: false,
+            last_transfer_note: None,
             web_lines: Vec::new(),
             web_scroll: 0,
             web_links: Vec::new(),
@@ -1873,6 +1900,7 @@ pub fn start_server(
                                     // stream.  The I toggle in the File Transfer menu
                                     // still lets the user override per-session.
                                     xmodem_iac: false,
+                                    last_transfer_note: None,
                                     web_lines: Vec::new(),
                                     web_scroll: 0,
                                     web_links: Vec::new(),

@@ -620,10 +620,28 @@ pub(crate) async fn xmodem_receive_batch(
                 // sender that skipped the terminator) just ends the batch.
                 if verbose { glog!("XMODEM recv: YMODEM inter-file, sending 'C'"); }
                 raw_write_byte(writer, CRC_REQUEST, is_tcp).await?;
+                // **Its own bound, not the block timeout.**  The file just
+                // finished is already complete and committed; the only
+                // question left is whether another one follows, and a sender
+                // with more to send is already in its send loop.  Bounding
+                // this by `xmodem_block_timeout` -- which governs a peer that
+                // has gone silent *mid-transfer*, where 20 s is right -- spent
+                // that whole time at the end of every transfer from a sender
+                // that never emits the end-of-batch block, which is most
+                // vintage ones.  Measured: NovaTerm 9.6c sends nothing at all
+                // here, so every YMODEM upload ended in 20 s of apparent hang
+                // with the file already safely written.
+                //
+                // Ten seconds still leaves a real batch sender far more than
+                // it needs to open its next file (a 1541 directory open is a
+                // second or two), and a shorter configured block timeout still
+                // wins, so the setting can only tighten this.
+                const INTER_FILE_WAIT_SECS: u64 = 10;
+                let inter_file_timeout = block_timeout.min(INTER_FILE_WAIT_SECS);
                 let mut b0_attempt: usize = 0;
                 let inter = loop {
                     let outcome = tokio::time::timeout(
-                        std::time::Duration::from_secs(block_timeout),
+                        std::time::Duration::from_secs(inter_file_timeout),
                         async {
                             let b = nvt_read_byte(reader, is_tcp, state).await?;
                             if b != SOH {
