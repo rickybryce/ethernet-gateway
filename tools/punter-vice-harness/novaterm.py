@@ -90,40 +90,33 @@ class NovaTerm:
         """
         self.press('BackSpace', settle)
 
-    def hangup(self, tries=3):
-        """Drop the call and **confirm** it dropped.
+    def hangup(self, tries=4):
+        """Drop the call and **prove** we are in command mode.
 
-        Every run that skipped this typed its dial string into whatever menu
-        the previous session had left on screen -- `atdt ethernetgateway`
-        became a `t` selecting Telnet Gateway and the rest going into its Host
-        field.  A dial is only safe from a known state, and the only evidence
-        of that state is NovaTerm saying so.
+        Reading scrollback for "no carrier" was guesswork twice over: the
+        message only appears when there was a call to drop, and NovaTerm's own
+        "Hanging up..." is a statement of intent, not of outcome -- on a socat
+        PTY it drops DTR, which a PTY does not carry, so nothing happens.
+
+        So this asks the modem instead: `AT` must be answered with `OK`.  A
+        positive control, not the absence of a symptom.
         """
-        def on_hook():
+        def responds():
+            self.type("at\n", 2.5)
             lines = [l.strip() for l in self.text() if l.strip()]
-            if any("no carrier" in l for l in lines):
-                return True
-            # `ATH` answered with `OK` and nothing after it: the modem is in
-            # command mode and on-hook.  Requiring "no carrier" was wrong --
-            # that only appears when there was a call to drop, so a already-
-            # idle modem could never satisfy it.
             return bool(lines) and lines[-1] == "ok"
 
         for attempt in range(tries):
-            if on_hook():
-                return True
             if attempt == 0:
-                # NovaTerm's own hangup drops DTR, and **a socat PTY carries no
-                # modem control lines at all**, so on this rig it says "Hanging
-                # up..." and nothing happens.  The Hayes in-band escape does
-                # not need DTR: `+++`, a guard time, then `ATH`.
                 self.keys.focus()
-                self.keys.combo("Tab", "h")
+                self.keys.combo("Tab", "h")     # NovaTerm's own hangup
                 time.sleep(3.0)
             else:
-                self.type("+++", 2.5)      # guard time either side, no CR
-                self.type("ath\n", 3.0)
-        return on_hook()
+                self.type("+++", 2.5)           # Hayes in-band escape, needs
+                self.type("ath\n", 3.0)        # no DTR
+            if responds():
+                return True
+        return False
 
     def dial(self, number="ethernetgateway", settle=9.0):
         """Hang up, then dial, from a state we have checked rather than assumed."""

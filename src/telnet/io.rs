@@ -429,6 +429,46 @@ impl TelnetSession {
         opt: u8,
     ) -> Result<(), std::io::Error> {
         match cmd {
+            // **RFC 856 BINARY: agree, both ways.**  A transfer's bytes are
+            // 8-bit data and this server already treats them that way -- it
+            // applies no NVT CR-NUL stuffing (see `tnio`) -- so refusing the
+            // option told a peer the opposite of what we do.  An NVT-conformant
+            // peer then applies text rules to Punter/XMODEM/ZMODEM blocks and
+            // the transfer fails in a way that looks like a protocol bug:
+            // measured with a real NovaTerm, byte-perfect over serial and
+            // stuck on block 0 through a telnet peer that had just been told
+            // `DONT BINARY`.
+            DO if opt == OPT_BINARY => {
+                if !self.neg_sent_will[OPT_BINARY as usize] {
+                    self.neg_sent_will[OPT_BINARY as usize] = true;
+                    self.send_telnet_protocol(&[IAC, WILL, OPT_BINARY]).await?;
+                    self.flush().await?;
+                }
+            }
+            DONT if opt == OPT_BINARY => {
+                // The peer withdrew it; stop claiming we send binary.  Our own
+                // bytes do not change -- there is no text mode to fall back to
+                // for a file -- but the negotiation state must stay honest.
+                if self.neg_sent_will[OPT_BINARY as usize] {
+                    self.neg_sent_will[OPT_BINARY as usize] = false;
+                    self.send_telnet_protocol(&[IAC, WONT, OPT_BINARY]).await?;
+                    self.flush().await?;
+                }
+            }
+            WILL if opt == OPT_BINARY => {
+                if !self.neg_sent_do[OPT_BINARY as usize] {
+                    self.neg_sent_do[OPT_BINARY as usize] = true;
+                    self.send_telnet_protocol(&[IAC, DO, OPT_BINARY]).await?;
+                    self.flush().await?;
+                }
+            }
+            WONT if opt == OPT_BINARY => {
+                if self.neg_sent_do[OPT_BINARY as usize] {
+                    self.neg_sent_do[OPT_BINARY as usize] = false;
+                    self.send_telnet_protocol(&[IAC, DONT, OPT_BINARY]).await?;
+                    self.flush().await?;
+                }
+            }
             DO if opt == OPT_TIMING_MARK => {
                 // RFC 860: DO TIMING-MARK is a one-shot synchronization
                 // request — reply with WILL TIMING-MARK *after* we have

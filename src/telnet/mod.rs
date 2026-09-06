@@ -155,6 +155,20 @@ const MAX_SB_BODY_BYTES: usize = 8192;
 const SB_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 // Telnet options
+/// RFC 856 TRANSMIT-BINARY.
+///
+/// **We already behave as though this is on**, and used to refuse to say so.
+/// `tnio.rs` deliberately applies no NVT CR-NUL stuffing to a transfer -- see
+/// its module comment -- because a file's bytes are 8-bit data, not text.  But
+/// the negotiation catch-all refused every option it did not name, so a peer
+/// offering BINARY was told `DONT`/`WONT` and then, being NVT-conformant,
+/// applied text rules to our binary blocks.
+///
+/// Measured 2026-09-06 with a real NovaTerm: over a serial link a Punter
+/// download of 1775 bytes arrives byte for byte, and through tcpser -- which
+/// logs `Disabling telnet binary xmit/recv` after our refusal -- block 0 is
+/// rejected for ever.  Same payload, same protocol, same peer.
+const OPT_BINARY: u8 = 0x00;
 const OPT_ECHO: u8 = 0x01;
 const OPT_SGA: u8 = 0x03;
 /// RFC 859 — Status.

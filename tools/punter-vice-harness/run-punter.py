@@ -25,7 +25,12 @@ def main():
     nt.press('Return', 3.0)
     time.sleep(10.0)                      # NovaTerm loads prt.Punter from disk
 
-    nt.dial('ethernetgateway')            # hangs up first, and checks it worked
+    # The dial string depends on which link is under test: over the serial
+    # PTY the gateway's own modem answers `ethernetgateway`, while over ip232
+    # it is tcpser's phonebook that answers, where `1` is mapped to the
+    # gateway.  Dialling the wrong one simply never connects.
+    number = sys.argv[1] if len(sys.argv) > 1 else 'ethernetgateway'
+    nt.dial(number)                       # hangs up first, and checks it worked
     nt.inst_del(3.5)                      # PETSCII detection
     nt.type('n', 3.0)                     # no colour
     nt.type('f', 3.0)                     # File Transfer

@@ -102,6 +102,12 @@ web/telnetreference.html
 web/punterreference.html     # <title>, .hdr-version, footer
 web/sshreference.html        # <title>, .hdr-version, footer
 web/cpmreference.html        # <title>, .hdr-version, footer
+web/novatermreference.html   # <title>, .hdr-tagline version, .hdr-version, footer
+#                              ADDED 2026-09-06, and listed here in the same
+#                              commit -- which is the rule diskreference.html
+#                              was added without, and it then carried a stale
+#                              version for two releases because nothing here
+#                              named it.
 web/diskreference.html       # <title>, .hdr-version, footer
 #                              ADDED 2026-08-01 and missed by this list until
 #                              2026-08-09.  It said 0.9.0 only because it was

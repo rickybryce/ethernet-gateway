@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.9.8] - Unreleased
 
+### Fixed
+
+- **The gateway refused RFC 856 BINARY while already sending binary.**  A file
+  transfer's bytes are 8-bit data, and this server has always treated them that
+  way -- `tnio` applies no NVT CR-NUL stuffing, by explicit decision.  But the
+  telnet negotiation catch-all refused every option it did not name, so a peer
+  offering BINARY was told `WONT`/`DONT` and then, being NVT-conformant, applied
+  text rules to the transfer.  The gateway was telling peers the opposite of
+  what it did.
+
+  Found with a real Commodore, and diagnosed by having a control: NovaTerm 9.6c
+  in VICE receives the same 1775-byte Punter payload **byte for byte over a
+  serial link**, and through a telnet peer that had just been told
+  `DONT BINARY` it never got past block 0 -- 32 rejections and still going.
+  Agreeing to BINARY, in both directions, took it to zero and the file arrives
+  identical on both links.  Affects every binary protocol over telnet, not only
+  Punter.
+
+### Added
+
+- **`web/novatermreference.html`** -- a measured reference for NovaTerm 9.6c:
+  the `C=` terminal commands, the settings a transfer needs, how to drive it
+  under VICE, and the results per protocol.
+- **An automated Punter gate against a real C64.**  `tools/punter-vice-harness`
+  now drives NovaTerm with no human in the loop -- reading its screen through
+  VICE's monitor and typing at it with X11 XTEST -- so the Punter *send* path,
+  which has no fixture and no Linux peer that speaks the protocol, finally has
+  an automated peer.
+
+
 ## [0.9.7] - 2026-09-06
 
 ### Added

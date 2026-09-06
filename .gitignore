@@ -50,3 +50,8 @@ transfer/CPM/
 /ethernetgateway-data/
 diskcontrollerplan.md
 EGT8080/tools/__pycache__/
+# Bare, so it matches at ANY depth.  The line above has a slash and is
+# therefore anchored, which is why it never covered
+# tools/punter-vice-harness/__pycache__ -- the same anchoring trap that let a
+# generated key escape .gitignore when the data directory moved.
+__pycache__/

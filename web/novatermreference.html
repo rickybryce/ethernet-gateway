@@ -1,0 +1,759 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NovaTerm 9.6 Reference &mdash; Ethernet Gateway v0.9.8</title>
+    <meta name="description" content="Working reference for driving NovaTerm 9.6c on a Commodore 64 against the Ethernet Gateway: the C= terminal commands, where its screen actually lives in memory, how to automate it under VICE, the settings that must be right for a file transfer, and the measured results per protocol.">
+    <style>
+        :root {
+            --green: #33ff33;
+            --cyan: #00ffff;
+            --yellow: #ffff00;
+            --white: #f0f0f0;
+            --amber: #ffcc00;
+            --magenta: #ff66ff;
+            --red: #ff4444;
+            --dim: #888888;
+            --bg: #0a0a2e;
+            --bg-dark: #060620;
+            --bg-light: #101040;
+            --border: #3333aa;
+            --border-bright: #5555ff;
+            --link: #00ccff;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        html { scroll-behavior: smooth; }
+
+        body {
+            background: var(--bg);
+            color: var(--white);
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 19px;
+            line-height: 1.6;
+        }
+
+        /* ---- Page shell (25% wider than telnetbible.com) ---- */
+        .page {
+            max-width: 1100px;
+            margin: 0 auto;
+            border-left: 2px solid var(--border);
+            border-right: 2px solid var(--border);
+            background: var(--bg-dark);
+        }
+
+        /* ---- Header ---- */
+        .site-header {
+            background: var(--bg-dark);
+            padding: 36px 32px 24px;
+            text-align: center;
+            border-bottom: 2px dashed var(--border);
+        }
+
+        .header-photos {
+            display: inline-flex;
+            justify-content: center;
+            align-items: flex-end;
+            gap: 0;
+            margin-bottom: 14px;
+            border: 1px solid var(--cyan);
+            box-shadow: 0 0 12px rgba(0, 255, 255, 0.3);
+        }
+
+        .logo-photo {
+            height: 180px;
+            width: auto;
+            display: block;
+        }
+
+        .sysop-photo {
+            height: 180px;
+            width: auto;
+            image-rendering: pixelated;
+            display: block;
+        }
+
+        .site-header h1 {
+            font-size: 2.4em;
+            color: var(--yellow);
+            letter-spacing: 4px;
+            text-transform: uppercase;
+            text-shadow: 0 0 10px rgba(255, 255, 0, 0.4);
+            line-height: 1.1;
+        }
+
+        .hdr-tagline {
+            color: var(--green);
+            font-size: 0.95em;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            margin-top: 4px;
+        }
+
+        .hdr-version {
+            display: inline-block;
+            font-size: 0.8em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            padding: 3px 12px;
+            border: 1px solid var(--green);
+            color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+            margin-top: 14px;
+        }
+
+        .hdr-badges {
+            margin-top: 10px;
+            display: flex;
+            justify-content: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .hdr-badge {
+            font-size: 0.8em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            padding: 3px 12px;
+            border: 1px solid var(--green);
+            color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+        }
+
+        /* ---- Nav ---- */
+        .site-nav {
+            background: var(--bg-light);
+            display: flex;
+            justify-content: center;
+            flex-wrap: wrap;
+            border-bottom: 1px solid var(--border);
+            padding: 2px 0;
+        }
+
+        .site-nav a {
+            color: var(--cyan);
+            text-decoration: none;
+            padding: 10px 14px;
+            font-size: 0.85em;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+
+        .site-nav a:hover {
+            color: var(--yellow);
+            background: rgba(255, 255, 0, 0.08);
+        }
+
+        /* ---- Divider ---- */
+        .divider {
+            border: none;
+            border-top: 1px dashed var(--border);
+            margin: 0;
+        }
+
+        /* ---- Content area ---- */
+        .body-content {
+            padding: 0 32px 36px;
+        }
+
+        /* ---- Section ---- */
+        .section {
+            margin-top: 28px;
+        }
+
+        .section-title {
+            color: var(--yellow);
+            font-size: 1.2em;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            text-align: center;
+            padding: 8px 0;
+            border-top: 1px solid var(--border);
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 16px;
+        }
+
+        .section > .intro {
+            font-size: 0.95em;
+            color: var(--dim);
+            margin-bottom: 16px;
+            text-align: center;
+        }
+
+        /* ---- Category headers ---- */
+        .cat {
+            font-size: 0.95em;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            color: var(--bg-dark);
+            background: var(--cyan);
+            display: inline-block;
+            padding: 2px 14px;
+            margin: 20px 0 10px;
+        }
+
+        .cat:first-of-type { margin-top: 0; }
+
+        /* ---- Paragraphs ---- */
+        p {
+            font-size: 0.95em;
+            color: var(--white);
+            margin-bottom: 12px;
+        }
+
+        .dim-text {
+            color: var(--dim);
+        }
+
+        /* ---- Feature table ---- */
+        .feature-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 6px;
+            margin-bottom: 4px;
+        }
+
+        .feature-table td {
+            padding: 8px 10px;
+            vertical-align: top;
+            font-size: 0.95em;
+            border-bottom: 1px solid rgba(51, 51, 170, 0.4);
+        }
+
+        .feature-table tr:last-child td {
+            border-bottom: none;
+        }
+
+        .feature-table .key-col {
+            width: 50px;
+            text-align: center;
+            color: var(--yellow);
+            font-weight: bold;
+            white-space: nowrap;
+        }
+
+        .feature-table .name-col {
+            color: var(--green);
+            white-space: nowrap;
+            width: 1%;
+            padding-right: 16px;
+        }
+
+        .feature-table .desc-col {
+            color: var(--dim);
+        }
+
+        /* ---- Data tables ---- */
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 10px 0 16px;
+            font-size: 0.9em;
+            /* Let wide reference tables wrap rather than widening the page. */
+            overflow-wrap: anywhere;
+        }
+
+        .data-table th {
+            background: var(--bg-light);
+            color: var(--yellow);
+            text-align: left;
+            padding: 10px 14px;
+            border: 1px solid var(--border);
+            font-weight: bold;
+            letter-spacing: 1px;
+        }
+
+        .data-table td {
+            padding: 8px 14px;
+            border: 1px solid rgba(51, 51, 170, 0.4);
+            color: var(--white);
+        }
+
+        .data-table tr:hover td {
+            background: rgba(255, 255, 0, 0.03);
+        }
+
+        .data-table code {
+            color: var(--green);
+            background: none;
+            border: none;
+            padding: 0;
+        }
+
+        /* ---- Instruction blocks ---- */
+        .instructions {
+            border: 1px solid var(--border);
+            padding: 18px 22px;
+            margin-bottom: 12px;
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .instructions h3 {
+            font-size: 1em;
+            color: var(--cyan);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+            padding-bottom: 6px;
+            border-bottom: 1px dashed var(--border);
+        }
+
+        .instructions ol, .instructions ul {
+            margin-left: 22px;
+            font-size: 0.95em;
+            color: var(--white);
+        }
+
+        .instructions ol li, .instructions ul li {
+            margin-bottom: 3px;
+            padding-left: 2px;
+        }
+
+        .instructions p {
+            font-size: 0.95em;
+            color: var(--dim);
+        }
+
+        /* ---- Code ---- */
+        code {
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 0.95em;
+            color: var(--green);
+            background: rgba(0, 0, 0, 0.4);
+            padding: 1px 6px;
+            border: 1px solid var(--border);
+            /* Long unbreakable tokens (config keys, command lines) otherwise set
+               the page's minimum width, and the WHOLE page scrolls sideways on a
+               narrow screen — which breaks reading the prose, not just the token.
+               Measured: every one of these 12 pages overflowed at 390px. */
+            overflow-wrap: anywhere;
+        }
+
+        pre {
+            background: #000000;
+            border: 1px solid var(--border);
+            padding: 16px 20px;
+            overflow-x: auto;
+            margin: 10px 0 16px;
+            line-height: 1.5;
+        }
+
+        pre code {
+            background: none;
+            border: none;
+            padding: 0;
+            color: var(--green);
+        }
+
+        .prompt-char { color: var(--amber); }
+        .output-text { color: var(--dim); }
+
+        /* ---- Callout boxes ---- */
+        .callout {
+            border: 1px solid var(--amber);
+            background: rgba(255, 204, 0, 0.05);
+            padding: 14px 22px;
+            margin: 12px 0;
+            font-size: 0.95em;
+            color: var(--dim);
+        }
+
+        .callout strong { color: var(--amber); }
+
+        .callout-info {
+            border-color: var(--cyan);
+            background: rgba(0, 255, 255, 0.03);
+        }
+
+        .callout-info strong { color: var(--cyan); }
+
+        .callout-warn {
+            border-color: var(--red);
+            background: rgba(255, 68, 68, 0.05);
+        }
+
+        .callout-warn strong { color: var(--red); }
+
+        .callout-tip {
+            border-color: var(--green);
+            background: rgba(51, 255, 51, 0.05);
+        }
+
+        .callout-tip strong { color: var(--green); }
+
+        /* ---- Menu rendering ---- */
+        .menu-block {
+            background: #000000;
+            border: 1px solid var(--green);
+            padding: 20px 28px;
+            margin: 14px 0 18px;
+            line-height: 1.8;
+        }
+
+        .menu-block .sep { color: var(--dim); }
+        .menu-block .title { color: var(--yellow); font-weight: bold; }
+        .menu-block .key { color: var(--cyan); font-weight: bold; }
+        .menu-block .label { color: var(--white); }
+        .menu-block .menu-dim { color: var(--dim); }
+        .menu-block .val { color: var(--amber); }
+
+        /* ---- Lists ---- */
+        ul, ol {
+            margin: 8px 0 14px 28px;
+            font-size: 0.95em;
+        }
+
+        li {
+            margin-bottom: 4px;
+        }
+
+        /* ---- Links ---- */
+        .body-content a {
+            color: var(--link);
+            text-decoration: none;
+        }
+
+        .body-content a:hover {
+            color: var(--yellow);
+            text-decoration: underline;
+        }
+
+        /* ---- Compat cards ---- */
+        .compat-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+
+        .compat-card {
+            border: 1px solid var(--border);
+            padding: 18px 20px;
+            background: rgba(0, 0, 0, 0.3);
+        }
+
+        .compat-card h3 {
+            font-size: 1em;
+            color: var(--cyan);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 6px;
+        }
+
+        .compat-card p {
+            font-size: 0.9em;
+            color: var(--dim);
+            line-height: 1.5;
+            margin-bottom: 0;
+        }
+
+        /* ---- Author ---- */
+        .author-block {
+            display: flex;
+            align-items: center;
+            gap: 24px;
+            border: 1px solid var(--border);
+            padding: 20px 24px;
+            background: rgba(0, 0, 0, 0.3);
+            margin-top: 12px;
+        }
+
+        .author-block img {
+            width: 180px;
+            height: auto;
+            image-rendering: pixelated;
+            border: 1px solid var(--cyan);
+            box-shadow: 0 0 8px rgba(0, 255, 255, 0.2);
+        }
+
+        .author-block .author-info h3 {
+            color: var(--cyan);
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .author-block .author-info p {
+            color: var(--dim);
+        }
+
+        /* ---- Footer ---- */
+        .site-footer {
+            background: var(--bg-dark);
+            color: var(--dim);
+            text-align: center;
+            padding: 22px 32px;
+            font-size: 0.85em;
+            border-top: 2px dashed var(--border);
+        }
+
+        .site-footer a {
+            color: var(--cyan);
+            text-decoration: none;
+        }
+
+        .site-footer a:hover { color: var(--yellow); }
+
+        /* ---- Responsive ---- */
+        @media (max-width: 900px) {
+            body { font-size: 17px; }
+            .site-header { padding: 24px 16px 16px; }
+            .site-header h1 { font-size: 1.6em; letter-spacing: 2px; }
+            .hdr-tagline { letter-spacing: 2px; font-size: 0.85em; }
+            .body-content { padding: 0 16px 28px; }
+            .site-nav a { padding: 8px 10px; font-size: 0.78em; }
+            .compat-grid { grid-template-columns: 1fr; }
+            .section-title { font-size: 1em; letter-spacing: 2px; }
+            .feature-table .desc-col { display: none; }
+            /* The two header images sit side by side in one bordered banner.  At
+               120px tall the pair is still ~420px wide, so on a phone it pushed
+               the page ~50px past the viewport.  `max-width` lets them scale down
+               together (the flex row needs `min-width: 0` to shrink an image below
+               its intrinsic width), and `height: auto` with a `max-height` cap
+               keeps the aspect ratio instead of squashing them. */
+            .header-photos { max-width: 100%; }
+            /* Prose can carry an unbreakable token too (a long URL, a wide
+               identifier).  Those live in bare text nodes, so no element's box
+               grows and the page just scrolls sideways with nothing to blame —
+               which is exactly how this one hid.  Tables shed some padding here
+               as well: three columns of 14px each is 84px of a phone's width. */
+            .body-content { overflow-wrap: anywhere; }
+            .data-table th,
+            .data-table td { padding: 6px 8px; }
+            .data-table { font-size: 0.8em; }
+            .logo-photo,
+            .sysop-photo {
+                height: auto;
+                max-height: 120px;
+                max-width: 100%;
+                min-width: 0;
+            }
+            .author-block { flex-direction: column; text-align: center; }
+        }
+    </style>
+</head>
+<body>
+    <div class="page">
+
+        <header class="site-header">
+            <div class="header-photos">
+                <img src="ricky.png" alt="Author: Ricky Bryce" class="sysop-photo">
+                <img src="ethernetgatewaylogo.png" alt="Ethernet Gateway" class="logo-photo">
+            </div>
+            <h1>Ethernet Gateway</h1>
+            <p class="hdr-tagline">NovaTerm 9.6 Reference</p>
+            <div class="hdr-version">v0.9.8</div>
+            <div class="hdr-badges">
+                <span class="hdr-badge">NovaTerm 9.6c</span>
+                <span class="hdr-badge">Commodore 64</span>
+                <span class="hdr-badge">SwiftLink</span>
+                <span class="hdr-badge">VICE</span>
+                <span class="hdr-badge">Measured</span>
+            </div>
+        </header>
+
+        <nav class="site-nav">
+            <a href="index.html">&laquo; User Manual</a>
+            <a href="#commands">C= Commands</a>
+            <a href="#settings">Settings</a>
+            <a href="#transfers">Transfers</a>
+            <a href="#automation">Automation</a>
+            <a href="#results">Results</a>
+            <a href="punterreference.html">Punter</a>
+            <a href="xmodemreference.html">XMODEM</a>
+            <a href="zmodemreference.html">ZMODEM</a>
+            <a href="kermitreference.html">Kermit</a>
+        </nav>
+
+        <div class="content">
+
+            <section id="overview">
+                <h2>What this page is</h2>
+                <p>
+                    NovaTerm 9.6c by Nick Rossi is the terminal this gateway is tested
+                    against for Commodore file transfers &mdash; it is the real peer for
+                    Punter, and it speaks the XMODEM and Kermit families too. Everything
+                    below was <strong>measured</strong> against NovaTerm 9.6c running on
+                    an emulated C64 (VICE 3.7.1) wired to the gateway, not taken from a
+                    manual. Where a fact cost a wrong turn to learn, the wrong turn is
+                    recorded with it, because the wrong turn is the useful part.
+                </p>
+            </section>
+
+            <section id="commands">
+                <h2>Terminal-mode commands</h2>
+                <p>
+                    In terminal mode NovaTerm shows
+                    <code>PRESS C= M FOR TERMINAL COMMANDS</code>. The commands are the
+                    <strong>Commodore key plus a letter</strong>. Under VICE the C= key
+                    is <strong>Tab</strong>.
+                </p>
+                <table class="ref-table">
+                    <thead><tr><th>Key</th><th>Command</th><th>Key</th><th>Command</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>C= B</code></td><td>Pause capture</td><td><code>C= P</code></td><td>Protocol</td></tr>
+                        <tr><td><code>C= D</code></td><td><strong>Download file</strong></td><td><code>C= R</code></td><td>Baud rate</td></tr>
+                        <tr><td><code>C= E</code></td><td>Local echo</td><td><code>C= S</code></td><td>Status line</td></tr>
+                        <tr><td><code>C= F</code></td><td>Disk blocks free</td><td><code>C= T</code></td><td>Term emulation</td></tr>
+                        <tr><td><code>C= G</code></td><td>Execute script</td><td><code>C= U</code></td><td><strong>Upload file</strong></td></tr>
+                        <tr><td><code>C= H</code></td><td>Hang up phone</td><td><code>C= V</code></td><td>View directory</td></tr>
+                        <tr><td><code>C= I</code></td><td>Initialize modem</td><td><code>C= W</code></td><td>Scroll-ahead</td></tr>
+                        <tr><td><code>C= J</code></td><td>Phone off hook</td><td><code>C= X</code></td><td>Send break</td></tr>
+                        <tr><td><code>C= K</code></td><td>Show control chars</td><td><code>C= Y</code></td><td>Restore colors</td></tr>
+                        <tr><td><code>C= L</code></td><td>Load F-key file</td><td><code>C= Z</code></td><td>Main menu</td></tr>
+                        <tr><td><code>C= N</code></td><td>Buffer bytes free</td><td><code>C= @</code></td><td>Disk command</td></tr>
+                        <tr><td><code>C= O</code></td><td>Open/close capture</td><td><code>C= +</code></td><td>Print menu</td></tr>
+                        <tr><td><code>C= -</code></td><td colspan="3">Translate during file transfer</td></tr>
+                        <tr><td><code>C= A</code></td><td>Graphics/ASCII mode</td><td><code>C= C</code></td><td>Toggle 40/80 columns</td></tr>
+                        <tr><td><code>C= Q</code></td><td colspan="3">Open/close conference mode (Standard/Commodore emulations)</td></tr>
+                    </tbody>
+                </table>
+                <div class="callout callout-warn">
+                    <strong>Two of these bite while you are experimenting.</strong>
+                    <code>C= H</code> hangs up, and <code>C= C</code> is the
+                    <em>40/80 column toggle</em>, not a screen clear &mdash; in 80-column
+                    mode the screen moves and a 40-column reader returns nonsense.
+                    Finding the command list by trial cost two dropped calls before
+                    reading it off the <code>C= M</code> screen.
+                </div>
+            </section>
+
+            <section id="settings">
+                <h2>Settings that must be right</h2>
+                <p>
+                    Configuration is two pages &mdash; <strong>right-cursor</strong> moves
+                    between them, <code>F1</code> quits.
+                </p>
+                <table class="ref-table">
+                    <thead><tr><th>Setting</th><th>Where</th><th>Value for this gateway</th></tr></thead>
+                    <tbody>
+                        <tr><td>Protocol</td><td>Config page 1</td><td><code>Punter</code> (or the one under test)</td></tr>
+                        <tr><td>Block size</td><td>Config page 1</td><td><code>255</code>, matching <code>punter_block_size</code></td></tr>
+                        <tr><td>Baud rate</td><td>Config page 1</td><td><code>2400</code></td></tr>
+                        <tr><td>Word/parity</td><td>Config page 1</td><td><code>8N1</code></td></tr>
+                        <tr><td>Serial driver</td><td>Config page 2</td><td><code>SwiftLink</code> for an ACIA at <code>$DE00</code></td></tr>
+                        <tr><td>Upload/Download drv</td><td>Device settings</td><td><code>10,0</code> &mdash; a writable disk must be on device 10</td></tr>
+                        <tr><td>Translation</td><td>Transfer dialog</td><td><code>OFF</code> for binary</td></tr>
+                    </tbody>
+                </table>
+                <div class="callout callout-warn">
+                    <strong>The protocol resets to Zmodem.</strong> That is the BASIC
+                    loader's default (<code>pt$="Zmodem"</code>), and NovaTerm loads
+                    <code>prt.Punter</code> from disk only when Punter is selected. A
+                    Punter test run against a Zmodem receiver fails in a way that looks
+                    exactly like a protocol defect. Set it explicitly with
+                    <code>C= P</code> every run, and confirm it on the status line.
+                </div>
+            </section>
+
+            <section id="transfers">
+                <h2>Running a transfer</h2>
+                <ol class="steps">
+                    <li>Set the protocol with <code>C= P</code>; wait for the module to load from disk.</li>
+                    <li>Dial, and answer the gateway&rsquo;s terminal detection with <strong>INST/DEL</strong> so it detects PETSCII.</li>
+                    <li>On the gateway: <code>F</code> File Transfer, then <code>D</code> Download or <code>U</code> Upload, pick the file, pick the protocol.</li>
+                    <li>On the C64: <code>C= D</code> to receive or <code>C= U</code> to send, then give a filename.</li>
+                    <li>The gateway allows <strong>45 seconds</strong> to start.</li>
+                </ol>
+                <div class="callout">
+                    <strong>Getting the file back off the disk.</strong> NovaTerm leaves a
+                    completed download as a <em>splat</em> (unclosed) directory entry:
+                    <code>c1541 -read</code> refuses it, and <code>c1541 -validate</code>
+                    <strong>deletes it</strong>. Copy the <code>.d64</code> first, then
+                    walk the sector chain directly &mdash; the data blocks are all there.
+                </div>
+            </section>
+
+            <section id="automation">
+                <h2>Driving it under VICE</h2>
+                <p>
+                    <code>tools/punter-vice-harness/</code> drives NovaTerm with no human
+                    in the loop. Two channels are needed, and each has a trap.
+                </p>
+                <table class="ref-table">
+                    <thead><tr><th>Need</th><th>What works</th><th>What does not</th></tr></thead>
+                    <tbody>
+                        <tr>
+                            <td>Read the screen</td>
+                            <td>VICE remote monitor, following <code>$D018</code> and CIA2 <code>$DD00</code></td>
+                            <td>Assuming <code>$0400</code>. NovaTerm relocates its screen to <code>$8C00</code>; reading the default returns stale memory that looks like a decoder bug.</td>
+                        </tr>
+                        <tr>
+                            <td>Type at it</td>
+                            <td>X11 XTEST into the VICE window (window must be mapped, need not be focused)</td>
+                            <td>VICE&rsquo;s own <code>keybuf</code> monitor command. It stuffs the KERNAL buffer; NovaTerm scans the CIA1 matrix itself and never looks.</td>
+                        </tr>
+                        <tr>
+                            <td>Press INST/DEL</td>
+                            <td>X keysym <code>BackSpace</code></td>
+                            <td><code>chr(0x14)</code>. There is no keysym for a raw control character, so nothing is sent at all &mdash; and the gateway then detects the terminal from the next byte and calls it ASCII.</td>
+                        </tr>
+                        <tr>
+                            <td>Cancel a prompt</td>
+                            <td>The back-arrow (PETSCII <code>0x5F</code>)</td>
+                            <td>X11 <code>Escape</code>, which VICE maps to <strong>RUN/STOP</strong> (<code>0x03</code>), not ESC.</td>
+                        </tr>
+                        <tr>
+                            <td>Navigate the main menu</td>
+                            <td>Read the highlighted row &mdash; it is the one with a <em>wide</em> reverse-video run</td>
+                            <td>Counting keypresses from the top. The menu remembers where it was left; counting walked into &ldquo;Exit terminal / Are you sure?&rdquo;. Testing bit 7 alone does not work either: every row of the menu box is reversed.</td>
+                        </tr>
+                        <tr>
+                            <td>Hang up</td>
+                            <td><code>+++</code>, guard time, <code>ATH</code>, then prove it with <code>AT</code> &rarr; <code>OK</code></td>
+                            <td>Relying on NovaTerm&rsquo;s <code>C= H</code> over a socat PTY: it drops DTR, and a PTY carries no modem control lines. Also waiting for &ldquo;no carrier&rdquo;, which only appears if a call was up.</td>
+                        </tr>
+                        <tr>
+                            <td>Load quickly</td>
+                            <td><code>-warp</code> for the disk load, then Alt+W <em>once</em> to turn it off</td>
+                            <td>Leaving warp on for the transfer. At 241% the ACIA drops bytes &mdash; NovaTerm&rsquo;s modem init arrives with every letter missing. Blind-toggling turns it back on for a second run.</td>
+                        </tr>
+                    </tbody>
+                </table>
+                <p>
+                    NovaTerm takes about a minute to start because the BASIC loader pulls
+                    <code>nova9.6-1.ml</code>, <code>nova9.6-2.ml</code>, the RTL and the
+                    terminal module off an emulated 1541 in sequence, at authentic drive
+                    speed. That is not a stall.
+                </p>
+            </section>
+
+            <section id="results">
+                <h2>Measured results</h2>
+                <p>
+                    Payload: <code>PUNTEST.SEQ</code>, 1775 bytes &mdash; every byte value
+                    four times over, long runs of CAN, XON, XOFF, SUB, CR, LF, FF, DEL and
+                    BS, and a tail spanning a 255-byte block boundary.
+                </p>
+                <table class="ref-table">
+                    <thead><tr><th>Protocol</th><th>Link</th><th>Direction</th><th>Result</th></tr></thead>
+                    <tbody>
+                        <tr><td>Punter C1</td><td>Serial (PTY, 2400)</td><td>Gateway &rarr; C64</td><td class="ok">1775 bytes, 14 blocks, 17.8 s &mdash; identical</td></tr>
+                        <tr><td>Punter C1</td><td>Telnet (tcpser ip232)</td><td>Gateway &rarr; C64</td><td class="ok">identical, 0 bad blocks</td></tr>
+                    </tbody>
+                </table>
+                <div class="callout callout-warn">
+                    <strong>The telnet path found a real defect.</strong> Before
+                    v0.9.8 the gateway refused RFC 856 BINARY, while already treating
+                    transfers as 8-bit (no NVT CR-NUL stuffing, by explicit decision in
+                    <code>tnio</code>). It therefore told a telnet peer the opposite of
+                    what it did, and an NVT-conformant peer applied text rules to the
+                    blocks: the same payload that arrived byte-perfect over serial never
+                    got past block 0 through tcpser &mdash; 32 rejections. Agreeing to
+                    BINARY, in both directions, took it to zero. The serial path was the
+                    control that made this a diagnosis rather than a guess.
+                </div>
+            </section>
+
+        </div>
+
+        <footer class="site-footer">
+            Ethernet Gateway v0.9.8 &mdash; &copy; 2026 Ricky Bryce &mdash;
+            Licensed under GPL-3.0-or-later &mdash;
+            <a href="index.html">User Manual</a>
+        </footer>
+    </div>
+</body>
+</html>

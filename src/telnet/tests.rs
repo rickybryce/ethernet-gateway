@@ -7611,11 +7611,24 @@ async fn test_write_telnet_data_passthrough_without_ff() {
     assert_eq!(buf, b"hello");
 }
 
+/// **RFC 856 BINARY is agreed, both ways.**
+///
+/// This test used to assert the opposite, and carried no reason for it: it was
+/// pinning the generic "refuse anything unrecognised" catch-all, with option 0
+/// as a convenient example.  Refusing it is wrong, and measurably so.  The
+/// server already treats a transfer as 8-bit -- `tnio` applies no NVT CR-NUL
+/// stuffing, by explicit decision -- so telling a peer `WONT BINARY` says the
+/// opposite of what we do.  An NVT-conformant peer then applies text rules to
+/// Punter/XMODEM/ZMODEM blocks.
+///
+/// Measured 2026-09-06 against a real NovaTerm 9.6c in VICE: the same 1775-byte
+/// Punter payload arrives byte for byte over a serial link, and through a
+/// telnet peer that we had just told `DONT BINARY` it never got past block 0 --
+/// 32 rejections and counting.  Agreeing to BINARY took it to zero.
 #[tokio::test]
-async fn test_do_binary_gets_wont() {
+async fn test_do_binary_is_agreed() {
     let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    // Peer: IAC DO BINARY (opt 0) + real byte so the read returns.
     peer.write_all(&[IAC, DO, 0x00, b'X']).await.unwrap();
 
     let b = session.session_read_byte().await.unwrap();
@@ -7624,17 +7637,17 @@ async fn test_do_binary_gets_wont() {
     drop(session);
     let mut out = Vec::new();
     peer.read_to_end(&mut out).await.unwrap();
-    // Expect IAC WONT BINARY somewhere in the reply stream.
-    let wont_binary = [IAC, WONT, 0x00];
+    let will_binary = [IAC, WILL, 0x00];
     assert!(
-        out.windows(3).any(|w| w == wont_binary),
-        "expected IAC WONT 0x00, got {:?}",
+        out.windows(3).any(|w| w == will_binary),
+        "expected IAC WILL 0x00, got {:?}",
         out
     );
 }
 
+/// The receive direction too: a peer that offers to send us 8-bit gets `DO`.
 #[tokio::test]
-async fn test_will_binary_gets_dont() {
+async fn test_will_binary_is_agreed() {
     let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     peer.write_all(&[IAC, WILL, 0x00, b'X']).await.unwrap();
@@ -7645,10 +7658,10 @@ async fn test_will_binary_gets_dont() {
     drop(session);
     let mut out = Vec::new();
     peer.read_to_end(&mut out).await.unwrap();
-    let dont_binary = [IAC, DONT, 0x00];
+    let do_binary = [IAC, DO, 0x00];
     assert!(
-        out.windows(3).any(|w| w == dont_binary),
-        "expected IAC DONT 0x00, got {:?}",
+        out.windows(3).any(|w| w == do_binary),
+        "expected IAC DO 0x00, got {:?}",
         out
     );
 }
@@ -7657,8 +7670,11 @@ async fn test_will_binary_gets_dont() {
 async fn test_refused_option_not_repeated() {
     let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    // Send DO BINARY twice, then a data byte.
-    peer.write_all(&[IAC, DO, 0x00, IAC, DO, 0x00, b'X'])
+    // An option we genuinely do not support -- 0x2A (TERMINAL-SPEED).
+    // Deliberately NOT BINARY: that one is answered now, so using it here
+    // would test the acceptance path while claiming to test refusal.
+    const UNSUPPORTED: u8 = 0x2A;
+    peer.write_all(&[IAC, DO, UNSUPPORTED, IAC, DO, UNSUPPORTED, b'X'])
         .await
         .unwrap();
 
@@ -7667,8 +7683,8 @@ async fn test_refused_option_not_repeated() {
     drop(session);
     let mut out = Vec::new();
     peer.read_to_end(&mut out).await.unwrap();
-    let wont_binary = [IAC, WONT, 0x00];
-    let matches = out.windows(3).filter(|w| *w == wont_binary).count();
+    let wont = [IAC, WONT, UNSUPPORTED];
+    let matches = out.windows(3).filter(|w| *w == wont).count();
     assert_eq!(matches, 1, "WONT should be sent exactly once, got {:?}", out);
 }
 
