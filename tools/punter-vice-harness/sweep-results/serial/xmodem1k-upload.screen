@@ -1,11 +1,11 @@
   answering the upload dialogs:
   dialog: name prompt -> puntest
-    |           .modem-... upload|
+    |            .modem-1k upload|
     | .evice: 10,0          .ranslation: ...|
     | .ile:|
     |........................................|
-    |             ...........................|
-    |..............|
+    |                ........................|
+    |.................|
   -> done
 | :.:.:.:.:.:.:  2400           00:00:00|
 |=======================================|
@@ -24,5 +24,5 @@
 |  <- to cancel|
 |c|
 |  .pload complete!|
-|  1775 bytes, 14 blocks, 53.1s|
+|  1775 bytes, 14 blocks, 53.6s|
 |  .ress any key to continue.|

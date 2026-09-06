@@ -1,0 +1,21 @@
+  answering the upload dialogs:
+  dialog: upload settings -> RETURN
+  dialog: file selector -> f3, f7
+  -> selector
+| :.:.:.:.:.:.:  2400           00:00:00|
+|  .ick one, or <- to cancel: z|
+|  .eady to receive: zmodemupseq|
+|  .ax file size: 8 ..|
+|  .tart ...... send from your terminal n|
+|ow.|
+|  (.xtra.utty: .ile .ransfer > .modem >|
+|.end. .ther clients vary.)|
+|  .tart transfer within 45 seconds.|
+|  <- to cancel|
+|..|
+|**b0100000023..50|
+|**b0100000023..50|
+|*.ovaterm: .iles sent: 1|
+|  .pload complete!|
+|  1775 bytes, 14 blocks, 55.5s|
+|  .ress any key to continue.|
