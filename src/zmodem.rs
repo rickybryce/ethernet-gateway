@@ -109,10 +109,22 @@ const ZCBIN: u8 = 0x01;         // binary transfer, no end-of-line conversion
 use crate::tnio::MAX_FILE_SIZE;
 const SUBPACKET_DATA_SIZE: usize = 1024;
 
-/// Smallest subpacket we will drop to, however little the receiver claims.
-/// A receiver advertising a pathologically small buffer would otherwise turn
-/// the transfer into one escape-pair at a time.
-const MIN_SUBPACKET_DATA_SIZE: usize = 64;
+/// Smallest subpacket we will send: one byte.
+///
+/// **A stated buffer is honoured, not second-guessed.**  This used to floor at
+/// 64 so a tiny advertisement could not reduce the transfer to a crawl -- but
+/// the cost of that was sending a receiver more than it had just told us it
+/// could hold, which is the precise thing §8.2 says the sender "will not
+/// overflow" and the precise failure this whole window exists to prevent (a
+/// receiver that enforces its limit refuses the overflowing byte outright:
+/// NovaTerm's `zrdata` answers the 1025th byte of a 1024 buffer with
+/// `buffovr`).  Slow is a performance problem; overflowing a stated buffer is
+/// a broken transfer, and a receiver has no way to tell us we did it.
+///
+/// `rx_bufsize == 0` already means "no limit stated", so every nonzero value
+/// is a real claim about real memory.  The floor exists only so a malformed
+/// zero-after-clamping cannot produce an empty subpacket loop.
+const MIN_SUBPACKET_DATA_SIZE: usize = 1;
 
 /// How the receiver's ZRINIT says its data phase must be fed.
 ///
@@ -4111,10 +4123,16 @@ mod tests {
         assert_eq!(nova.mid_file_marker(), ZCRCW);
 
         assert_eq!(RxWindow::from_zrinit(256).chunk, 256);
-        // Never below the floor -- a tiny advertisement must not reduce the
-        // transfer to one escape-pair at a time.
-        assert_eq!(RxWindow::from_zrinit(8).chunk, MIN_SUBPACKET_DATA_SIZE);
-        assert_eq!(RxWindow::from_zrinit(1).chunk, MIN_SUBPACKET_DATA_SIZE);
+        // **A small advertisement is honoured, not rounded up.**  Sending more
+        // than the receiver said it can hold is the overflow §8.2 forbids, and
+        // a receiver that enforces its limit rejects the extra byte rather
+        // than tolerating it.  Being slow is the better failure.
+        assert_eq!(RxWindow::from_zrinit(8).chunk, 8);
+        assert_eq!(RxWindow::from_zrinit(1).chunk, 1);
+        assert!(
+            RxWindow::from_zrinit(8).chunk <= 8,
+            "a sender must never exceed the buffer the receiver advertised"
+        );
         // Never above our own size, however generous the receiver claims --
         // but a generous claim is still a claim, so it stays segmented.
         let huge = RxWindow::from_zrinit(1 << 20);

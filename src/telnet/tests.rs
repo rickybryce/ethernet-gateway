@@ -7670,9 +7670,12 @@ async fn test_will_binary_is_agreed() {
 async fn test_refused_option_not_repeated() {
     let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    // An option we genuinely do not support -- 0x2A (TERMINAL-SPEED).
-    // Deliberately NOT BINARY: that one is answered now, so using it here
-    // would test the acceptance path while claiming to test refusal.
+    // An option we genuinely do not support -- 0x2A (42) is CHARSET,
+    // RFC 2066.  (TERMINAL-SPEED is option 32, 0x20; the comment here named
+    // that one for a while, which would have sent the next reader looking for
+    // a mismatch that does not exist.)  Deliberately NOT BINARY: that one is
+    // answered now, so using it here would test the acceptance path while
+    // claiming to test refusal.
     const UNSUPPORTED: u8 = 0x2A;
     peer.write_all(&[IAC, DO, UNSUPPORTED, IAC, DO, UNSUPPORTED, b'X'])
         .await

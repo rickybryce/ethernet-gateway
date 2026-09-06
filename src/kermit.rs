@@ -153,10 +153,34 @@ const KERMIT_INTERACTIVE_POKE_WAIT_MS: u64 = 10_000;
 ///
 /// Deliberately short enough that `max_retries` attempts still leave room for
 /// the classic-capabilities fallback below (triggered by "too many timeouts")
-/// to have its own budget inside the same window -- extending the Send-Init
-/// budget to the whole window instead would starve that escalation, which is
-/// what serves genuinely old Kermits.
+/// to have its own budget -- extending the *extended* Send-Init budget instead
+/// would starve that escalation, which is what serves genuinely old Kermits.
+/// Measured: NovaTerm 9.6c ignores the extended Send-Init entirely and gives
+/// up at about 84 s, so the fallback has to be reached well inside that.
 const KERMIT_SEND_INIT_ATTEMPT_MS: u64 = 5_000;
+
+/// How many Send-Init attempts fill `window_secs`, floored at `floor`.
+///
+/// The **classic** Send-Init is the last thing we have to offer, so it is
+/// retried for as long as the user was told they had -- the download screen
+/// prints "Start transfer within N seconds" from `kermit_negotiation_timeout`,
+/// and that promise has to be the real bound.  It was not: both phases used
+/// `kermit_max_retries`, so the true limit was `max_retries` x one attempt for
+/// each, about 50 s against an advertised 300, and raising the negotiation
+/// timeout to give a slow user more time did nothing at all on this path.
+///
+/// The *extended* phase keeps `max_retries` and is deliberately not widened:
+/// a peer that cannot parse CAPAS never answers it, so time spent there is
+/// time stolen from the fallback that would have worked.  The cost of that
+/// choice is a capable-but-late peer being served classic capabilities rather
+/// than long packets -- slower, but a peer that is neither started nor poking
+/// is indistinguishable on the wire from one that cannot parse the extended
+/// form, and "slower" is the better of the two ways to be wrong.
+fn send_init_attempts_for(window_secs: u64, floor: u32) -> u32 {
+    let per_attempt_ms = KERMIT_SEND_INIT_ATTEMPT_MS.max(1);
+    let fits = window_secs.saturating_mul(1_000) / per_attempt_ms;
+    (fits as u32).max(floor).max(1)
+}
 
 // CAPAS bit values in the first capability byte (applied to the unchar'd
 // byte; bit 0 / value 1 is the LSB "another CAPAS byte follows" flag).
@@ -2484,7 +2508,11 @@ async fn kermit_send_impl(
                 verbose,
                 &mut state,
                 Some(legacy_deadline),
-                max_retries,
+                // Retried across the whole window the user was promised, not
+                // `max_retries` short attempts -- see `send_init_attempts_for`.
+                // `legacy_deadline` still bounds the exchange absolutely, so
+                // this only stops the count expiring first.
+                send_init_attempts_for(cfg.kermit_negotiation_timeout, max_retries),
                 true,
             )
             .await
@@ -6748,6 +6776,30 @@ mod tests {
     use super::*;
 
     // ---------- Encoding primitives ----------
+
+    /// The classic Send-Init has to be retried for as long as the download
+    /// screen says the user has, or the promise on screen is not the real
+    /// bound.  Both phases used `kermit_max_retries`, which made the true
+    /// limit about 50 s against an advertised 300 -- and made
+    /// `kermit_negotiation_timeout` inert on this path, so raising it to help
+    /// a slow user changed nothing.
+    #[test]
+    fn test_the_classic_send_init_is_retried_across_the_promised_window() {
+        // The default window really is filled: 300 s of 5 s attempts.
+        assert_eq!(send_init_attempts_for(300, 5), 60);
+        // Never fewer than the operator's retry count, however short the
+        // window -- lowering one setting must not silently disable the other.
+        assert_eq!(send_init_attempts_for(1, 5), 5);
+        assert_eq!(send_init_attempts_for(0, 5), 5);
+        // And never zero, which would send nothing at all.
+        assert_eq!(send_init_attempts_for(0, 0), 1);
+        // A longer window buys proportionally more attempts, which is the
+        // whole point: the setting has to reach this path.
+        assert!(
+            send_init_attempts_for(600, 5) > send_init_attempts_for(300, 5),
+            "raising kermit_negotiation_timeout must lengthen the retry budget"
+        );
+    }
 
     #[test]
     fn test_crlf_encode_text_promotes_bare_lf() {

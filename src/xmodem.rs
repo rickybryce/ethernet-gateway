@@ -442,6 +442,19 @@ pub(crate) async fn xmodem_receive_batch(
     // duplicate (flag stays set → the following real EOT is ACKed → no
     // infinite NAK loop).
     let mut eot_naked = false;
+    // **A second flag, because the two questions are different.**
+    // `eot_naked` must SURVIVE a duplicate block: that is the anti-loop for a
+    // non-standard sender which answers NAK-of-EOT by resending its last
+    // block, so the real EOT behind it is ACKed rather than NAKed for ever.
+    // But "may silence be read as end-of-file?" must be answered NO the
+    // moment any block arrives, duplicate included -- a duplicate is the
+    // sender telling us it is still mid-file, which is exactly the spurious
+    // EOT case.  Sharing one flag opened a silent-truncation window: a
+    // line-noise EOT, our NAK, the sender's duplicate resend, then any pause
+    // longer than `block_timeout` (a slow disk, a flow-controlled UART) and
+    // we would have synthesised end-of-file and returned the partial file as
+    // a success -- the precise failure the Forsberg guard exists to prevent.
+    let mut awaiting_eot_confirm = false;
     loop {
         let byte = match tokio::time::timeout(
             std::time::Duration::from_secs(block_timeout),
@@ -469,7 +482,7 @@ pub(crate) async fn xmodem_receive_batch(
                 // CAN CAN CAN and threw the whole file away.  Accepting a
                 // correctly received file is worth more than insisting on a
                 // confirmation the spec cannot make a sender send.
-                if eot_naked && !file_data.is_empty() {
+                if awaiting_eot_confirm && !file_data.is_empty() {
                     if verbose { glog!("XMODEM recv: no answer to the EOT NAK — sender is done, accepting"); }
                     EOT
                 } else {
@@ -538,9 +551,14 @@ pub(crate) async fn xmodem_receive_batch(
                         // in-flight block.  Re-arm so the real end-of-file
                         // EOT is verified afresh.
                         eot_naked = false;
+                        awaiting_eot_confirm = false;
                     }
                     Ok(Err(ref e)) if e == "Duplicate block" => {
                         raw_write_byte(writer, ACK, is_tcp).await?;
+                        // The sender is still mid-file, so silence from here
+                        // is a stall and not an end-of-file.  `eot_naked`
+                        // deliberately stays set -- see its declaration.
+                        awaiting_eot_confirm = false;
                     }
                     // Spec: a valid block (good CRC + complement) carrying a
                     // non-duplicate, unexpected sequence number is an
@@ -570,6 +588,7 @@ pub(crate) async fn xmodem_receive_batch(
                 // field lets the receiver detect a short file regardless.
                 if !ymodem_mode && !eot_naked {
                     eot_naked = true;
+                    awaiting_eot_confirm = true;
                     if verbose { glog!("XMODEM recv: first EOT — NAKing to verify (Forsberg EOT confirmation)"); }
                     raw_write_byte(writer, NAK, is_tcp).await?;
                     continue;
@@ -1210,8 +1229,24 @@ pub(crate) async fn xmodem_send(
         // MAX_PRE_DATA_BYTES.  Either way we fall through and send rather than
         // hang.
         const MAX_PRE_DATA_BYTES: u32 = 8;
+        // **Its own deadline, not the block timeout.**  This wait is for a
+        // byte that arrives about three seconds after block 0 when it arrives
+        // at all, so bounding it by `xmodem_block_timeout` (20 s by default)
+        // spent that whole time on every receiver that simply never sends a
+        // second 'C' -- and it is dead time in the middle of a working
+        // transfer, during which the peer's own retry timer fires and the
+        // NAK/'C' bytes it produces are absorbed here rather than shortening
+        // the wait.  Twice the measured gap is ample, and a shorter configured
+        // block timeout still wins so the setting can only tighten this.
+        //
+        // Ten rather than twice the measured gap: the three seconds were read
+        // off one emulated machine whose timing moves with host load, and the
+        // benefit here is only removing dead time from a receiver that never
+        // sends the byte at all.  Cutting close to a measurement to save a few
+        // seconds would risk the transfers this was written from.
+        const DATA_PHASE_C_WAIT_SECS: u64 = 10;
         let c_deadline = tokio::time::Instant::now()
-            + std::time::Duration::from_secs(block_timeout);
+            + std::time::Duration::from_secs(block_timeout.min(DATA_PHASE_C_WAIT_SECS));
         let mut absorbed = 0u32;
         loop {
             let remaining = c_deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -1348,9 +1383,24 @@ pub(crate) async fn xmodem_send(
             // loop open by resetting its timeout on every byte.
             const MAX_STRAY_START_REQUESTS: u32 = 8;
             let mut stray_c = 0u32;
+            // **One deadline for the whole wait, not one per byte.**  Absorbing
+            // a stray byte used to restart the read timeout, so a receiver that
+            // re-requests with `C` on a timer could hold this block open for
+            // `MAX_STRAY_START_REQUESTS` x `xmodem_block_timeout` -- up to 160 s
+            // by default -- before falling through to the ordinary retransmit.
+            // A receiver that answers a bad block with `C` instead of NAK is
+            // then waiting on us for long enough to exhaust its own retry
+            // budget.  The count still bounds a flood; this bounds the clock.
+            let response_deadline = tokio::time::Instant::now()
+                + std::time::Duration::from_secs(block_timeout);
             let response = loop {
+                let remaining =
+                    response_deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    break Resp::Timeout;
+                }
                 match tokio::time::timeout(
-                    std::time::Duration::from_secs(block_timeout),
+                    remaining,
                     nvt_read_byte(reader, is_tcp, state),
                 )
                 .await
@@ -3586,6 +3636,77 @@ mod tests {
         let mut expected = vec![0x41u8; XMODEM_BLOCK_SIZE];
         expected.extend_from_slice(&[0x42u8; XMODEM_BLOCK_SIZE]);
         assert_eq!(data, expected, "both blocks must survive");
+    }
+
+    /// A spurious EOT followed by the sender's duplicate resend must NOT leave
+    /// silence readable as end-of-file.
+    ///
+    /// This is the window that opened when "accept an unanswered EOT NAK" was
+    /// first written against the same flag that suppresses a second EOT NAK.
+    /// The two questions are different: `eot_naked` has to survive a duplicate
+    /// (it is the anti-loop for a sender that answers NAK-of-EOT by resending
+    /// its last block), while "may silence mean end-of-file?" must go false the
+    /// instant any block arrives, duplicate included — a duplicate is the
+    /// sender saying it is still mid-file.
+    ///
+    /// Sharing one flag meant: line-noise EOT, our NAK, the duplicate resend,
+    /// then any pause longer than `block_timeout` — a slow disk, a
+    /// flow-controlled UART — and the receiver returned the partial file as a
+    /// success.  A silent truncation, which is the exact failure the Forsberg
+    /// guard exists to prevent.
+    #[tokio::test(start_paused = true)]
+    async fn test_a_duplicate_after_a_spurious_eot_stops_silence_meaning_eof() {
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+
+        let recv_task = tokio::spawn(async move {
+            xmodem_receive(&mut recv_read, &mut recv_write, false, false, false).await
+        });
+
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), CRC_REQUEST);
+        send_write.write_all(&make_crc_data_block(1, 0x41)).await.unwrap();
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), ACK);
+        send_write.write_all(&make_crc_data_block(2, 0x42)).await.unwrap();
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), ACK);
+
+        // Line noise puts a stray 0x04 in the inter-block gap.
+        raw_write_byte(&mut send_write, EOT, false).await.unwrap();
+        assert_eq!(
+            raw_read_byte(&mut send_read, false).await.unwrap(),
+            NAK,
+            "a spurious EOT is NAKed to verify",
+        );
+
+        // The sender answers the NAK by resending its last block — a
+        // duplicate.  We ACK it, and from here silence is a STALL: the sender
+        // has told us it is still mid-file.
+        send_write.write_all(&make_crc_data_block(2, 0x42)).await.unwrap();
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), ACK);
+
+        // Now it goes quiet.  The receiver must re-prompt and ultimately fail,
+        // never hand back the two blocks it happens to hold as a whole file.
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(25)).await;
+        assert_eq!(
+            raw_read_byte(&mut send_read, false).await.unwrap(),
+            NAK,
+            "silence after a duplicate must re-prompt, not be read as end-of-file",
+        );
+
+        // Let the retry budget run out; the transfer must end in an error.
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(600),
+            recv_task,
+        )
+        .await;
+        if let Ok(Ok(res)) = outcome {
+            assert!(
+                res.is_err(),
+                "a stalled mid-file sender must not be reported as a completed \
+                 transfer — that is a silent truncation",
+            );
+        }
     }
 
     /// Spec D3: in the data phase, a valid block (good CRC + complement)
