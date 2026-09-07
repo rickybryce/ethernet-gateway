@@ -681,6 +681,7 @@ fn make_test_session(terminal_type: TerminalType) -> TelnetSession {
         transfer_subdir: String::new(),
         xmodem_iac: false,
         last_transfer_note: None,
+        arm_next_prompt: false,
         web_lines: Vec::new(),
         web_scroll: 0,
         web_links: Vec::new(),
@@ -738,6 +739,7 @@ pub(in crate::telnet) fn make_test_session_with_peer(
         transfer_subdir: String::new(),
         xmodem_iac: false,
         last_transfer_note: None,
+        arm_next_prompt: false,
         web_lines: Vec::new(),
         web_scroll: 0,
         web_links: Vec::new(),
@@ -9836,4 +9838,56 @@ async fn test_the_arming_window_still_lets_a_person_continue() {
     .await
     .expect("a keypress after the arming window must be accepted")
     .expect("wait_for_key must not error on a real key");
+}
+
+/// The menu drawn after a transfer must not act on the protocol's leftovers.
+///
+/// Punter's C1 handshake codes are literal ASCII words, so their letters are
+/// menu keys.  `GOO` put a `G` on the File Transfer menu -- Gateway Shell --
+/// and once that was drained the `D` of `BAD` selected Download a file, which
+/// navigated off the very screen carrying the result the operator was meant to
+/// read.  Draining around the keypress cannot fix it: the bytes are still
+/// trickling when the menu appears, because NovaTerm writes the last block to
+/// a 1541 and only then finishes talking.
+///
+/// So a transfer arms the next menu prompt, and this pins the two halves of
+/// that: the flag is set by the post-transfer exchange, and it is TAKEN, so it
+/// can never silently suppress a second prompt the operator did mean to use.
+#[tokio::test]
+async fn test_a_transfer_arms_the_menu_prompt_exactly_once() {
+    let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
+    use tokio::io::AsyncWriteExt;
+
+    assert!(!session.arm_next_prompt, "nothing arms it before a transfer");
+
+    // The key has to arrive *after* the settle and the arming window, or the
+    // settle simply drains it -- which is the whole point of both, and is
+    // what a real operator does anyway: they read the prompt first.
+    let keypress = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        peer.write_all(b"\r").await.unwrap();
+        peer.flush().await.unwrap();
+        peer
+    });
+    let done = tokio::time::timeout(
+        std::time::Duration::from_secs(6),
+        session.press_any_key_after_transfer(),
+    )
+    .await
+    .expect("the post-transfer prompt must not hang");
+    done.expect("it must not error on a real key");
+    let _peer = keypress.await.unwrap();
+
+    assert!(
+        session.arm_next_prompt,
+        "a transfer must arm the menu prompt behind it -- that menu is where \
+         Punter's trailing `D` selected Download a file"
+    );
+
+    // Taken, not left set: a second menu prompt is the operator's own.
+    assert!(std::mem::take(&mut session.arm_next_prompt));
+    assert!(
+        !session.arm_next_prompt,
+        "the arming must apply to one prompt only"
+    );
 }

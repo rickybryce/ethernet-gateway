@@ -722,6 +722,13 @@ impl TelnetSession {
             self.send(&prompt).await?;
             self.flush().await?;
 
+            // A transfer's teardown can still be trickling in when this menu
+            // is drawn, and its bytes are menu keys -- see `arm_next_prompt`.
+            // Taken, so exactly one prompt is ever suppressed.
+            if std::mem::take(&mut self.arm_next_prompt) {
+                self.arm_keypress_prompt().await;
+            }
+
             // The browser menu reads a whole LINE; every other menu acts the
             // instant you press a letter.
             //

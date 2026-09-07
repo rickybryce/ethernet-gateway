@@ -975,6 +975,23 @@ pub(crate) struct TelnetSession {
     /// Outcome of the last transfer, drawn once by `render_file_transfer`
     /// and cleared -- see `TransferNote`.
     pub(in crate::telnet) last_transfer_note: Option<TransferNote>,
+    /// Ignore input for a moment on the next menu prompt.
+    ///
+    /// **A protocol's teardown keeps arriving after the transfer prompt has
+    /// been answered, and the screen behind that prompt is a MENU.**  Punter's
+    /// C1 handshake codes are literal ASCII words, so their letters are menu
+    /// keys: `GOO` put a `G` on the File Transfer menu (Gateway Shell), and
+    /// once that was drained the `D` of `BAD` selected Download a file, which
+    /// walked off the very screen carrying the result the operator was meant
+    /// to read.  Draining before and after the keypress cannot fix this,
+    /// because the bytes are still trickling out when the menu is drawn.
+    ///
+    /// So the first menu prompt after a transfer is armed the same way the
+    /// keypress prompt is -- on the same reasoning, that nobody reads a fresh
+    /// screen and chooses from it inside the window.  Set by
+    /// `press_any_key_after_transfer` and taken by the menu loop, so it can
+    /// only ever suppress one prompt.
+    pub(in crate::telnet) arm_next_prompt: bool,
     web_lines: Vec<String>,
     web_scroll: usize,
     web_links: Vec<String>,
@@ -1113,6 +1130,7 @@ impl TelnetSession {
             transfer_subdir: String::new(),
             xmodem_iac: false,
             last_transfer_note: None,
+            arm_next_prompt: false,
             web_lines: Vec::new(),
             web_scroll: 0,
             web_links: Vec::new(),
@@ -1175,6 +1193,7 @@ impl TelnetSession {
             transfer_subdir: String::new(),
             xmodem_iac: false,
             last_transfer_note: None,
+            arm_next_prompt: false,
             web_lines: Vec::new(),
             web_scroll: 0,
             web_links: Vec::new(),
@@ -1253,6 +1272,7 @@ impl TelnetSession {
             transfer_subdir: String::new(),
             xmodem_iac: false,
             last_transfer_note: None,
+            arm_next_prompt: false,
             web_lines: Vec::new(),
             web_scroll: 0,
             web_links: Vec::new(),
@@ -1901,6 +1921,7 @@ pub fn start_server(
                                     // still lets the user override per-session.
                                     xmodem_iac: false,
                                     last_transfer_note: None,
+            arm_next_prompt: false,
                                     web_lines: Vec::new(),
                                     web_scroll: 0,
                                     web_links: Vec::new(),

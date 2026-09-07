@@ -1294,6 +1294,9 @@ impl TelnetSession {
         // If a late byte is what answered the prompt after all, the rest of
         // its burst is still queued and the next screen drawn is a menu.
         self.drain_input_until_quiet(150, Some(1000)).await;
+        // And the menu itself is armed, because a teardown can still be
+        // trickling when it is drawn -- see `arm_next_prompt`.
+        self.arm_next_prompt = true;
         Ok(())
     }
 
