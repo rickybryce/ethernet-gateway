@@ -521,6 +521,9 @@ pub(crate) async fn punter_receive(
     // Phase A — the single type block, fixed at 8 bytes (one payload byte).
     let type_payload = receive_phase(
         reader, writer, is_tcp, is_petscii, verbose, &mut state, TYPE_PHASE_SIZE, &t,
+        // Phase A: the sender opens phase B straight after this end-off, so
+        // the extra drains must NOT run here.
+        false,
     )
     .await?;
     // Phase A is fixed at TYPE_PHASE_SIZE = 8 bytes (header + one type byte),
@@ -535,6 +538,9 @@ pub(crate) async fn punter_receive(
     // Phase B — the data blocks, first block fixed at 7 bytes.
     let data = receive_phase(
         reader, writer, is_tcp, is_petscii, verbose, &mut state, DATA_PHASE_FIRST_SIZE, &t,
+        // Phase B: the transfer ends here, so the sender's two remaining
+        // closing S/B are ours to collect rather than leave for the menu.
+        true,
     )
     .await?;
     if verbose {
@@ -548,6 +554,12 @@ pub(crate) async fn punter_receive(
 /// returning the concatenated payloads.  `initial_size` is the fixed length of
 /// the first block (8 for the type phase, 7 for the data phase).
 #[allow(clippy::too_many_arguments)]
+/// `last_phase` marks the DATA phase, the one after which the transfer is
+/// over.  It exists for a single reason: the extra end-off drains must not run
+/// at the phase-A boundary, where the bytes that follow are the sender opening
+/// phase B.  Draining them there swallowed the next phase's start and the
+/// captured-CCGMS replay failed with "early eof" -- the mirror image of the
+/// hazard `end_off_sender` documents on its own side.
 async fn receive_phase(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),
@@ -557,6 +569,7 @@ async fn receive_phase(
     state: &mut ReadState,
     initial_size: u8,
     t: &Tunables,
+    last_phase: bool,
 ) -> Result<Vec<u8>, String> {
     let mut out: Vec<u8> = Vec::new();
     let mut next_size = initial_size;
@@ -688,7 +701,10 @@ async fn receive_phase(
             if final_block {
                 // End-off: send GOO (acks the final block), wait ACK, send
                 // S/B, then the SYN handshake.  Mirrors `rechand` rc6/rc8.
-                end_off_receiver(reader, writer, is_tcp, is_petscii, verbose, state, t).await?;
+                end_off_receiver(
+                    reader, writer, is_tcp, is_petscii, verbose, state, t, last_phase,
+                )
+                .await?;
                 return Ok(out);
             }
 
@@ -823,6 +839,7 @@ async fn read_block(
 /// receiver's later SYN/S-B exchanges land in a closed pipe with no harm.
 /// `verbose` enables a per-stage warning so operators can still see when
 /// the handshake didn't fully complete.
+#[allow(clippy::too_many_arguments)]
 async fn end_off_receiver(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),
@@ -831,6 +848,7 @@ async fn end_off_receiver(
     verbose: bool,
     state: &mut ReadState,
     t: &Tunables,
+    last_phase: bool,
 ) -> Result<(), String> {
     // Everything here is best-effort: the final data block was already ack'd,
     // so the file is complete.  A peer that tears down (EOF / closed pipe,
@@ -884,6 +902,32 @@ async fn end_off_receiver(
         }
         if verbose && !got_final_sb {
             glog!("PUNTER recv: end-off final S/B not received (peer may have torn down)");
+        }
+        // **One consume plus TWO drains, because a C1 sender closes with three
+        // S/B.**  `end_off_sender` sends three, and its own comment records
+        // why, from measurement: a conforming receiver consumes one to finish
+        // the SYN/S-B exchange and then drains two more.  Ours consumed one and
+        // left the other two on the wire -- and the caller's next act is to
+        // draw a menu, where C1's handshake codes are literal ASCII whose
+        // letters are commands.  Measured on a C64 after an upload: the `B` of
+        // a leftover `S/B` is "Back", the menus walked on their own, and the
+        // session ended up sitting at the Gateway Shell's `A>` prompt with
+        // `/B?` echoed into it.
+        //
+        // This is a COUNT taken from the reference behaviour, not a wait
+        // tuned against a symptom -- the two earlier attempts at this were
+        // timing guesses in the session UI and each of them was outlasted.
+        // A sender that closes with fewer (or a peer that has already torn
+        // down) simply times these out; they are best-effort like everything
+        // else here, since the file was acknowledged long ago.
+        if got_final_sb && last_phase {
+            for _ in 0..2 {
+                let _ = accept_code(
+                    reader, is_tcp, is_petscii, state, &[Code::Sb],
+                    t.retry_interval.max(1), verbose,
+                )
+                .await?;
+            }
         }
         Ok::<(), String>(())
     }
@@ -1836,7 +1880,8 @@ mod tests {
         let (mut wr, _drain) = duplex(256);
         let mut state = ReadState::default();
         let res =
-            end_off_receiver(&mut rd, &mut wr, false, false, false, &mut state, &t).await;
+            end_off_receiver(&mut rd, &mut wr, false, false, false, &mut state, &t, true)
+                .await;
         assert!(res.is_ok(), "peer teardown during end-off must not fail a complete transfer");
     }
 
@@ -1943,6 +1988,7 @@ mod tests {
         let mut state = ReadState::default();
         let res = receive_phase(
             &mut rd, &mut wr, false, false, false, &mut state, DATA_PHASE_FIRST_SIZE, &t,
+            true,
         )
         .await;
         drop(wr); // let the peer observe EOF and exit

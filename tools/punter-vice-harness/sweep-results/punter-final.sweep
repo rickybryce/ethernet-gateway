@@ -1,9 +1,50 @@
 =============== punter download over serial
 | :.:.:.:.:.:.:  2400           00:00:00|
 |=======================================|
+|  .... ........|
+|=======================================|
+|  .ir: ethernetgateway-data/transfer/|
+|  .  .pload a file|
+|  .  .ownload a file|
+|  .  .elete a file|
+|  .  .hange directory|
+|  .  .ake directory|
+|  .  .ermit server mode|
+|  .  .ateway .hell|
+|  .  ... escaping .....|
+|  .=.efresh .=.ack .=.elp|
+|ethernet/xfer>|
+--- bytes:
+PASS  punter-download.d64: 1775 bytes identical (entry 'PUNTER', type 02)
+=============== punter upload over serial
+    |........................................|
+    |               .........................|
+    |................|
+  -> done
+| :.:.:.:.:.:.:  2400           00:00:00|
+|=======================================|
+|  ...... ...... ........|
+|=======================================|
+|  .  ....../......  128/1., auto|
+|  .  ......         1., autostart|
+|  .  ......         any flavor, auto|
+|  .  ......         .1 ...../.ovaterm|
+|  .ick one, or <- to cancel: p|
+|  .eady to receive: punterupseq|
+|  .ax file size: 8 ..|
+|  .tart ...... send from your terminal n|
+|ow.|
+|  .tart transfer within 45 seconds.|
+|  <- to cancel|
+|googoo|
+--- bytes:
+PASS  punterupseq.usr: 1775 bytes identical
+--- serial rc=0
+=============== punter download over telnet
+| :.:.:.:.:.:.:  2400           00:02:43|
+|=======================================|
 |  ........ ....|
 |=======================================|
-|  .ent 1775 bytes in 47.7s|
 |   #. .ilename               .ize|
 |  ------------------------------------|
 |   1. ...80....              17.6 ..|
@@ -16,4 +57,27 @@
 |  .elect #:|
 --- bytes:
 PASS  punter-download.d64: 1775 bytes identical (entry 'PUNTER', type 02)
-=============== punter upload over serial
+=============== punter upload over telnet
+    |................|
+  -> done
+| :.:.:.:.:.:.:  2400           00:02:39|
+|=======================================|
+|  ...... ...... ........|
+|=======================================|
+|  .  ....../......  128/1., auto|
+|  .  ......         1., autostart|
+|  .  ......         any flavor, auto|
+|  .  ......         .1 ...../.ovaterm|
+|  .ick one, or <- to cancel: p|
+|  .eady to receive: punterupseq|
+|  .ax file size: 8 ..|
+|  .tart ...... send from your terminal n|
+|ow.|
+|  .tart transfer within 45 seconds.|
+|  <- to cancel|
+|googoo|
+|  /.?|
+|.>|
+--- bytes:
+PASS  punterupseq.usr: 1775 bytes identical
+--- telnet rc=0
