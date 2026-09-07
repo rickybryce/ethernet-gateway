@@ -761,13 +761,26 @@ impl russh::server::Handler for SshHandler {
         }
     }
 
+    /// Accept the session channel.
+    ///
+    /// **The `accept()` call is load-bearing and its absence compiles.**  Up
+    /// to russh 0.60 this returned `Result<bool, _>` and `Ok(true)` meant
+    /// accept.  From 0.62 it returns `Result<(), _>` and the decision travels
+    /// on the `ChannelOpenHandle`, whose `Drop` sends
+    /// `AdministrativelyProhibited` -- so the mechanical port of this method
+    /// (name the parameter `_reply`, return `Ok(())`) type-checks, matches the
+    /// trait's own default, and **refuses every SSH session**.  The trait
+    /// default is `async { Ok(()) }` precisely because a handler that says
+    /// nothing is a handler that declines.
     async fn channel_open_session(
         &mut self,
         channel: russh::Channel<russh::server::Msg>,
+        reply: russh::server::ChannelOpenHandle,
         _session: &mut russh::server::Session,
-    ) -> Result<bool, Self::Error> {
+    ) -> Result<(), Self::Error> {
         let _ = channel;
-        Ok(true)
+        reply.accept().await;
+        Ok(())
     }
 
     async fn pty_request(
@@ -1379,6 +1392,109 @@ mod tests {
     /// A session slot is claimed only on a successful login, released only
     /// if it was claimed, and the cap is enforced at exactly `max_sessions`
     /// — so an unauthenticated/stalled connection can't exhaust the cap.
+    /// **A client can authenticate AND open a session channel.**
+    ///
+    /// This is the only test in the suite that drives a real SSH connection
+    /// end to end, and it exists because of a trap that type-checks.  Up to
+    /// russh 0.60 `channel_open_session` returned `Result<bool, _>` and
+    /// `Ok(true)` meant accept.  From 0.62 it returns `Result<(), _>` and the
+    /// answer travels on a `ChannelOpenHandle` whose `Drop` sends
+    /// `AdministrativelyProhibited` -- so the mechanical port (rename the new
+    /// parameter `_reply`, return `Ok(())`) compiles, matches the trait's own
+    /// default, and refuses every session.  Every other test here calls
+    /// handler methods directly and would have passed with the server broken;
+    /// `Channel` and `ChannelOpenHandle` both have private constructors, so
+    /// there is no way to reach this except over a real connection.
+    ///
+    /// Deliberately asserts the channel opens rather than that auth succeeds:
+    /// auth is covered elsewhere, and it was auth-only cover that let the
+    /// channel path go untested in the first place.
+    #[tokio::test]
+    async fn test_a_client_can_open_a_session_channel() {
+        struct Client;
+        impl russh::client::Handler for Client {
+            type Error = russh::Error;
+            async fn check_server_key(
+                &mut self,
+                _key: &russh::keys::PublicKey,
+            ) -> Result<bool, Self::Error> {
+                Ok(true)
+            }
+        }
+
+        let host_key = russh::keys::PrivateKey::random(
+            &mut rand::rng(),
+            russh::keys::Algorithm::Ed25519,
+        )
+        .unwrap();
+        let config = Arc::new(russh::server::Config {
+            keys: vec![host_key],
+            ..Default::default()
+        });
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let handler = SshHandler {
+            shutdown: Arc::new(AtomicBool::new(false)),
+            restart: Arc::new(AtomicBool::new(false)),
+            session_count: Arc::new(AtomicUsize::new(0)),
+            max_sessions: 4,
+            username: "admin".into(),
+            password: "secret".into(),
+            peer_addr: Some(addr.ip()),
+            pty_term: None,
+            duplex_writer: None,
+            relay_writers: std::collections::HashMap::new(),
+            registered_ports: std::collections::HashMap::new(),
+            session_writers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            lockouts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            counted: false,
+        };
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            // Held until the client is done; dropping the session early would
+            // close the channel and make a working server look broken.
+            let running = russh::server::run_stream(config, stream, handler)
+                .await
+                .expect("server side failed to start");
+            let _ = running.await;
+        });
+
+        let mut session = russh::client::connect(
+            Arc::new(russh::client::Config::default()),
+            addr,
+            Client,
+        )
+        .await
+        .expect("client could not connect");
+
+        let auth = session
+            .authenticate_password("admin", "secret")
+            .await
+            .expect("auth call failed");
+        assert!(auth.success(), "password auth was refused");
+
+        // The assertion this test exists for.  A rejected channel open comes
+        // back as an Err here, which is exactly what the mechanical port of
+        // channel_open_session produces -- silently, on every session.
+        let channel = session
+            .channel_open_session()
+            .await
+            .expect("the server refused to open a session channel");
+
+        // Prove the channel is usable, not merely returned: a write is what a
+        // shell session does first, and it fails on a half-open channel.
+        channel
+            .data(&b"\n"[..])
+            .await
+            .expect("could not write to the opened channel");
+
+        drop(session);
+        server.abort();
+    }
+
     #[tokio::test]
     async fn test_auth_password_slot_accounting_and_cap() {
         use russh::server::{Auth, Handler};
