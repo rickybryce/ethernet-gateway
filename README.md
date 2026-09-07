@@ -220,7 +220,25 @@ principally Claude Code (Anthropic) with ChatGPT (OpenAI) alongside it.
 
 This project is licensed under the
 [GNU General Public License v3.0 or later](https://www.gnu.org/licenses/gpl-3.0.html)
-(GPL-3.0-or-later).
+(GPL-3.0-or-later).  The full licence text is in
+[`LICENSE`](LICENSE) — a verbatim copy of the GPL, which the licence itself
+requires be conveyed with the program.
+
+    Ethernet Gateway
+    Copyright (C) 2026 Ricky Bryce
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 Ethernet Gateway builds on a number of open-source Rust crates. Their copyright
 notices and license texts are reproduced in
