@@ -903,7 +903,21 @@ impl Default for SerialPortConfig {
 }
 
 /// Runtime configuration loaded from `egateway.conf`.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// **`Debug` is implemented by hand, below, so the secrets cannot be
+/// printed.**  `#[derive(Debug)]` here meant a single `{:?}` anywhere in the
+/// program would put `password`, `groq_api_key` and `slave_master_password`
+/// into the log -- which is written to disk and served at `/logs`.  Nothing
+/// did, but this project has already shipped that exact class of defect once:
+/// the `gateway_debug` byte trace sat under every prompt in the gateway and
+/// logged the telnet login, a remote SSH password and the Groq key, one byte
+/// per line.
+///
+/// Flagged by CodeQL's `rust/cleartext-logging` as a taint path from
+/// `username` into `logger::log`.  The reported path looks like a false
+/// positive -- no call formats a `Config` -- but the derive was a live trap
+/// regardless, and a redacting `Debug` is a guarantee rather than a habit.
+#[derive(Clone, PartialEq)]
 pub struct Config {
     /// Enable the telnet server. Set to false for SSH-only access.
     pub telnet_enabled: bool,
@@ -1372,6 +1386,137 @@ pub struct Config {
     pub slave_master_password: String,
     /// Relay transport: "ssh" (default) or "raw".
     pub relay_transport: String,
+}
+
+/// Redacting `Debug` -- see the note on [`Config`].
+///
+/// **Every field is printed exactly as `derive` would except the three
+/// secrets**, which read `<set>` / `<empty>`.  Printing the rest is not
+/// politeness: `assert_eq!(cfg, Config::default())` renders both sides with
+/// this impl, so a version that omitted the other 97 fields would fail with a
+/// message naming nothing -- a test that can go red and cannot say why.
+/// "Is the password configured?" is a real diagnostic question whose answer is
+/// not itself a secret, so the marker distinguishes set from unset; a length
+/// would leak more than it is worth.
+///
+/// `username` is deliberately **not** redacted.  It is half a credential, but
+/// it is also the answer to "which account is this?", it appears in the log
+/// on every authentication attempt already, and CodeQL's report was about the
+/// pair rather than the name.
+///
+/// The field list is hand-written and therefore drifts, so
+/// `test_the_redacting_debug_prints_every_field` reads the struct and this
+/// impl out of this file and holds them equal -- a new field must be printed
+/// or redacted by name, and a new *secret* cannot be added silently and
+/// printed raw.
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fn redact(v: &str) -> &'static str {
+            if v.is_empty() { "<empty>" } else { "<set>" }
+        }
+        f.debug_struct("Config")
+            .field("telnet_enabled", &self.telnet_enabled)
+            .field("telnet_port", &self.telnet_port)
+            .field("telnet_gateway_negotiate", &self.telnet_gateway_negotiate)
+            .field("telnet_gateway_raw", &self.telnet_gateway_raw)
+            .field("gateway_debug", &self.gateway_debug)
+            .field("gateway_petscii_translate", &self.gateway_petscii_translate)
+            .field("gateway_term_width", &self.gateway_term_width)
+            .field("gateway_term_height", &self.gateway_term_height)
+            .field("enable_console", &self.enable_console)
+            .field("setup_wizard_completed", &self.setup_wizard_completed)
+            .field("security_enabled", &self.security_enabled)
+            .field("disable_ip_safety", &self.disable_ip_safety)
+            .field("username", &self.username)
+            .field("password", &redact(&self.password))
+            .field("transfer_dir", &self.transfer_dir)
+            .field("place_bundled_terminals", &self.place_bundled_terminals)
+            .field("gui_window_geometry", &self.gui_window_geometry)
+            .field("gui_zoom", &self.gui_zoom)
+            .field("max_sessions", &self.max_sessions)
+            .field("idle_timeout_secs", &self.idle_timeout_secs)
+            .field("groq_api_key", &redact(&self.groq_api_key))
+            .field("ai_model", &self.ai_model)
+            .field("browser_homepage", &self.browser_homepage)
+            .field("weather_location", &self.weather_location)
+            .field("weather_units", &self.weather_units)
+            .field("log_to_file", &self.log_to_file)
+            .field("log_file", &self.log_file)
+            .field("log_max_size_kb", &self.log_max_size_kb)
+            .field("log_max_files", &self.log_max_files)
+            .field("verbose", &self.verbose)
+            .field("xmodem_negotiation_timeout", &self.xmodem_negotiation_timeout)
+            .field("xmodem_block_timeout", &self.xmodem_block_timeout)
+            .field("xmodem_max_retries", &self.xmodem_max_retries)
+            .field("xmodem_negotiation_retry_interval", &self.xmodem_negotiation_retry_interval)
+            .field("zmodem_negotiation_timeout", &self.zmodem_negotiation_timeout)
+            .field("zmodem_frame_timeout", &self.zmodem_frame_timeout)
+            .field("zmodem_max_retries", &self.zmodem_max_retries)
+            .field("zmodem_negotiation_retry_interval", &self.zmodem_negotiation_retry_interval)
+            .field("kermit_negotiation_timeout", &self.kermit_negotiation_timeout)
+            .field("kermit_packet_timeout", &self.kermit_packet_timeout)
+            .field("kermit_idle_timeout", &self.kermit_idle_timeout)
+            .field("kermit_max_retries", &self.kermit_max_retries)
+            .field("kermit_max_packet_length", &self.kermit_max_packet_length)
+            .field("kermit_window_size", &self.kermit_window_size)
+            .field("kermit_block_check_type", &self.kermit_block_check_type)
+            .field("kermit_long_packets", &self.kermit_long_packets)
+            .field("kermit_sliding_windows", &self.kermit_sliding_windows)
+            .field("kermit_streaming", &self.kermit_streaming)
+            .field("kermit_attribute_packets", &self.kermit_attribute_packets)
+            .field("kermit_repeat_compression", &self.kermit_repeat_compression)
+            .field("kermit_8bit_quote", &self.kermit_8bit_quote)
+            .field("kermit_resume_partial", &self.kermit_resume_partial)
+            .field("kermit_resume_max_age_hours", &self.kermit_resume_max_age_hours)
+            .field("kermit_locking_shifts", &self.kermit_locking_shifts)
+            .field("kermit_wait_for_receiver", &self.kermit_wait_for_receiver)
+            .field("allow_atdt_kermit", &self.allow_atdt_kermit)
+            .field("allow_peer_dial", &self.allow_peer_dial)
+            .field("kermit_server_enabled", &self.kermit_server_enabled)
+            .field("kermit_server_port", &self.kermit_server_port)
+            .field("punter_block_size", &self.punter_block_size)
+            .field("punter_negotiation_timeout", &self.punter_negotiation_timeout)
+            .field("punter_block_timeout", &self.punter_block_timeout)
+            .field("punter_max_retries", &self.punter_max_retries)
+            .field("punter_max_bad_rounds", &self.punter_max_bad_rounds)
+            .field("punter_negotiation_retry_interval", &self.punter_negotiation_retry_interval)
+            .field("punter_hangup_on_failure", &self.punter_hangup_on_failure)
+            .field("web_enabled", &self.web_enabled)
+            .field("web_port", &self.web_port)
+            .field("cpm_emu_enabled", &self.cpm_emu_enabled)
+            .field("cpm_screen_input", &self.cpm_screen_input)
+            .field("cpm_joystick", &self.cpm_joystick)
+            .field("cpm_boot_speed", &self.cpm_boot_speed)
+            .field("open_screen_after_restart", &self.open_screen_after_restart)
+            .field("cpm_boot_writable", &self.cpm_boot_writable)
+            .field("disable_gateway_connections", &self.disable_gateway_connections)
+            .field("cpm_emu_max_minstr", &self.cpm_emu_max_minstr)
+            .field("cpm_emu_uart", &self.cpm_emu_uart)
+            .field("cpm_mounts", &self.cpm_mounts)
+            .field("cpm_boot_image", &self.cpm_boot_image)
+            .field("cpm_boot_machine", &self.cpm_boot_machine)
+            .field("cpm_boot_rom", &self.cpm_boot_rom)
+            .field("cpm_boot_backspace", &self.cpm_boot_backspace)
+            .field("cpm_printer", &self.cpm_printer)
+            .field("cpm_printer_autolf", &self.cpm_printer_autolf)
+            .field("cpm_printer_port", &self.cpm_printer_port)
+            .field("cpm_cpu", &self.cpm_cpu)
+            .field("cpm_emu_modem", &self.cpm_emu_modem)
+            .field("serial_a", &self.serial_a)
+            .field("serial_b", &self.serial_b)
+            .field("ssh_enabled", &self.ssh_enabled)
+            .field("ssh_port", &self.ssh_port)
+            .field("ssh_gateway_auth", &self.ssh_gateway_auth)
+            .field("gateway_role", &self.gateway_role)
+            .field("master_accept_relays", &self.master_accept_relays)
+            .field("allow_relay_kermit", &self.allow_relay_kermit)
+            .field("slave_master_host", &self.slave_master_host)
+            .field("slave_master_port", &self.slave_master_port)
+            .field("slave_master_username", &self.slave_master_username)
+            .field("slave_master_password", &redact(&self.slave_master_password))
+            .field("relay_transport", &self.relay_transport)
+            .finish()
+    }
 }
 
 impl Default for Config {
@@ -6703,6 +6848,134 @@ mod tests {
         );
     }
 
+
+    /// A `{:?}` of a `Config` cannot print a secret.
+    ///
+    /// `Config` derived `Debug` while holding `password`, `groq_api_key` and
+    /// `slave_master_password`, so one careless format anywhere in the program
+    /// would have put them in a log that is written to disk and served at
+    /// `/logs`.  Nothing did -- but this project has already shipped that class
+    /// of defect once, when the `gateway_debug` byte trace logged the telnet
+    /// login, a remote SSH password and the Groq key a byte at a time.  A
+    /// redacting `Debug` makes it a guarantee instead of a habit.
+    #[test]
+    fn test_debugging_a_config_cannot_leak_a_credential() {
+        let cfg = Config {
+            username: "operator".into(),
+            password: "correct-horse-battery-staple".into(),
+            groq_api_key: "gsk_SECRETKEYVALUE".into(),
+            slave_master_password: "master-secret".into(),
+            ..Config::default()
+        };
+        let shown = format!("{:?}", cfg);
+
+        for secret in [
+            "correct-horse-battery-staple",
+            "gsk_SECRETKEYVALUE",
+            "master-secret",
+        ] {
+            assert!(
+                !shown.contains(secret),
+                "Debug output leaked {:?}:\n{}",
+                secret,
+                shown
+            );
+        }
+
+        // Three positive controls, because asserting only that something is
+        // ABSENT passes just as well when nothing was printed at all -- the
+        // same trap as the `gateway_debug` mute test.
+        //
+        // (1) A configured secret is distinguishable from an unset one.
+        assert!(shown.contains("<set>"), "a configured secret must read as set: {}", shown);
+        let blank = format!("{:?}", Config::default());
+        assert!(
+            blank.contains("<empty>"),
+            "an unset secret must be distinguishable from a set one: {}",
+            blank
+        );
+        // (2) The ordinary fields are still there, so `assert_eq!` on two
+        // whole configs can still name the field that differs.
+        assert!(shown.contains("telnet_port: 2323"), "ordinary fields must print: {}", shown);
+        assert!(
+            shown.contains("relay_transport"),
+            "the last field must print, not be cut off: {}",
+            shown
+        );
+        // (3) `username` is printed ON PURPOSE -- it answers "which account?",
+        // it is already logged on every authentication attempt, and pinning it
+        // here means removing it is a decision rather than an accident.
+        assert!(shown.contains("operator"), "username is printed deliberately: {}", shown);
+    }
+
+    /// The hand-written `Debug` prints every field of `Config`.
+    ///
+    /// A hand-written impl beside a 100-field struct drifts, and both
+    /// directions are defects: a field left out is a diagnostic that silently
+    /// stopped working (and `assert_eq!` on two configs would stop naming the
+    /// difference), and a **new secret** left out is a credential printed
+    /// raw -- exactly what the impl exists to prevent.  So the two lists are
+    /// read out of this file and held equal, and a secret must be named in
+    /// `REDACTED` here as well as passed through `redact` there.
+    ///
+    /// Reading the source is the only way to ask this: `Debug` output alone
+    /// cannot tell a field that was omitted from one whose value happens to
+    /// match a neighbour's.
+    #[test]
+    fn test_the_redacting_debug_prints_every_field() {
+        /// The fields that must appear inside `redact(...)` rather than raw.
+        /// `username` is deliberately absent -- see the impl's own note.
+        const REDACTED: [&str; 3] = ["password", "groq_api_key", "slave_master_password"];
+
+        let src = include_str!("config.rs");
+
+        // The struct's own field list.
+        let struct_body = src
+            .split_once("\npub struct Config {")
+            .expect("Config struct not found")
+            .1
+            .split_once("\n}")
+            .expect("unterminated Config struct")
+            .0;
+        let mut declared: Vec<&str> = Vec::new();
+        for line in struct_body.lines() {
+            if let Some(rest) = line.strip_prefix("    pub ")
+                && let Some((name, _)) = rest.split_once(':')
+            {
+                declared.push(name);
+            }
+        }
+
+        // What the impl prints, in order, and how.
+        let impl_body = src
+            .split_once("f.debug_struct(\"Config\")")
+            .expect("Debug impl not found")
+            .1
+            .split_once(".finish()")
+            .expect("unterminated Debug impl")
+            .0;
+        let mut printed: Vec<&str> = Vec::new();
+        let mut redacted: Vec<&str> = Vec::new();
+        for line in impl_body.lines() {
+            let line = line.trim();
+            let Some(rest) = line.strip_prefix(".field(\"") else { continue };
+            let (name, tail) = rest.split_once('"').expect("unterminated field name");
+            printed.push(name);
+            if tail.contains("redact(") {
+                redacted.push(name);
+            }
+        }
+
+        assert!(declared.len() > 90, "field scan found only {}", declared.len());
+        assert_eq!(
+            declared, printed,
+            "the Debug impl's field list has drifted from the struct's"
+        );
+        assert_eq!(
+            redacted, REDACTED,
+            "the set of fields passed through redact() has changed"
+        );
+    }
 
     /// The CodeQL workflow builds with the same system packages CI does.
     ///
