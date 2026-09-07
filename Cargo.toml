@@ -69,9 +69,20 @@ iz80 = "0.5.1"
 [dev-dependencies]
 proptest = "1"
 tokio = { version = "1", features = ["test-util"] }
-# Only used to pin the checked-in EGT8080.COM against an explicit hash (see
-# test_bundled_terminals_match_pinned_hashes).  Already in the tree via russh,
-# so this adds nothing to the build.
+# An INDEPENDENT SHA-256, for tests that need one rather than for hashing:
+# it pins the checked-in EGT8080.COM/EGT80.COM against explicit hashes
+# (`test_bundled_terminals_match_pinned_hashes`), the measured Altair blank
+# and extraction against the guest's own output, and -- the one that matters
+# most -- our hand-rolled production hasher against a second implementation
+# (`test_sha256_agrees_with_an_independent_implementation`).  `fetch::sha256`
+# verifies every disk and ROM the product downloads, so its oracle must not
+# be itself.
+#
+# Costs nothing: BOTH 0.10 and 0.11 are already in the tree under russh
+# (0.10 via russh/bcrypt-pbkdf/ssh-encoding, 0.11 via its forked ssh-key,
+# ed25519-dalek, rsa and the p256/384/521 crates), so this tracks a copy that
+# is built regardless.  Do not reach for it in non-test code -- a second
+# hasher in the binary is how the two disagree about a download.
 sha2 = "0.11"
 
 [profile.release]
