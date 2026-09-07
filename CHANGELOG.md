@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **The login password is stored as a PBKDF2 hash, not in plain text.**
+  `egateway.conf` held the unified `username` / `password` pair -- shared by
+  telnet, SSH and the web UI -- in the clear.  The password is now a
+  PBKDF2-HMAC-SHA256 PHC string, and the rule lives in one place
+  (`src/credential.rs`) because three surfaces authenticate against the same
+  credential.
+
+  **Nothing to do on upgrade, and nothing is locked out.**  A cleartext
+  password is still accepted, because refusing it would shut every existing
+  installation out of its own gateway at the version that introduced hashing --
+  on a device that is often headless and reached from a Commodore 64.  The
+  gateway rewrites a cleartext password as a hash on the **next start** and says
+  so in the log.  The password itself does not change; only how it is stored.
+
+  **It can no longer be read back out of the file.**  If you were copying the
+  master's `password` value into a slave's `slave_master_password`, use the
+  password you set rather than the file's contents.  `slave_master_password`
+  stays plain text of necessity -- a slave *presents* it, so it can never be a
+  hash -- as does the Groq API key.
+
+  PBKDF2 rather than Argon2id because of the hardware: Argon2's recommended
+  parameters want 19&nbsp;MiB *per concurrent verification*, and this gateway
+  runs on Raspberry Pis with `max_sessions` defaulting to 50.  It adds no new
+  dependency (pbkdf2 was already built via russh and pkcs5), and the iteration
+  count lives inside the stored string, so raising it later invalidates nothing.
+
+  The shipped `changeme` default stays cleartext deliberately: a salted hash
+  differs on every write, so it could not be documented in the manual's
+  Key/Default table.  It is a published placeholder, and the first restart
+  hashes it.
+
+### Changed
+
+- **The password box is empty on every configuration screen, and empty means
+  "leave it alone".**  The web and desktop editors used to pre-fill it with the
+  stored value; telnet and the setup wizard never did.  Now none of them do.
+  Beyond not putting the credential in a page's source, this removes a way to
+  lock yourself out: the desktop editor bound the stored value to an editable
+  field, so once it is a hash a single stray keystroke would produce a
+  malformed one that no longer authenticates.  Saving with the box empty leaves
+  the password untouched; type in it only when you mean to change it.
+
+- **The web UI authenticates on the way in rather than on every request.**  HTTP
+  Basic auth re-presents the credential with every request, and verifying a hash
+  is deliberately expensive -- measured at 237&nbsp;ms.  The booted-disk screen
+  polls `/vdm/frame` every 150&nbsp;ms and the log view every 2&nbsp;s, so
+  checking each one would have cost more than a whole CPU core and stuttered the
+  CP/M emulator, which shares the same runtime.  The first request pays; later
+  ones are answered from a cached result.  Changing the password invalidates
+  that cache immediately, and a wrong password is never cached, so guessing
+  stays as slow as the hash makes it.
+
+
 ## [1.0.0-RC1] - 2026-09-07
 
 ### Fixed
