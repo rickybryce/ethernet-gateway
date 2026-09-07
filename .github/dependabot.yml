@@ -1,11 +1,23 @@
 # Dependabot keeps two things current that nothing else here watches.
 #
-# `cargo` matters because an advisory can appear in a dependency without a
-# line of our code changing: RUSTSEC-2026-0221 (`event-listener` letting
-# `!Send` tags cross thread boundaries) sat in our lockfile through the
-# v1.0.0-RC1 release and was found by running OpenSSF Scorecard by hand, not
-# by the `audit` CI job, which reported success on the tagged commit.  A weekly
-# PR is the cheapest way to stop that recurring.
+# `cargo` matters because nothing else here moves a version: the `audit` job
+# REPORTS a vulnerable lockfile and cannot fix one, so before this file the
+# only thing that bumped a dependency was somebody deciding to.
+#
+# **These are version updates, not security updates, and the difference is the
+# whole point.**  This file schedules hygiene bumps.  Reacting to a *published
+# advisory* -- a PR that ignores `open-pull-requests-limit`, and a
+# notification -- is Dependabot alerts + security updates, which is a
+# repository setting and not configurable from here.  It was off when this file
+# was added, so for a while the rationale written here described protection
+# that did not exist.  If a rewrite of this comment ever claims otherwise,
+# check the repo setting before believing it.
+#
+# (First draft of this comment cited RUSTSEC-2026-0221 as a live advisory the
+# `audit` job had missed.  Wrong: it patches at `event-listener` >= 5.4.2 and
+# the lockfile was already there, so the green `audit` job was correct.  A
+# motivating example nobody re-checks is how a false claim survives inside an
+# otherwise sound rationale.)
 #
 # `github-actions` matters because the workflows pin action SHAs rather than
 # tags -- a pin is a supply-chain control and a maintenance burden at the same

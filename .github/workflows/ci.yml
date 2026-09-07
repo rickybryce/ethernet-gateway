@@ -5,6 +5,29 @@ on:
     branches: [master, main]
   pull_request:
     branches: [master, main]
+  # **Weekly, because two of these jobs answer questions that change while
+  # nobody pushes.**  Every trigger above needs somebody to do something, so a
+  # quiet fortnight means nothing here has been asked.  Two jobs go stale that
+  # way and both have cost a release already:
+  #
+  #   * `audit` reads an advisory database that is updated continuously, and a
+  #     new advisory against a dependency we already have is exactly the case
+  #     no push will reveal.  (Dependabot security updates now cover the same
+  #     ground from the other side -- see .github/dependabot.yml on why those
+  #     are a repository setting and not in that file.  Two independent
+  #     detectors is deliberate: one is ours and one is GitHub's.)
+  #   * every job installs `@stable` and the repo pins no toolchain, so a new
+  #     rustc arrives here before it arrives locally.  This has happened for
+  #     real: 1.98 added `chunks_exact_to_as_chunks` and `needless_late_init`
+  #     fired twice more, six errors a clean local 1.97.1 could not see, and
+  #     they failed the macOS *and* Windows jobs on a release cut.  Finding
+  #     that on a Wednesday is a chore; finding it while cutting a release is
+  #     the release.
+  #
+  # Offset from codeql.yml's Monday 04:27 rather than sharing it, so a red X
+  # names one workflow.
+  schedule:
+    - cron: '17 5 * * 3'
   # Allow manual triggering from the Actions tab.
   workflow_dispatch:
 
