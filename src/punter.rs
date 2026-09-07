@@ -188,23 +188,55 @@ pub(crate) enum PunterFileType {
 }
 
 impl PunterFileType {
+    /// The Phase-A type byte is an **index into CCGMS's own `upltyp` table**,
+    /// `ccgmsterm/src/xfer.s:192`:
+    ///
+    /// ```text
+    /// upltyp:
+    ///     .byte 0,'P','S','U'
+    /// ```
+    ///
+    /// `prompt_file_type` (`filetype.s`) matches the operator's keypress
+    /// against that table and stores the matching **index** -- counting down
+    /// from 3 and never reaching 0 -- and `punter.s` puts that value straight
+    /// into the block (`lda filetype / sta (bufptr),y` at `POS_PAYLOAD`),
+    /// reads it straight back out on receive, and displays it by indexing the
+    /// same table.  So the wire values are 1, 2 and 3, and 0 means "none".
+    ///
+    /// **This was off by one, and every oracle we had agreed with the wrong
+    /// answer.**  The mapping was inferred from a table of type *names*
+    /// (`head.src:423-426`, `prg/seq/usr/---`) on the assumption that the wire
+    /// value is that list's 0-based index.  It was then "confirmed" by
+    /// `ccgmsterm/test/punter.c:417`, which hardcodes `xfer_buffer[7] = 1;`
+    /// with the comment `// SEQ` -- **that comment is wrong**: 1 is PRG by the
+    /// table above.  Our captured-wire fixture asserted the mislabelled
+    /// reading, so 2500 tests and a real CCGMS capture all passed while the
+    /// mapping was shifted.
+    ///
+    /// Measured against NovaTerm 9.6c, which agrees with the CCGMS source and
+    /// not with our table: fourteen samples in one session, `Type: prg` on its
+    /// screen arriving as 1 and `Type: seq` as 2.  It was invisible until then
+    /// because `extension()` is only consulted when the operator's filename
+    /// has none, and every filename we had ever tested ended in `.seq`.
     fn to_byte(self) -> u8 {
         match self {
-            PunterFileType::Prg => 0,
-            PunterFileType::Seq => 1,
-            PunterFileType::Usr => 2,
-            PunterFileType::Unknown => 3,
+            PunterFileType::Prg => 1,
+            PunterFileType::Seq => 2,
+            PunterFileType::Usr => 3,
+            // 0 is the table's unused slot, which is the closest thing the
+            // protocol has to "unstated".
+            PunterFileType::Unknown => 0,
         }
     }
 
-    /// Map a Phase-A type byte back to the CBM-aligned enum.  Bytes outside
-    /// the documented 0..=3 range are treated as `Unknown` rather than
-    /// silently coerced to SEQ.
+    /// Map a Phase-A type byte back to the enum -- see `to_byte` for where
+    /// these values come from.  0 (the table's unused slot) and anything above
+    /// 3 are `Unknown` rather than being coerced to a real type.
     fn from_byte(b: u8) -> PunterFileType {
         match b {
-            0 => PunterFileType::Prg,
-            1 => PunterFileType::Seq,
-            2 => PunterFileType::Usr,
+            1 => PunterFileType::Prg,
+            2 => PunterFileType::Seq,
+            3 => PunterFileType::Usr,
             _ => PunterFileType::Unknown,
         }
     }
@@ -1364,7 +1396,19 @@ mod tests {
             data, expected,
             "capture must decode to the CCGMS sender's payload"
         );
-        assert_eq!(ft, PunterFileType::Seq, "captured type block must decode as SEQ");
+        // **The capture's type byte is 1, which is PRG.**  This asserted SEQ
+        // for two releases because `ccgmsterm/test/punter.c:417` hardcodes
+        // `xfer_buffer[7] = 1;` with the comment `// SEQ`, and that comment
+        // contradicts CCGMS's own `upltyp` table -- 1 is 'P'.  The fixture is
+        // a real CCGMS wire capture and it always said PRG; only the label was
+        // wrong, and this assertion is what kept the label alive.  Renaming
+        // the fixture would lose the capture's provenance, so the file keeps
+        // its name and the truth lives here.
+        assert_eq!(
+            ft,
+            PunterFileType::Prg,
+            "the captured type byte is 1, which CCGMS's upltyp table makes PRG"
+        );
     }
 
     /// Refresh the checked-in CCGMS Punter fixture.  Two-step opt-in
@@ -1620,17 +1664,21 @@ mod tests {
         ] {
             assert_eq!(PunterFileType::from_byte(ft.to_byte()), ft);
         }
-        // The four documented wire values map to the four enum variants.
-        assert_eq!(PunterFileType::from_byte(0), PunterFileType::Prg);
-        assert_eq!(PunterFileType::from_byte(1), PunterFileType::Seq);
-        assert_eq!(PunterFileType::from_byte(2), PunterFileType::Usr);
-        assert_eq!(PunterFileType::from_byte(3), PunterFileType::Unknown);
+        // The wire values are indices into CCGMS's `upltyp` table,
+        // `.byte 0,'P','S','U'` (ccgmsterm/src/xfer.s:192) -- so 1/2/3 are
+        // the real types and 0 is the table's unused slot.  These were
+        // 0/1/2 here, one too low, matching a table of type NAMES rather
+        // than the wire; see `to_byte` for the whole story.
+        assert_eq!(PunterFileType::from_byte(0), PunterFileType::Unknown);
+        assert_eq!(PunterFileType::from_byte(1), PunterFileType::Prg);
+        assert_eq!(PunterFileType::from_byte(2), PunterFileType::Seq);
+        assert_eq!(PunterFileType::from_byte(3), PunterFileType::Usr);
     }
 
     #[test]
     fn file_type_out_of_range_byte_is_unknown_not_seq() {
-        // Anything past the documented 0..=3 range maps to Unknown (matches
-        // filetype3 "---"), never silently coerced to a real type.
+        // Anything past the table's 1..=3 maps to Unknown, never silently
+        // coerced to a real type.
         for b in 4u8..=255 {
             assert_eq!(PunterFileType::from_byte(b), PunterFileType::Unknown);
         }
