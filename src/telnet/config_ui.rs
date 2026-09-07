@@ -2166,15 +2166,22 @@ impl TelnetSession {
         }
     }
 
+    /// Prompt for one security field.
+    ///
+    /// `masked` hides the current value and reads the new one with echo
+    /// suppressed.  Named to match `webserver::textfield` and
+    /// `gui::singleline_with_menu`, so the three config surfaces use one word
+    /// for one idea -- a vocabulary that splits across surfaces has been the
+    /// defect here before.
     pub(in crate::telnet) async fn security_set_field(
         &mut self,
         label: &str,
         key: &str,
         current: &str,
-        is_password: bool,
+        masked: bool,
     ) -> Result<(), std::io::Error> {
         self.send_line("").await?;
-        if is_password {
+        if masked {
             self.send_line(&format!(
                 "  Current {}: {}",
                 label.to_lowercase(),
@@ -2192,7 +2199,7 @@ impl TelnetSession {
         self.send(&format!("  New {}: ", label.to_lowercase())).await?;
         self.flush().await?;
 
-        let input = if is_password {
+        let input = if masked {
             self.get_password_input().await?
         } else {
             self.get_line_input().await?
