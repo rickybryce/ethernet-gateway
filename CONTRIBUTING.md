@@ -52,6 +52,20 @@ alignment that is there on purpose. CI's `rustfmt` job is advisory
 (`continue-on-error`) and never gates a build. Match the formatting of the code
 around your change.
 
+That rule is not only about taste. **This repo reads its own Rust source with
+`include_str!` at 59 places and parses it line by line** — proving
+there is exactly one caller of a function, that a hand-written list has not
+drifted from the struct beside it, that no second path writes guest memory,
+that a label fits its column. Those parsers assume the current line structure.
+Reformatting breaks them, and it breaks them in two ways: the lucky one is a
+loud assertion failure, and the bad one is a parser that silently matches
+nothing and passes vacuously. If you write such a test, make it assert that it
+found a plausible number of things, so it cannot pass by finding none.
+
+Formatting cannot change behaviour on the wire — rustfmt never edits string
+literals, so protocol bytes and the 40-column PETSCII layout are untouched.
+The exposure is the test suite, not the product.
+
 Beyond that, three rules carry most of the review feedback here:
 
 **1. Measure; don't reason.** This project talks to 1970s and 1980s hardware,
