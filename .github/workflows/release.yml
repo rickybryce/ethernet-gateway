@@ -14,6 +14,16 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Least privilege by default.  Scorecard's Token-Permissions check reads the
+# absence of this block as "every job gets the runner's default token", which
+# on a public repo is read-only for contents but wider than any job here
+# needs.  A job that needs more declares it and OVERRIDES this wholesale --
+# `audit` needs `checks: write` for the advisory Check Run and says so, and
+# release.yml's publish job needs `contents: write` plus `id-token: write` for
+# keyless sigstore signing.  Neither is affected by this line.
+permissions:
+  contents: read
+
 jobs:
   # ─── Build binaries on each target platform ──────────────
   build:
@@ -40,10 +50,10 @@ jobs:
             archive: zip
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: ${{ matrix.target }}
 
@@ -62,7 +72,7 @@ jobs:
             libwayland-dev \
             libfontconfig1-dev
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: cargo build --release
         run: cargo build --release --target ${{ matrix.target }} --verbose
@@ -195,7 +205,7 @@ jobs:
           fi
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: build-${{ matrix.target }}
           path: |
@@ -214,12 +224,12 @@ jobs:
       contents: write
       id-token: write  # needed for sigstore/cosign keyless signing
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0  # needed so CHANGELOG.md is present
 
       - name: Download all build artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: dist
           merge-multiple: true
@@ -259,7 +269,7 @@ jobs:
 
       # ─── Sigstore keyless signing (always runs, no secrets needed) ─
       - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
       - name: Sigstore-sign artifacts
         run: |
@@ -292,7 +302,7 @@ jobs:
           echo "notes_path=release_notes.md" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           tag_name: ${{ github.ref_name || github.event.inputs.tag }}
           name: "ethernetgateway ${{ github.ref_name || github.event.inputs.tag }}"

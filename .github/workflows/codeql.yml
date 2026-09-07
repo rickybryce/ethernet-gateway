@@ -1,0 +1,82 @@
+# CodeQL static analysis.
+#
+# What this adds over what is already here: `clippy -D warnings` is a lint and
+# `cargo audit` / `cargo deny` look at DEPENDENCIES.  Nothing in this repo
+# looked for a data-flow defect in our own code -- a tainted value reaching a
+# path join, a parser index derived from a peer-supplied length -- which is
+# exactly the shape of the surface this program exposes: it parses untrusted
+# wire input from telnet, ZMODEM, Kermit, Punter and HTTP.
+#
+# **Rust support in CodeQL is recent.**  If a future runner drops it, this job
+# fails loudly rather than silently analysing nothing, which is the right way
+# round: a security job that quietly stops looking is worse than one that goes
+# red.  It is a separate workflow from ci.yml so it can be scheduled -- a new
+# query pack finds things in unchanged code, so the weekly run matters as much
+# as the per-push one.
+name: CodeQL
+
+on:
+  push:
+    branches: [master, dev]
+  pull_request:
+    branches: [master, dev]
+  schedule:
+    # Weekly, so new queries reach old code.
+    - cron: '27 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: analyze (rust)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write   # required to upload the SARIF results
+      actions: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      # Pin the toolchain the same way ci.yml does, so an autobuild failure is
+      # about our code and not about which rustc the runner happened to ship.
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
+        with:
+          languages: rust
+          queries: security-and-quality
+
+      # `cargo build` rather than autobuild: this crate needs system libraries
+      # for the desktop GUI stack, and a build we spell out is one we can fix
+      # when it breaks.
+      #
+      # **This list is ci.yml's, verbatim.**  A second, invented list is how a
+      # job breaks for a reason that has nothing to do with what it is
+      # testing -- the first draft here said `libgtk-3-dev` and omitted the
+      # xcb/wayland/fontconfig packages the GUI stack actually needs.  If
+      # ci.yml's list changes, this one changes with it.
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libudev-dev \
+            pkg-config \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libssl-dev \
+            libwayland-dev \
+            libfontconfig1-dev
+
+      - name: Build
+        run: cargo build --all-targets
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
+        with:
+          category: "/language:rust"

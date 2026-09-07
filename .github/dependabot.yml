@@ -1,0 +1,40 @@
+# Dependabot keeps two things current that nothing else here watches.
+#
+# `cargo` matters because an advisory can appear in a dependency without a
+# line of our code changing: RUSTSEC-2026-0221 (`event-listener` letting
+# `!Send` tags cross thread boundaries) sat in our lockfile through the
+# v1.0.0-RC1 release and was found by running OpenSSF Scorecard by hand, not
+# by the `audit` CI job, which reported success on the tagged commit.  A weekly
+# PR is the cheapest way to stop that recurring.
+#
+# `github-actions` matters because the workflows pin action SHAs rather than
+# tags -- a pin is a supply-chain control and a maintenance burden at the same
+# time, and this is what carries the burden.  Without it the pins rot.
+#
+# Grouped so a week's updates arrive as one PR to review rather than a dozen:
+# with a single maintainer, review attention is the scarce resource, and a
+# flood of separate PRs is how bumps stop being read.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor-and-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    commit-message:
+      prefix: "chore(deps)"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "chore(ci)"

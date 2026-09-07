@@ -6704,6 +6704,72 @@ mod tests {
     }
 
 
+    /// The CodeQL workflow builds with the same system packages CI does.
+    ///
+    /// Two apt lists for one build is a rule written in two places, and this
+    /// repo's own experience is that such a rule holds in one: the first draft
+    /// of `codeql.yml` invented its own list -- `libgtk-3-dev` and nothing
+    /// else -- and would have failed on the xcb, wayland and fontconfig
+    /// packages the desktop stack actually needs, for a reason having nothing
+    /// to do with what the job is for.
+    ///
+    /// Comparing the package SETS rather than the text, because the two files
+    /// indent differently and a whitespace-sensitive comparison would fail for
+    /// no reason -- the trap a source-scanning test falls into when it reads
+    /// formatting instead of meaning.
+    #[test]
+    fn test_codeql_builds_with_the_same_packages_as_ci() {
+        // **One set per install STEP, not one per file.**  `ci.yml` has two:
+        // the build dependencies, and the interop job's `ckermit` / `lrzsz`.
+        // Pooling them made this test demand that CodeQL install the interop
+        // tools too, which it has no use for -- a scan that reads the file's
+        // shape wrongly invents a defect just as easily as it misses one.
+        fn apt_blocks(yaml: &str) -> Vec<std::collections::BTreeSet<String>> {
+            let mut blocks = Vec::new();
+            let mut cur: Option<std::collections::BTreeSet<String>> = None;
+            for line in yaml.lines() {
+                let t = line.trim();
+                if t.starts_with("sudo apt-get install") {
+                    cur = Some(std::collections::BTreeSet::new());
+                    continue;
+                }
+                let Some(set) = cur.as_mut() else { continue };
+                let name = t.trim_end_matches('\\').trim();
+                if name.is_empty() || name.starts_with('-') || name.contains(':') {
+                    blocks.push(cur.take().unwrap());
+                    continue;
+                }
+                set.insert(name.to_string());
+            }
+            if let Some(set) = cur {
+                blocks.push(set);
+            }
+            blocks.retain(|b| !b.is_empty());
+            blocks
+        }
+
+        let ci = apt_blocks(include_str!("../.github/workflows/ci.yml"));
+        let codeql = apt_blocks(include_str!("../.github/workflows/codeql.yml"));
+
+        // Positive controls: both scans found something.  Without these an
+        // empty-vs-empty comparison passes while reading neither file.
+        assert!(
+            ci.iter().any(|b| b.contains("libfontconfig1-dev")),
+            "the ci.yml scan found no build package list -- the format changed \
+             and this test is comparing nothing to nothing"
+        );
+        assert_eq!(codeql.len(), 1, "codeql.yml should have one install step");
+
+        assert!(
+            ci.contains(&codeql[0]),
+            "codeql.yml must install exactly the set one of ci.yml's steps \
+             does, so the two cannot drift; codeql wants {:?}, ci's steps are \
+             {:?}",
+            codeql[0],
+            ci
+        );
+    }
+
     /// A failed file write is reported (not silently swallowed), so an
     /// explicit Save can tell the user persistence did not happen.
     ///
