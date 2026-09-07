@@ -10,9 +10,12 @@ Kept in the repository because the *justifications* are the valuable part: when
 the badge is renewed, or a criterion changes, the reasoning behind each answer
 is here rather than being reconstructed.
 
-**One criterion is not a clean "Met" — see `crypto_password_storage` below.
-Read that before submitting.** Everything else is either straightforwardly met
-or legitimately N/A.
+**Every criterion is now either met or legitimately N/A.**
+`crypto_password_storage` was the one open question when these notes were
+written; the inbound credential is hashed as of the entry below, so it is
+answered **Met** rather than argued. The reasoning is kept because the
+*scope* of what is and is not hashable here is the part worth not
+reconstructing.
 
 Repository: <https://github.com/rickybryce/ethernetgateway>
 
@@ -94,7 +97,7 @@ Repository: <https://github.com/rickybryce/ethernetgateway>
 | `crypto_working` | MUST | Met | No broken primitives; SSH transport is negotiated by `russh`. |
 | `crypto_weaknesses` | SHOULD | Met | No MD5/SHA-1 in a security role. |
 | `crypto_pfs` | SHOULD | Met | SSH key exchange provides forward secrecy. |
-| **`crypto_password_storage`** | **MUST** | **See note below** | **Not a clean Met — read the note before answering.** |
+| `crypto_password_storage` | MUST | Met | The inbound `password` is stored as a PBKDF2-HMAC-SHA256 PHC string with a per-password salt and 210,000 iterations (`src/credential.rs`). See the note below for what is deliberately *not* hashed, and why. |
 | `crypto_random` | MUST | Met | `rand::rng()` (OS CSPRNG) for key generation. |
 | `delivery_mitm` | MUST | Met | Releases are downloaded over HTTPS from GitHub. |
 | `delivery_unsigned` | MUST | Met | Every release artifact carries a cosign signature (`.sig`), certificate (`.pem`) and `.sha256`. |
@@ -117,43 +120,53 @@ Repository: <https://github.com/rickybryce/ethernetgateway>
 
 ---
 
-## The one to decide: `crypto_password_storage`
+## How `crypto_password_storage` is met
 
 > *If the software produced by the project causes the storing of passwords for
 > authentication of external users, the passwords MUST be stored as iterated
 > hashes with a per-user salt by using a key stretching (iterated) algorithm
 > (e.g., Argon2id, Bcrypt, Scrypt, or PBKDF2).*
 
-**What we actually do.** `egateway.conf` holds `username` and `password` in
-cleartext. Inbound telnet, SSH and web logins compare against them with
-`telnet::constant_time_eq` (`src/telnet/session.rs:604`). There is no user
-database and no per-user account — one operator-configured shared credential,
-in a file on the operator's own machine, which the operator wrote.
+**What we do.** The inbound `password` in `egateway.conf` — the one credential
+telnet, SSH and the web UI all authenticate against — is stored as a
+**PBKDF2-HMAC-SHA256** PHC string with a per-password random salt and 210,000
+iterations. One implementation serves all three surfaces (`src/credential.rs`),
+because a rule written in three places holds in one. The iteration count is
+recorded inside the stored string, so raising it later does not invalidate an
+existing credential.
 
-**The argument for N/A**, which is the answer most appliance-shaped projects
-give: the criterion targets storing *other people's* passwords. There are no
-external user accounts here; there is one shared secret, and the party who set
-it is the party who can read the file.
+**Why PBKDF2 and not Argon2id**, given Argon2id is the stronger algorithm and
+was equally available: Argon2's recommended parameters ask for 19 MiB *per
+concurrent verification*, and this gateway's floor is a Raspberry Pi with
+`max_sessions` defaulting to 50, so a burst of logins could ask for most of the
+machine's RAM. PBKDF2 costs kilobytes, is named in this criterion's own
+approved list, and its whole cost is one tunable number.
 
-**The argument for Unmet**, which is not unreasonable: the software does
-authenticate remote clients against a stored password, and that password is
-stored in cleartext. Nothing about the comparison requires cleartext — an
-iterated hash would work for the inbound credential, since we only ever need to
-*verify* it.
+**Cleartext is still accepted on input**, and that is the upgrade path rather
+than a gap: refusing it would have locked every installation predating the
+change out of its own gateway, on a device that is often headless and reached
+from a Commodore 64. The gateway rewrites a cleartext password as a hash on the
+next start, so the window is one restart rather than indefinite. The shipped
+`changeme` default stays cleartext deliberately — a salted hash differs on every
+write and so could not be documented in the manual's Key/Default table, and a
+published placeholder is not a secret.
 
-**If we wanted to fix it rather than justify it**, the scope is not uniform:
+**The scope is not uniform, and the two exclusions are not oversights:**
 
-- `username` / `password` (inbound telnet, SSH, web) — hashable. We only
-  verify these.
-- `slave_master_password` — **not** hashable. The slave presents this to the
-  master, so it must be recoverable.
-- `groq_api_key` — not a password; it is a bearer token that must be sent.
+- `username` / `password` (inbound telnet, SSH, web) — **hashed.** We only ever
+  need to *verify* these.
+- `slave_master_password` — **not hashable, by construction.** The slave
+  *presents* this to the master, so it must be recoverable. It is a credential
+  this software transmits, not one it verifies.
+- `groq_api_key` — not a password. It is a bearer token that must be sent
+  verbatim to a third party.
 
-So a fix would cover the inbound credential only, and would change the config
-format (a breaking change for existing installations, or a migration).
+Both exclusions are outside what the criterion asks for: it governs passwords
+stored *for authentication*, and neither of these is verified against anything
+by this software.
 
-**Recommendation:** answer **N/A** with the justification above — it is honest
-and it is what the criterion means — and treat hashing the inbound credential
-as a separate design decision on its own merits, not as badge compliance.
-Do not answer "Met": we do not hash anything today, and claiming otherwise
-would be false.
+**One consequence worth recording**, because it changes an operator's workflow:
+a hashed password cannot be read back out of `egateway.conf`. Anyone who was
+copying the master's `password` value into a slave's `slave_master_password`
+must use the password they set instead. The migration says so in the log at the
+moment it happens.
