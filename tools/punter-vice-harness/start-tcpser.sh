@@ -38,9 +38,20 @@ echo "tcpser ($TCPSER_BIN): ip232 127.0.0.1:$IP232_PORT  ->  dial 1 (or 2323) = 
 # -s/-S: serial speed reported to the C64.
 # -l 4 -tSsiI: INFO log + serial/IP traces (handy for debugging).
 # -n: phonebook aliases so a numeric dial reaches the gateway.
+#
+# **`ethernetgateway` is aliased too, so ONE dial string works on both
+# wirings.**  On the serial link the C64 talks to our own modem emulator, which
+# resolves that name itself; on telnet it talks to tcpser, whose phonebook knew
+# only numbers.  Dialling the serial name on the telnet rig therefore hung
+# tcpser searching a table it could not match ("Searching entry 0 of 2 ... 1 of
+# 2" and then nothing), which looks exactly like the gateway locking up -- it
+# was reported as that, and the gateway was answering normally throughout.
+# A harness that needs the operator to remember which wiring they are on is a
+# harness with a trap in it.
 exec "$TCPSER_BIN" \
     -v "$IP232_PORT" \
     -s 2400 -S 2400 \
     -l 4 -tSsiI \
     -n1="$GATEWAY" \
-    -n2323="$GATEWAY"
+    -n2323="$GATEWAY" \
+    -nethernetgateway="$GATEWAY"
