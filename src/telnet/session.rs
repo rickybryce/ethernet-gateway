@@ -602,7 +602,8 @@ impl TelnetSession {
             // the username is wrong, so the response time would leak whether
             // the username was valid.  Mirrors `ssh::auth_password`.
             let user_ok = constant_time_eq(username.as_bytes(), cfg.username.as_bytes());
-            let pass_ok = constant_time_eq(password.as_bytes(), cfg.password.as_bytes());
+            // Accepts a PBKDF2 hash or legacy cleartext -- see src/credential.rs.
+            let pass_ok = crate::credential::verify(&cfg.password, &password);
             if user_ok && pass_ok {
                 if let Some(ip) = self.peer_addr {
                     clear_lockout(&self.lockouts, ip);

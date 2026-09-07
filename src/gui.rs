@@ -1158,6 +1158,17 @@ impl App {
         ];
         let serial_ports = detect_serial_ports();
         let last_synced_cfg = cfg.clone();
+        // **The password box starts empty and empty means "leave it alone".**
+        // The stored credential is a PBKDF2 hash (`src/credential.rs`), and a
+        // `TextEdit` bound straight to it would let one stray keystroke turn a
+        // valid hash into a malformed one -- which `verify` refuses, locking
+        // the operator out of a gateway that is often headless.  Telnet's
+        // `security_set_field` and the setup wizard have always worked this
+        // way; this is the desktop editor catching up.  `last_synced_cfg`
+        // keeps the real value, so `refresh_from_global` does not read the
+        // blank box as an external change.
+        let mut cfg = cfg;
+        cfg.password = String::new();
         Self {
             cfg,
             last_synced_cfg,
@@ -3858,8 +3869,20 @@ impl App {
     /// restart signals they need.
     fn persist_config(&mut self) -> Result<(), String> {
         self.sync_numeric_fields();
-        let result = config::save_config(&self.cfg);
-        self.last_synced_cfg = self.cfg.clone();
+        // An empty password box means "unchanged", so carry the stored
+        // credential forward rather than saving a blank one -- a blank
+        // password is "refuse every login", which would lock the operator out.
+        let mut out = self.cfg.clone();
+        if out.password.is_empty() {
+            out.password = config::get_config().password;
+        }
+        let result = config::save_config(&out);
+        // Re-read rather than cloning `out`: `save_config` hashes a newly
+        // typed password, so the global is the only place the value we
+        // actually stored can be read back from.  Syncing to anything else
+        // would leave `refresh_from_global` seeing a difference every frame.
+        self.last_synced_cfg = config::get_config();
+        self.cfg.password = String::new();
         self.dirty = false;
         result
     }
@@ -4346,6 +4369,8 @@ impl App {
         }
         self.cfg = global.clone();
         self.last_synced_cfg = global;
+        // Never let a resync put the stored hash into the editable box.
+        self.cfg.password = String::new();
         // Rebuild the string buffers that back numeric text fields.
         self.telnet_port_buf = self.cfg.telnet_port.to_string();
         self.ssh_port_buf = self.cfg.ssh_port.to_string();
@@ -6519,6 +6544,54 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             None,
         )
+    }
+
+    // ── The password box ─────────────────────────────────────
+
+    /// **The desktop editor never holds the stored credential in an editable
+    /// box.**
+    ///
+    /// It is a PBKDF2 hash now, and a `TextEdit` bound straight to it would
+    /// let one stray keystroke produce a malformed hash -- which `verify`
+    /// refuses, locking the operator out of a gateway that is often headless
+    /// and reached from a Commodore 64.  Telnet's `security_set_field` prints
+    /// `(hidden)` and the wizard never echoes it; this pins the desktop to the
+    /// same rule.
+    #[test]
+    fn test_the_password_box_starts_empty_and_never_shows_the_stored_value() {
+        let cfg = Config {
+            password: crate::credential::hash_for_test("hunter2"),
+            ..Config::default()
+        };
+        let app = App::new(
+            cfg.clone(),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            None,
+        );
+        assert!(app.cfg.password.is_empty(), "the stored hash reached the editable box");
+        // `last_synced_cfg` must keep the real value, or `refresh_from_global`
+        // reads the blank box as an external change on every frame.
+        assert_eq!(
+            app.last_synced_cfg.password, cfg.password,
+            "the sync snapshot lost the credential, so the editor will churn"
+        );
+    }
+
+    /// A resync from the global config must not refill the box either -- the
+    /// hazard returns the first time any other surface saves.
+    #[test]
+    fn test_a_resync_does_not_refill_the_password_box() {
+        let mut app = test_app();
+        app.dirty = false;
+        // Force a difference so `refresh_from_global` does not return early.
+        app.last_synced_cfg.max_sessions = app.last_synced_cfg.max_sessions.wrapping_add(1);
+        app.cfg.password = "typed-but-not-saved".into();
+        app.refresh_from_global();
+        assert!(
+            app.cfg.password.is_empty(),
+            "a resync put a password back into the editable box"
+        );
     }
 
     // ── Closing the window vs stopping the server ────────────

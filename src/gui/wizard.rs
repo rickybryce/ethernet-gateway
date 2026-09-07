@@ -643,9 +643,10 @@ impl Wizard {
         ui.add_space(6.0);
         warn(
             ui,
-            "The password is stored in plain text in egateway.conf — it is not hashed. \
-             Keep that file readable only by you, and don't reuse a password that matters \
-             elsewhere.",
+            "The password is stored as a PBKDF2 hash in egateway.conf, so it cannot be \
+             read back out of the file — note it down if you are also configuring a slave, \
+             which needs the password itself. The Groq API key in that file is not hashed, \
+             so keep it readable only by you.",
         );
     }
 

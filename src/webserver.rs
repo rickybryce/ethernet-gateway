@@ -254,8 +254,8 @@ async fn handle_connection(
     // The private-IP allowlist applies whenever `disable_ip_safety` is off,
     // INDEPENDENT of whether login is required (M-9).  Enabling "Require
     // Login" used to *drop* the allowlist (accepting any source IP gated only
-    // by cleartext-HTTP Basic auth, on a page that echoes the password and
-    // API key into value="…" attributes) — a counterintuitive "turning
+    // by cleartext-HTTP Basic auth, on a page that echoes the Groq API key
+    // into a value="…" attribute) — a counterintuitive "turning
     // security on widens IP exposure" interaction.  Now auth and the IP
     // allowlist are independent layers: an operator who genuinely wants
     // login-gated access from arbitrary IPs opts in explicitly with
@@ -809,7 +809,7 @@ fn is_authorized(req: &HttpRequest) -> bool {
     // wrong username can't be distinguished from a wrong password by response
     // time.  Mirrors the telnet/SSH auth paths.
     let user_ok = telnet::constant_time_eq(user.as_bytes(), cfg.username.as_bytes());
-    let pass_ok = telnet::constant_time_eq(pass.as_bytes(), cfg.password.as_bytes());
+    let pass_ok = crate::credential::verify_cached(&cfg.password, pass);
     user_ok && pass_ok
 }
 
@@ -1281,6 +1281,13 @@ fn collect_form_updates(
     ];
     for key in plain_keys {
         if let Some(v) = fields.get(*key) {
+            // The password box is rendered empty and submitted on every save,
+            // so an empty value is "unchanged", not "blank the credential".
+            // Blanking it would make every login fail -- see
+            // `credential::verify`'s empty-stored guard.
+            if *key == "password" && v.is_empty() {
+                continue;
+            }
             updates.push(((*key).to_string(), v.clone()));
         }
     }
@@ -2455,7 +2462,15 @@ fn frame_security(cfg: &Config) -> String {
             cfg.disable_gateway_connections,
         ),
         user = textfield("username", "User", &cfg.username, false, 12),
-        pass = textfield("password", "Pass", &cfg.password, true, 12),
+        // **Never echoed.**  The stored credential is a PBKDF2 hash
+        // (`src/credential.rs`); rendering it would put the hash in the page
+        // source and post it straight back on every unrelated save.  An empty
+        // box means "leave the password alone", the same rule telnet's
+        // `security_set_field` and the setup wizard have always used.
+        pass = textfield_attr(
+            "password", "Pass", "", true, 12,
+            "placeholder=\"unchanged\"",
+        ),
     )
 }
 
@@ -5635,6 +5650,61 @@ mod tests {
             headers,
             body: Vec::new(),
         }
+    }
+
+    /// **The stored credential is never rendered into the page.**
+    ///
+    /// It is a PBKDF2 hash now (`src/credential.rs`), so echoing it would put
+    /// the hash in the page source and post it back on every unrelated save.
+    /// An empty box means "unchanged" -- the rule telnet's `security_set_field`
+    /// and the setup wizard already followed.
+    #[test]
+    fn test_the_password_box_is_rendered_empty_not_prefilled() {
+        let hashed = crate::credential::hash_for_test("hunter2");
+        let cfg = Config { password: hashed.clone(), ..Config::default() };
+        let html = render_main_page(&cfg, None, false);
+        assert!(
+            !html.contains(&hashed),
+            "the stored password hash was rendered into the page"
+        );
+        // Positive control: asserting only "the hash is absent" would pass just
+        // as well if the field vanished altogether.
+        assert!(
+            html.contains("name=\"password\""),
+            "the password field is gone from the page entirely"
+        );
+        assert!(html.contains("placeholder=\"unchanged\""));
+        // And a cleartext password is not echoed either.
+        let clear = Config { password: "hunter2".to_string(), ..Config::default() };
+        let html = render_main_page(&clear, None, false);
+        assert!(!html.contains("value=\"hunter2\""), "a cleartext password was echoed");
+    }
+
+    /// An empty password field is "leave it alone", never "blank the
+    /// credential" -- a blank stored password refuses every login
+    /// (`credential::verify`'s empty guard), which on a headless gateway is a
+    /// lockout.  The form submits every field on every save, so this fires on
+    /// saves that had nothing to do with the password.
+    #[test]
+    fn test_an_empty_password_field_leaves_the_stored_credential_alone() {
+        let old = Config::default();
+        let mut fields: HashMap<String, String> = HashMap::new();
+        fields.insert("username".into(), "admin".into());
+        fields.insert("password".into(), String::new());
+        let (updates, _) = collect_form_updates(&fields, &old);
+        assert!(
+            !updates.iter().any(|(k, _)| k == "password"),
+            "an empty password box was saved as the new password"
+        );
+        // Positive control: a typed password still gets through.
+        fields.insert("password".into(), "newsecret".into());
+        let (updates, _) = collect_form_updates(&fields, &old);
+        assert!(
+            updates.iter().any(|(k, v)| k == "password" && v == "newsecret"),
+            "a typed password did not reach the config"
+        );
+        // ...and the neighbouring field is unaffected either way.
+        assert!(updates.iter().any(|(k, v)| k == "username" && v == "admin"));
     }
 
     #[test]

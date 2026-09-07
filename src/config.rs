@@ -1763,7 +1763,38 @@ pub fn load_or_create_config() -> Config {
     let path = config_file_path();
     let cfg = if Path::new(&path).exists() {
         match read_config_file_checked(&path) {
-            Ok(cfg) => {
+            Ok(mut cfg) => {
+                // **Migrate a cleartext password to a PBKDF2 hash.**  Every
+                // release up to 1.0.0-RC1 stored it in the clear, so waiting
+                // for the operator to change their password would leave it on
+                // disk indefinitely.  This costs no extra write: the file is
+                // rewritten just below anyway, to add any keys a new version
+                // introduced.
+                //
+                // Only on the *existing file* path.  A first launch writes the
+                // shipped default (`changeme`) in the clear, so the file
+                // matches what `usermanual.html` documents, and the very next
+                // start migrates it -- a published placeholder is not a secret,
+                // and keeping the documented default writable matters more.
+                //
+                // Announced rather than silent, because it is not reversible:
+                // an operator who was reading the plaintext out of this file
+                // for a slave's `slave_master_password` needs to know it has
+                // gone.  If the rewrite fails (read-only file, wrong owner --
+                // see `data_dir_ownership_lines`) the gateway keeps running on
+                // the cleartext it already has rather than refusing to start.
+                if crate::credential::needs_rehash(&cfg.password) {
+                    crate::credential::hash_if_cleartext(&mut cfg.password);
+                    if crate::credential::is_hashed(&cfg.password) {
+                        glog!(
+                            "Security: the password in {} was stored as plain text and has been \
+                             rewritten as a PBKDF2 hash. It can no longer be read back out of \
+                             the file -- if you need it for a slave's slave_master_password, use \
+                             the password you set rather than copying the file's value.",
+                            CONFIG_FILE
+                        );
+                    }
+                }
                 // Rewrite to ensure all keys are present.
                 if let Err(e) = write_config_file(&path, &cfg) {
                     glog!("Warning: {}", e);
@@ -2887,6 +2918,13 @@ fn ensure_cpm_layout(cfg: &Config) {
 }
 
 pub fn save_config(cfg: &Config) -> Result<(), String> {
+    // A password typed into the desktop editor or the first-run wizard is
+    // hashed before it reaches the disk *or* the in-memory config, so the two
+    // cannot disagree about the credential.  Idempotent, so re-saving an
+    // already-hashed value neither double-hashes it nor re-salts it.
+    let mut cfg = cfg.clone();
+    crate::credential::hash_if_cleartext(&mut cfg.password);
+    let cfg = &cfg;
     let mut guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
     let was_cpm_enabled = guard.as_ref().map(|c| c.cpm_emu_enabled).unwrap_or(false);
     let result = write_config_file(&config_file_path(), cfg);
@@ -3892,6 +3930,12 @@ pub fn update_config_values(pairs: &[(&str, &str)]) {
     for &(key, value) in pairs {
         apply_config_key(&mut cfg, key, value);
     }
+    // Whatever the caller was setting, the password does not go back to disk
+    // in the clear.  Unconditional rather than gated on `pairs` naming
+    // `password`: this rewrites the file from the whole struct, so a save of
+    // some unrelated screen is just as capable of persisting a cleartext
+    // value it read a moment ago.
+    crate::credential::hash_if_cleartext(&mut cfg.password);
     // Turning the emulator on lays out its folders straight away, so an
     // operator can put software in CPM/A and a disk image in CPM/images
     // without first having to start a session.  Only on the transition: doing
@@ -4641,6 +4685,77 @@ pub fn lookup_dialup_number(number: &str) -> Option<String> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// **The password must not go back to disk in the clear, whichever screen
+    /// saved it.**
+    ///
+    /// This pair exists because the gap it guards actually happened: the
+    /// `hash_if_cleartext` doc comment named these two writers as its callers
+    /// for the whole of its first draft, and neither one called it -- a
+    /// credential module that hashed nothing, with prose saying otherwise.
+    /// Nothing in the suite could tell, because every test of the hashing
+    /// lived in `credential.rs` and called it directly.
+    ///
+    /// They go through the shipped path rather than a copy of it, but at the
+    /// crate's minimum round count (`credential::tests::CheapRounds`): whether
+    /// a writer hashes does not depend on how many rounds it hashes with, and
+    /// at the production count this pair alone cost 34 s of the suite.
+    #[tokio::test]
+    async fn test_the_desktop_and_wizard_save_path_hashes_the_password() {
+        let _lock = CONFIG_TEST_LOCK.lock().await;
+        // Cheap rounds: this asks whether the save path hashes, not what a
+        // derivation costs.  At the production count it would be ~16 s.
+        let _cheap = crate::credential::CheapRounds::new();
+        let saved = swap_config_for_test(None);
+        let cfg = Config { password: "hunter2".to_string(), ..Config::default() };
+        save_config(&cfg).expect("save");
+
+        // On disk...
+        let text = std::fs::read_to_string(config_file_path()).expect("read back");
+        assert!(
+            !text.contains("password = hunter2"),
+            "save_config wrote the password in the clear:\n{text}"
+        );
+        assert!(text.contains("password = $pbkdf2-"), "no hash in the file:\n{text}");
+
+        // ...and in memory, or the two would disagree about the credential and
+        // a later save would put the cleartext back.
+        let live = get_config();
+        assert!(!crate::credential::needs_rehash(&live.password));
+        assert!(crate::credential::verify(&live.password, "hunter2"));
+        assert!(!crate::credential::verify(&live.password, "wrong"));
+
+        swap_config_for_test(saved);
+    }
+
+    #[tokio::test]
+    async fn test_the_telnet_and_web_save_path_hashes_the_password() {
+        let _lock = CONFIG_TEST_LOCK.lock().await;
+        // Cheap rounds: this asks whether the save path hashes, not what a
+        // derivation costs.  At the production count it would be ~16 s.
+        let _cheap = crate::credential::CheapRounds::new();
+        let saved = swap_config_for_test(None);
+        update_config_values(&[("password", "hunter2")]);
+
+        let text = std::fs::read_to_string(config_file_path()).expect("read back");
+        assert!(
+            !text.contains("password = hunter2"),
+            "update_config_values wrote the password in the clear:\n{text}"
+        );
+        let live = get_config();
+        assert!(crate::credential::verify(&live.password, "hunter2"));
+
+        // Saving some *other* screen must not resurrect a cleartext value, so
+        // the hashing is unconditional rather than gated on `password` being
+        // among the pairs.
+        let stored = live.password.clone();
+        update_config_values(&[("verbose", "true")]);
+        let after = get_config();
+        assert_eq!(after.password, stored, "an unrelated save re-salted the password");
+        assert!(crate::credential::verify(&after.password, "hunter2"));
+
+        swap_config_for_test(saved);
+    }
 
     /// **The reported failure was "the program will not run without root", and
     /// the message it printed never mentioned ownership.**

@@ -421,7 +421,8 @@ Commodore, ANSI escape sequences on modern terminals, and plain text on ASCII.
 Telnet transmits all data, including passwords, in cleartext. The telnet
 interface is intended for <em>local or private network use only</em>. Use the
 SSH interface for anything leaving your LAN, and keep <code>egateway.conf</code>
-at mode <code>0600</code> because it contains plaintext credentials.
+at mode <code>0600</code> &mdash; the login password in it is hashed, but the
+Groq API key and <code>slave_master_password</code> are not.
 </aside>
 
 <!-- ═══════════════════ 2. Installation ═══════════════════ -->
@@ -592,8 +593,14 @@ is rewritten so that future editors see the full set of keys and comments.
 
 <aside class="note">
 <span class="label">Unix permissions</span>
-<code>egateway.conf</code> holds the plaintext login password (shared by
-telnet, SSH, and the web UI) and the Groq API key. On Unix the file is set
+<code>egateway.conf</code> holds the login credentials (shared by telnet, SSH,
+and the web UI) and the Groq API key. The password is stored as a
+<strong>PBKDF2 hash</strong>: a cleartext one &mdash; from a release before
+1.0.0, or the shipped <code>changeme</code> default &mdash; is rewritten as a
+hash the next time the gateway starts, and cannot be read back out of the file
+afterwards. The Groq API key and <code>slave_master_password</code> are
+necessarily still in plain text (a slave <em>presents</em> its master password,
+so it can never be a hash). On Unix the file is set
 to mode <code>0600</code> (owner-only read/write) on every write. The same
 applies to <code>dialup.conf</code>, <code>gateway_hosts</code>,
 <code>ethernet_ssh_host_key</code>, and <code>ethernet_gateway_ssh_key</code>.
@@ -642,7 +649,7 @@ The screens, in order:
 <ol>
     <li><strong>Username and password</strong> — typed twice; the wizard will not
     advance until they match, and a checkbox reveals what you are typing. It
-    states plainly that the password is stored in cleartext in
+    states plainly that the password is hashed and so cannot be read back out of
     <code>egateway.conf</code>. These are the unified credentials used by
     telnet, SSH, and the web UI.</li>
     <li><strong>Telnet server</strong> — enable/disable and port (default
@@ -1200,8 +1207,9 @@ not a default.
 
 <p>
 <strong>The configuration web server behaves differently on purpose.</strong>
-Because its page renders the login password and Groq API key into form
-fields, enabling "Require Login" does <em>not</em> open it to any IP the way
+Because its page renders the Groq API key into a form field (the login
+password is never echoed &mdash; the box is blank, and blank means
+&ldquo;leave it alone&rdquo;), enabling "Require Login" does <em>not</em> open it to any IP the way
 it does for telnet: the web server keeps the private-IP allowlist whether or
 not login is required, and <code>disable_ip_safety</code> is the only switch
 that lifts it. So to reach the web UI from a non-private address you must set
@@ -1423,13 +1431,14 @@ The built-in SSH server supports password authentication only. However, the
 remote hosts — a separate concept.
 </p>
 
-<aside class="warn">
-<span class="label">Plaintext credentials</span>
+<aside class="note">
+<span class="label">How the credential is stored</span>
 The unified <code>username</code> / <code>password</code> pair in
-<code>egateway.conf</code> is stored in plaintext (used by telnet, SSH,
-and the web UI). The SSH connection itself is encrypted, but the file is
-not. Protect it with the <code>0600</code> permissions the gateway sets
-automatically, and do not reuse passwords from other services.
+<code>egateway.conf</code> (used by telnet, SSH, and the web UI) keeps the
+password as a <strong>PBKDF2 hash</strong>, so reading the file does not yield a
+usable password. The username, the Groq API key and
+<code>slave_master_password</code> are still plain text. Protect the file with
+the <code>0600</code> permissions the gateway sets automatically.
 </aside>
 
 <h2>6.4 Web Configuration Interface</h2>
@@ -5613,7 +5622,7 @@ numeric values fall back to the default.
         <tr><td><code>log_max_size_kb</code></td><td>u64</td><td><code>1024</code></td><td>0 = never rotate</td><td>Rotate once a write would take the active file past this size. Worst-case disk use is <code>log_max_size_kb &times; (log_max_files + 1)</code> &mdash; 6&nbsp;MB with the defaults &mdash; and every UI shows that computed total. <code>0</code> disables size-based rotation, which lets the file grow without bound; the startup line and each config UI say so.</td></tr>
         <tr><td><code>log_to_file</code></td><td>bool</td><td><code>true</code></td><td>true/false</td><td><strong>On by default.</strong> Mirror the log to <code>log_file</code> in addition to stderr and the GUI/web console buffer. Nothing is rate-limited: <code>verbose</code> legitimately logs per protocol block, so a lines-per-second ceiling would discard exactly the lines an operator turned verbose on to see &mdash; growth is bounded by rotation, which loses <em>old</em> data instead of current data. Under systemd this duplicates journald's own rotation; set <code>false</code> if you would rather rely on the journal alone. Changes take effect on the next server restart.</td></tr>
         <tr><td><code>max_sessions</code></td><td>usize</td><td><code>50</code></td><td>&ge; 1</td><td>Concurrent telnet-session cap.</td></tr>
-        <tr><td><code>password</code></td><td>string</td><td><code>changeme</code></td><td>non-empty</td><td>Unified login password — shared by telnet, SSH, and the configuration web UI. Stored plaintext.</td></tr>
+        <tr><td><code>password</code></td><td>string</td><td><code>changeme</code></td><td>non-empty</td><td>Unified login password — shared by telnet, SSH, and the configuration web UI. Stored as a PBKDF2 hash; the <code>changeme</code> default and any cleartext value left by an older release are rewritten as a hash on the next start.</td></tr>
         <tr><td><code>punter_block_size</code></td><td>u16</td><td><code>255</code></td><td>8&ndash;255</td><td>Punter C1 total block size in bytes (7-byte header included; 248-byte payload at the default). Lower toward ~40 on a noisy line to shrink the retransmit unit.</td></tr>
         <tr><td><code>punter_block_timeout</code></td><td>u64</td><td><code>20</code></td><td>&ge; 1 (seconds)</td><td>Per-block read timeout once a Punter transfer is live.</td></tr>
         <tr><td><code>punter_max_retries</code></td><td>u32</td><td><code>10</code></td><td>&ge; 1</td><td>Retry cap per block (BAD / SYN re-sends) before the session aborts.</td></tr>

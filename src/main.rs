@@ -44,6 +44,7 @@ mod aichat;
 mod bindwatch;
 mod config;
 mod cpm;
+mod credential;
 mod gui;
 mod instance;
 #[cfg(test)]

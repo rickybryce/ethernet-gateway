@@ -716,7 +716,7 @@ impl russh::server::Handler for SshHandler {
         let user_ok =
             telnet::constant_time_eq(user.as_bytes(), self.username.as_bytes());
         let pass_ok =
-            telnet::constant_time_eq(password.as_bytes(), self.password.as_bytes());
+            crate::credential::verify(&self.password, password);
         if user_ok && pass_ok {
             // Valid credentials reset any failure lockout for this IP.
             if let Some(ip) = self.peer_addr {

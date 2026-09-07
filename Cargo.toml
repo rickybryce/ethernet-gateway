@@ -35,6 +35,21 @@ exclude = [
 tokio = { version = "1", features = ["full"] }
 signal-hook = "0.4"
 libc = "0.2"
+# PBKDF2-HMAC-SHA256 for the operator password in egateway.conf (see
+# src/credential.rs).  Already in the tree via russh (bcrypt-pbkdf -> ssh-key)
+# and pkcs5, so this adds **no new crate** -- it makes a transitive dependency
+# a direct one.  The features do add edges: `phc` pulls password-hash and
+# `sha2` the hash itself, both of which were already being built for other
+# dependents, so nothing new is compiled from scratch either.
+#
+# Chosen over Argon2id, which is also already present, because Argon2's
+# memory-hardness is the wrong trade for this device class: its recommended
+# parameters ask for 19 MiB *per concurrent verification*, and this gateway
+# runs on Raspberry Pis with `max_sessions` defaulting to 50, so a burst of
+# telnet logins could ask for most of a Pi's RAM.  PBKDF2 costs kilobytes and
+# is on the OpenSSF criterion's approved list, so the trade buys back the
+# memory without weakening the claim.
+pbkdf2 = { version = "0.13", features = ["phc", "getrandom", "sha2"] }
 russh = "0.62"
 ureq = "3"
 serde_json = "1"

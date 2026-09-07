@@ -178,8 +178,11 @@ even that as a trusted-environment tool.
   `password` (still not recommended on public networks — telnet is cleartext).
 - **Authentication:** one `username` / `password` pair covers telnet, SSH, and
   the web UI. Three failed logins from an IP trip a shared 5-minute lockout.
-  Credentials are stored in plaintext in `egateway.conf`, so protect it with
-  file permissions. It's lightweight access control, not a security boundary.
+  The password is stored as a PBKDF2 hash in `egateway.conf` (a cleartext one
+  from an older release is rewritten on the next start, and cannot be read back
+  out afterwards); the Groq API key and `slave_master_password` in that file are
+  not hashed, so still protect it with file permissions. It's lightweight access
+  control, not a security boundary.
 - **Outbound (dial-out):** the modem's `ATDT`, the telnet/SSH gateways, and the
   relay's onward-dial connect to whatever host you ask for, with **no**
   internal-address filtering (a modem dials anywhere). The text-mode web browser
