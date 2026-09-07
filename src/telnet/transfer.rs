@@ -119,7 +119,9 @@ impl TelnetSession {
                     if e.kind() == std::io::ErrorKind::ConnectionAborted {
                         return Err(e);
                     }
-                    self.show_error(&format!("Transfer error: {}", e))
+                    // Reached only after a transfer, so it needs the
+                    // transfer reporter -- see `show_transfer_error`.
+                    self.show_transfer_error(&format!("Transfer error: {}", e))
                         .await?;
                 }
             }
@@ -128,7 +130,9 @@ impl TelnetSession {
                     if e.kind() == std::io::ErrorKind::ConnectionAborted {
                         return Err(e);
                     }
-                    self.show_error(&format!("Transfer error: {}", e))
+                    // Reached only after a transfer, so it needs the
+                    // transfer reporter -- see `show_transfer_error`.
+                    self.show_transfer_error(&format!("Transfer error: {}", e))
                         .await?;
                 }
             }
@@ -1020,7 +1024,7 @@ impl TelnetSession {
                     .await?;
                     return self.punter_hangup().await;
                 }
-                self.show_error(&format!("Transfer failed: {}", e))
+                self.show_transfer_error(&format!("Transfer failed: {}", e))
                     .await?;
                 return Ok(());
             }
@@ -1119,7 +1123,13 @@ impl TelnetSession {
             }
         }
 
-        self.post_transfer_settle().await;
+        // **No settle here.**  `press_any_key_after_transfer` at the end of
+        // this function settles before it asks, and the settle now waits for a
+        // full second of quiet rather than pausing a fixed 1 s -- so doing it
+        // twice spent that quiet gap twice over, up to twelve seconds of dead
+        // line before a keypress would be accepted.  The summary below is
+        // printed into the terminal's own blackout either way; what matters is
+        // that the line is quiet before we ASK, and that is where it happens.
 
         // Transfer-complete summary.  Preserve the classic single-file
         // "N bytes, M blocks, T seconds" format when exactly one file
@@ -1143,7 +1153,7 @@ impl TelnetSession {
             .await?;
             self.last_transfer_note = Some(TransferNote {
                 ok: true,
-                text: format!("Received {} bytes in {:.1}s", bytes, elapsed.as_secs_f64()),
+                text: format!("Rcvd {} bytes, {:.1}s", bytes, elapsed.as_secs_f64()),
             });
         } else {
             self.send_line(&format!(
@@ -1159,7 +1169,7 @@ impl TelnetSession {
             self.last_transfer_note = Some(TransferNote {
                 ok: true,
                 text: format!(
-                    "Received {} file(s), {} skipped",
+                    "Rcvd {} file(s), {} skipped",
                     saved.len(),
                     skipped.len()
                 ),
@@ -1660,13 +1670,24 @@ impl TelnetSession {
                 .await?;
                 self.last_transfer_note = Some(TransferNote {
                     ok: true,
-                    text: format!("Sent {} bytes in {:.1}s", data.len(), elapsed.as_secs_f64()),
+                    // Phrased to fit 34 columns with margin -- see
+                    // `draw_transfer_note` and the width test.  " in " cost
+                    // two characters the byte count needed.
+                    text: format!("Sent {} bytes, {:.1}s", data.len(), elapsed.as_secs_f64()),
                 });
             }
             Err(e) => {
                 self.last_transfer_note = Some(TransferNote {
                     ok: false,
-                    text: format!("Download failed: {}", e),
+                    // **The reason must not be the part that gets cut.**
+                    // "Download failed: " is seventeen characters of prefix
+                    // against a 34-column budget, so a C64 saw
+                    // "Download failed: Transfer canc..." -- the label fitting
+                    // and the payload eliding, which is the failure mode this
+                    // repo's own label rule warns about.  The reason leads;
+                    // that it was a download is already obvious from where the
+                    // operator is standing.
+                    text: truncate_to_width(&e, 34),
                 });
                 self.send_line("").await?;
                 self.send_line(&format!(

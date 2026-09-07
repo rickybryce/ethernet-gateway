@@ -1627,7 +1627,7 @@ insights.
 ## GNU General Public License v3.0 or later (GPL-3.0-or-later)
 
 Used by:
-- [ethernetgateway 0.9.8](https://github.com/rickybryce/ethernetgateway)
+- [ethernetgateway 1.0.0-RC1](https://github.com/rickybryce/ethernetgateway)
 
 ```
                     GNU GENERAL PUBLIC LICENSE

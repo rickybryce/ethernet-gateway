@@ -1277,8 +1277,15 @@ mod tests {
     }
 
     // Live interop the other direction: the gateway RECEIVES from CCGMS's real
-    // sender (punter_xmit, sends 300 bytes = i*7+1, type SEQ). Set
-    // CCGMS_SEND_BIN to the compiled sender binary path to run; else skipped.
+    // sender (punter_xmit, sends 300 bytes = i*7+1).  Set CCGMS_SEND_BIN to
+    // the compiled sender binary path to run; else skipped.
+    //
+    // **The type it declares is PRG, not SEQ.**  `ccgmsterm/test/punter.c`
+    // hardcodes `xfer_buffer[7] = 1;` with the comment `// SEQ`, and that
+    // comment contradicts CCGMS's own `upltyp` table (`src/xfer.s`,
+    // `.byte 0,'P','S','U'`), where 1 is 'P'.  This gate said SEQ for the same
+    // reason the mapping did -- it trusted the comment -- and it is
+    // `#[ignore]`d, so CI could never have caught the disagreement.
     #[tokio::test]
     #[ignore]
     async fn ccgms_real_sender_interop() {
@@ -1310,7 +1317,8 @@ mod tests {
             Ok(Ok((data, ft))) => {
                 eprintln!("punter_receive: {} bytes, type {:?}", data.len(), ft);
                 assert_eq!(data, expected, "received data must match CCGMS sender");
-                assert_eq!(ft, PunterFileType::Seq);
+                // 1 on the wire is PRG -- see the note on this gate.
+                assert_eq!(ft, PunterFileType::Prg);
             }
             other => panic!("punter_receive failed: {:?}", other),
         }
@@ -1492,7 +1500,11 @@ mod tests {
         match recv {
             Ok(Ok((data, ft))) => {
                 assert_eq!(data, expected, "recorder: live receive must match expected payload");
-                assert_eq!(ft, PunterFileType::Seq);
+                // As above: CCGMS's hardcoded 1 is PRG.  This assertion gates
+                // the refresh, so a stale value here means the fixture can
+                // never be re-recorded -- the fixture whose mislabelling
+                // caused the off-by-one in the first place.
+                assert_eq!(ft, PunterFileType::Prg);
             }
             other => panic!("recorder: live punter_receive failed: {:?}", other),
         }
@@ -1503,7 +1515,7 @@ mod tests {
             .await
             .expect("recorder: captured wire failed to replay");
         assert_eq!(rdata, expected, "recorder: replayed capture must match payload");
-        assert_eq!(rft, PunterFileType::Seq);
+        assert_eq!(rft, PunterFileType::Prg);
 
         let manifest_dir =
             std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");

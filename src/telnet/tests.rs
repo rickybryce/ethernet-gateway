@@ -2942,23 +2942,41 @@ fn test_dialup_prompts_fit_petscii() {
 /// File transfer menu: header(3) + blank + dir + blank + 5 items + blank + footer = 12 rows.
 #[test]
 fn test_file_transfer_menu_row_count() {
-    let rows = 3 + 1 + 1 + 1 + 5 + 1 + 1; // 13
+    // The outcome note (`draw_transfer_note`) adds a row whenever the operator
+    // arrives here straight from a transfer, which is the common case -- so it
+    // belongs in the worst case, not outside it.  The count was 13 and did not
+    // include it.
+    let note = 1;
+    let rows = 3 + 1 + note + 1 + 1 + 5 + 1 + 1; // 14
     assert!(rows <= 22, "file transfer menu is {} rows, exceeds 22", rows);
 }
 
-/// Download/delete file listing: header(3) + blank + col_header + divider
-/// + 10 entries + blank + page_info + blank + nav + blank + prompt = 21 rows.
+/// Download/delete file listing: header(3) + note + blank + col_header +
+/// divider + 10 entries + blank + page_info + blank + nav + blank + prompt.
+///
+/// **This is now exactly 22 rows -- the whole PETSCII budget, with nothing
+/// spare.**  A download returns to this picker, so the outcome note is drawn
+/// here too, and that is the row that used the last of the margin.  The next
+/// line anyone adds to this screen has to take one away, and this assertion is
+/// what will say so.
 #[test]
 fn test_file_listing_row_count() {
     let header = 3; // sep + title + sep
+    let note = 1;   // draw_transfer_note, when arriving from a transfer
     let col = 2;    // column header + divider
     let entries = TelnetSession::TRANSFER_PAGE_SIZE; // 10
     let footer = 5; // blank + page info + blank + nav + prompt
-    let total = header + 1 + col + entries + footer;
+    let total = header + note + 1 + col + entries + footer;
     assert!(
         total <= 22,
         "file listing is {} rows, exceeds 22",
         total,
+    );
+    assert_eq!(
+        total, 22,
+        "the listing is at the budget exactly; if this number moved, the \
+         screen changed and the margin needs re-checking rather than the \
+         assertion relaxing"
     );
 }
 
@@ -9733,23 +9751,36 @@ async fn test_the_transfer_outcome_reaches_the_next_menu_once() {
 #[test]
 fn test_the_transfer_outcome_fits_a_40_column_screen() {
     // The widest each phrasing can get with realistic values.
+    // Worst cases that can actually occur: the 8 MB per-file cap, and a
+    // duration long enough for that file at 300 baud (about 62 hours), which
+    // is six digits of seconds.  `u32::MAX` bytes is kept as a hard upper
+    // bound even though MAX_FILE_SIZE forbids it -- if a future cap rises,
+    // this is what notices.
     let notes = [
-        format!("Sent {} bytes in {:.1}s", u32::MAX, 9999.9),
-        format!("Received {} bytes in {:.1}s", u32::MAX, 9999.9),
-        format!("Received {} file(s), {} skipped", 999, 999),
+        format!("Sent {} bytes, {:.1}s", u32::MAX, 223_200.9),
+        format!("Rcvd {} bytes, {:.1}s", u32::MAX, 223_200.9),
+        format!("Rcvd {} file(s), {} skipped", 999, 999),
     ];
     for n in &notes {
-        // 34 is the budget render_file_transfer gives the note on PETSCII,
-        // inside a 40-column screen with a two-space indent.
-        let line = truncate_to_width(n, 34);
-        assert!(
-            line.chars().count() <= 34,
-            "{:?} does not fit a PETSCII screen",
-            n
+        // **Assert the line is UNCHANGED, not that it fits.**  Asserting the
+        // length was asserting `truncate_to_width`'s own postcondition, so
+        // any input passed -- and it passed while demonstrating the very
+        // failure it was written to catch: the widest phrasing is 36
+        // characters and was being elided, losing the byte count, which is
+        // the whole content of the message.  34 is the budget
+        // `draw_transfer_note` gives the note on PETSCII, inside a
+        // 40-column screen with a two-space indent.
+        assert_eq!(
+            truncate_to_width(n, 34),
+            *n,
+            "{:?} is {} chars and does not fit a 40-column PETSCII screen \
+             -- it would lose its tail, which is the byte count",
+            n,
+            n.chars().count()
         );
     }
     // A short note is untouched -- the common case must not be elided.
-    assert_eq!(truncate_to_width("Sent 1775 bytes in 17.8s", 34), "Sent 1775 bytes in 17.8s");
+    assert_eq!(truncate_to_width("Sent 1775 bytes, 17.8s", 34), "Sent 1775 bytes, 17.8s");
 }
 
 /// A protocol's teardown must never be read as the operator pressing a key.

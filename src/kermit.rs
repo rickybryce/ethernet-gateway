@@ -1585,7 +1585,12 @@ impl KermitFlavor {
             Self::EmbeddedKermit => "Embedded Kermit (E-Kermit)".into(),
             Self::MsKermit => "MS Kermit".into(),
             Self::Unknown(s) => format!("Unknown Kermit ({})", s),
-            Self::Unidentified => "classic Kermit (no identity sent)".into(),
+            // **Says only what is known.**  This variant is the fall-through
+            // BELOW the classic-shape test, so a peer with long packets and
+            // attribute packets can reach it -- calling that "classic" is the
+            // guess the comment in `detect_flavor` forbids two lines above its
+            // own return.
+            Self::Unidentified => "Kermit (no identity sent)".into(),
         }
     }
 }
@@ -13758,7 +13763,7 @@ mod tests {
             !f.display().to_ascii_lowercase().contains("g-kermit"),
             "an unidentified peer must never be named as a specific Kermit"
         );
-        assert_eq!(f.display(), "classic Kermit (no identity sent)");
+        assert_eq!(f.display(), "Kermit (no identity sent)");
 
         // A peer that DOES name itself keeps its own words, which are more
         // useful than any classification of ours.

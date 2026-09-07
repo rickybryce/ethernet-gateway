@@ -231,6 +231,9 @@ pub(crate) async fn xmodem_receive_batch(
     // that recovery.  The diagnosis is instead attached to the failure, which
     // is the message that reaches a terminal whose screen has come back.
     let mut peer_also_receiving = false;
+    // How many of our own start requests have come back at us.  One is an
+    // echo; two across separate attempts is a peer.
+    let mut mirrored_requests: u32 = 0;
 
     // `.max(1)` on the divisor guards against a divide-by-zero panic if
     // `negotiation_retry_interval` is ever 0 — today the config layer floors
@@ -452,15 +455,33 @@ pub(crate) async fn xmodem_receive_batch(
                 // CAN handled above by is_can_abort + single-CAN continue.
                 if byte == CRC_REQUEST || byte == NAK {
                     // Our own kind of byte, coming the other way -- see
-                    // `peer_also_receiving`.  Logged once; the peer sends
-                    // these on a timer and repeating it would bury the rest.
-                    if !peer_also_receiving {
+                    // `peer_also_receiving`.
+                    //
+                    // **Two of them, on separate attempts, before believing
+                    // it.**  A single one cannot be told from our own request
+                    // echoed back: a half-duplex wire, a loopback-wired port
+                    // or a bridge that echoes all produce exactly one, and a
+                    // confident "start a send on your terminal" would then be
+                    // advice for a fault that is not the one they have.  A
+                    // peer that is genuinely receiving keeps re-prompting on
+                    // its own timer, so it produces more than one across our
+                    // retries; an echo produces one per request we send.
+                    mirrored_requests = mirrored_requests.saturating_add(1);
+                    if mirrored_requests >= 2 && !peer_also_receiving {
                         peer_also_receiving = true;
+                        // Logged once: the peer sends these on a timer and
+                        // repeating it would bury everything else.
                         glog!(
                             "XMODEM recv: the peer is sending start requests too \
                              (0x{:02X}) — both ends are waiting to receive. Start \
                              a send on the far end, or choose Download here.",
                             byte
+                        );
+                    } else if verbose {
+                        glog!(
+                            "XMODEM recv: start request 0x{:02X} came back ({} so \
+                             far) — an echo until it repeats",
+                            byte, mirrored_requests
                         );
                     }
                 } else if verbose {
@@ -3755,6 +3776,37 @@ mod tests {
             "the failure must name the mirrored start requests, not just time \
              out; got {:?}",
             err
+        );
+
+        // **A SINGLE mirrored byte must not be enough.**  One is
+        // indistinguishable from our own request echoed back by a half-duplex
+        // wire or a bridge, and a confident "start a send on your terminal"
+        // would then be advice for a fault the operator does not have.  A peer
+        // that is really receiving re-prompts on its own timer and so sends
+        // more than one; this pins that distinction.
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+        let recv_task = tokio::spawn(async move {
+            xmodem_receive(&mut recv_read, &mut recv_write, false, false, false).await
+        });
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), CRC_REQUEST);
+        raw_write_byte(&mut send_write, CRC_REQUEST, false).await.unwrap();
+        // Then silence -- one echo and nothing more.
+        drop(send_write);
+        let one_echo = match tokio::time::timeout(
+            std::time::Duration::from_secs(600),
+            recv_task,
+        )
+        .await
+        {
+            Ok(Ok(Err(e))) => e,
+            other => panic!("expected a failure, got ok={}", other.is_ok()),
+        };
+        assert!(
+            !one_echo.to_ascii_lowercase().contains("both ends"),
+            "one mirrored byte is an echo, not a diagnosis; got {:?}",
+            one_echo
         );
 
         // And the recovery: a peer that mirrors briefly and THEN sends is

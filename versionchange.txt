@@ -8,7 +8,7 @@
 # Cargo.toml updates them automatically — the doc files below must be matched
 # by hand.
 #
-# Current version: 0.9.8
+# Current version: 1.0.0-RC1
 #
 # ── Source of truth ─────────────────────────────────────────────
 Cargo.toml              # package version (line 3 only — NOT the russh/dep "0.60" specs); Cargo.lock follows on build
@@ -37,9 +37,16 @@ README.md               # (no version string since the v0.7.0 trim — verify wi
 #
 #                         Re-run that after any dependency bump — a `cargo update` can
 #                         raise the floor without a single line of our code changing.
-SECURITY.md             # supported-versions table.  Deliberately worded "latest released 0.x"
-#                         rather than a pinned number so it cannot go stale again — if you
-#                         ever put a number back, it belongs on this checklist.
+SECURITY.md             # supported-versions table.  Deliberately carries NO number at all
+#                         ("Latest release") so it cannot go stale — if you ever put a
+#                         number back, it belongs on this checklist.
+#
+#                         It said "Latest released 0.x" until 1.0.0-RC1, which was meant
+#                         to be version-agnostic and was only series-agnostic: the major
+#                         bump made it wrong, and nothing above would have caught it
+#                         because the grep for the old version does not match "0.x".
+#                         A wording chosen to avoid staleness can still encode an
+#                         assumption; this one assumed the project stayed on 0.
 THIRD-PARTY-NOTICES.md  # only OUR OWN "[ethernetgateway X.Y.Z]" line; every other
 #                         X.Y.Z there belongs to a third-party crate.  Regenerated
 #                         wholesale by cargo-about at release time.

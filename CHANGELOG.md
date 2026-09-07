@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.8] - Unreleased
+## [1.0.0-RC1] - 2026-09-07
 
 ### Fixed
 
@@ -45,9 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that -- the outcome is carried to the next screen the terminal actually
   draws, the "press any key" prompt is re-offered until somebody answers it,
   the line is settled until quiet before that prompt rather than for a guessed
-  interval, and the prompt (and the first menu behind it) ignores input for
-  400&nbsp;ms, because a byte arriving before a person could have read the
-  screen is not a keypress.  Without that last part a protocol's teardown
+  interval, and that prompt -- along with whichever prompt is drawn next,
+  whether a menu or the download picker -- ignores input for 400&nbsp;ms,
+  because a byte arriving before a person could have read the screen is not a
+  keypress.  Without that last part a protocol's teardown
   answered on the operator's behalf and walked through menus on its own.
 
 - **A Commodore's shifted AT commands lost every letter.**  The modem's
@@ -6706,8 +6707,8 @@ Otherwise the gateway will create fresh files and SSH clients will see a
 - Windows build fix for `GetDiskFreeSpaceExW`.
 - S-register persistence via `AT&W`.
 
-[Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v0.9.7...HEAD
-[0.9.8]: https://github.com/rickybryce/ethernetgateway/compare/v0.9.7...HEAD
+[Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v1.0.0-RC1...HEAD
+[1.0.0-RC1]: https://github.com/rickybryce/ethernetgateway/releases/tag/v1.0.0-RC1
 [0.9.7]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.9.7
 [0.9.6]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.9.6
 [0.9.5]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.9.5

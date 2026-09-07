@@ -6672,6 +6672,21 @@ mod tests {
             if i > 0 && (bytes[i - 1].is_alphanumeric() || bytes[i - 1] == '.') {
                 continue;
             }
+            // **Match the whole version, pre-release included.**  This used
+            // to collect only digits and dots, so `v1.0.0-RC1` yielded
+            // `1.0.0` and the page was reported stale against its own correct
+            // string -- the first pre-release this project cut, and the guard
+            // had never seen one.  Compare the text against the real version
+            // first, and only fall back to the digits-and-dots reading to
+            // NAME what is stale.
+            let rest: String = bytes[i + 1..].iter().collect();
+            if let Some(after) = rest.strip_prefix(version) {
+                // `v1.0.0-RC1` must not satisfy a build of `1.0.0-RC10`, so
+                // the match has to end at a boundary.
+                if !after.chars().next().is_some_and(|c| c.is_alphanumeric()) {
+                    continue;
+                }
+            }
             let found: String = bytes[i + 1..]
                 .iter()
                 .take_while(|c| c.is_ascii_digit() || **c == '.')

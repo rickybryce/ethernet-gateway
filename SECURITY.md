@@ -8,7 +8,7 @@ upgrade before reporting.
 
 | Version                | Supported |
 |------------------------|-----------|
-| Latest released 0.x    | ✅         |
+| Latest release         | ✅         |
 | Anything older         | ❌         |
 
 ## Reporting a Vulnerability

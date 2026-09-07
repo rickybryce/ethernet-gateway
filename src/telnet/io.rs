@@ -724,6 +724,7 @@ impl TelnetSession {
     }
 
     pub(in crate::telnet) async fn get_line_input(&mut self) -> Result<Option<String>, std::io::Error> {
+        self.arm_if_a_transfer_asked().await;
         self.read_input_loop(&mut Vec::new(), InputMode::Normal).await
     }
 
@@ -839,6 +840,7 @@ impl TelnetSession {
         &mut self,
         instant_digits: bool,
     ) -> Result<Option<String>, std::io::Error> {
+        self.arm_if_a_transfer_asked().await;
         // ZMODEM autostart detection state.  A compliant ZMODEM sender
         // opens a transfer with `** ZDLE <header-type>` where
         // `<header-type>` is one of `A` (binary/CRC-16), `B` (hex),
@@ -1195,10 +1197,40 @@ impl TelnetSession {
             ))
             .await?;
         }
-        self.send_line("").await?;
-        self.send("  Press any key to continue.").await?;
-        self.flush().await?;
-        let _ = self.wait_for_key().await;
+        // The same exchange as every other transfer: settle, ask, re-offer,
+        // arm.  This is a third upload path and the one a terminal starts by
+        // itself, so it drifting from the other two is exactly what
+        // `press_any_key_after_transfer` exists to prevent.
+        let _ = self.press_any_key_after_transfer().await;
+        Ok(())
+    }
+
+    /// Report a failed transfer: carry the reason to the next screen, then ask
+    /// to continue the way a *transfer* must.
+    ///
+    /// `show_error` is the wrong tool here even though the words are the same.
+    /// It prints the prompt once and waits with a bare `wait_for_key`, so on a
+    /// vintage terminal the failure text lands in exactly the screen-restore
+    /// blackout that the whole post-transfer design exists to defeat -- and
+    /// this is where the "both ends were waiting to receive" diagnosis fires,
+    /// the one message a stuck operator most needs.  It is also where a
+    /// protocol's teardown can answer the prompt on their behalf.
+    ///
+    /// `show_error` itself is left alone: it serves every configuration screen
+    /// in the program, none of which follow a transfer, and settling a quiet
+    /// line for a second before each of those would be a cost for nothing.
+    pub(in crate::telnet) async fn show_transfer_error(
+        &mut self,
+        msg: &str,
+    ) -> Result<(), std::io::Error> {
+        self.last_transfer_note = Some(TransferNote {
+            ok: false,
+            // The reason leads and the label goes: at 34 columns a prefix
+            // eats exactly the part worth reading.
+            text: truncate_to_width(msg, 34),
+        });
+        self.send_line(&format!("  {}", self.red(msg))).await?;
+        self.press_any_key_after_transfer().await?;
         Ok(())
     }
 
@@ -1234,14 +1266,7 @@ impl TelnetSession {
         ))
     }
 
-    /// Pause after an XMODEM/YMODEM transfer so the client's own
-    /// transfer dialog finishes closing and the underlying terminal is
-    /// visible again before we print status.  Drains trailing bytes
-    /// from the client's post-transfer chatter (NAWS updates, stray
-    /// CR/LF from a dialog-dismiss keypress, etc.) so the subsequent
-    /// `wait_for_key` actually waits for a human keypress instead of
-    /// being satisfied by leftover noise.
-    /// How long a freshly-drawn prompt ignores input before it will accept a
+        /// How long a freshly-drawn prompt ignores input before it will accept a
     /// keypress.
     ///
     /// **A byte that arrives before a person could have read the prompt is not
@@ -1272,6 +1297,22 @@ impl TelnetSession {
     /// these the code falls through to a plain wait so nothing can hang.
     const PROMPT_OFFER_MS: u64 = 4_000;
     const PROMPT_OFFERS: usize = 4;
+
+    /// Arm the next prompt if a transfer asked for it, and clear the request.
+    ///
+    /// Called from the input readers rather than from one menu loop, because
+    /// **the prompt that gets hit is whichever one is drawn next** and that is
+    /// not always the menu: a download returns into its own file picker and
+    /// reads `Select #:` there.  Arming only the menu loop left that picker
+    /// unprotected -- which is exactly the prompt the measured teardown bytes
+    /// were echoed into -- and then held the flag through the whole picker
+    /// session, finally spending it on a menu prompt the operator did mean to
+    /// use and silently eating 400 ms of their keystrokes there.
+    async fn arm_if_a_transfer_asked(&mut self) {
+        if std::mem::take(&mut self.arm_next_prompt) {
+            self.arm_keypress_prompt().await;
+        }
+    }
 
     /// Discard anything that arrives in the first `PROMPT_ARM_MS` after a
     /// prompt is drawn -- see that constant.
@@ -1351,6 +1392,14 @@ impl TelnetSession {
         Ok(())
     }
 
+    /// Wait for the line to fall silent after a transfer, before asking the
+    /// operator anything.
+    ///
+    /// A protocol keeps talking after its last data byte -- acknowledgements,
+    /// end-off handshakes, a receiver's replies to our closing frames -- and
+    /// those bytes are menu keys to the screen that comes next.  This used to
+    /// be a fixed one-second pause with a drain either side, which is a guess
+    /// about how long a peer keeps going; it now waits for real quiet.
     pub(in crate::telnet) async fn post_transfer_settle(&mut self) {
         // **Wait for the line to go quiet; don't guess how long.**  A protocol
         // keeps talking after its last data byte, and a fixed pause either

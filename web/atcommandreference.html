@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AT Command Reference &mdash; Ethernet Gateway v0.9.8</title>
+    <title>AT Command Reference &mdash; Ethernet Gateway v1.0.0-RC1</title>
     <meta name="description" content="Complete Hayes AT command reference for the Ethernet Gateway serial modem emulator: every command, the S-registers, the +++ escape sequence, result codes and ATX levels, dialing and dial-string modifiers, the AT+PETSCII vendor extension, command chaining, and worked examples.">
     <style>
         :root {
@@ -547,7 +547,7 @@
             </div>
             <h1>Ethernet Gateway</h1>
             <p class="hdr-tagline">AT Command Reference</p>
-            <div class="hdr-version">v0.9.8</div>
+            <div class="hdr-version">v1.0.0-RC1</div>
             <div class="hdr-badges">
                 <span class="hdr-badge">Hayes AT</span>
                 <span class="hdr-badge">S-Registers</span>
@@ -651,10 +651,10 @@
                 <p class="intro">The <code>ATI</code><em>n</em> family reports product and firmware strings &mdash; some terminal programs probe these to recognise the modem.</p>
                 <table class="data-table">
                     <tr><th>Command</th><th>Response</th></tr>
-                    <tr><td><code>ATI</code> / <code>ATI0</code></td><td><code>Hayes-compatible Ethernet Gateway Modem Emulator v0.9.8</code></td></tr>
+                    <tr><td><code>ATI</code> / <code>ATI0</code></td><td><code>Hayes-compatible Ethernet Gateway Modem Emulator v1.0.0-RC1</code></td></tr>
                     <tr><td><code>ATI1</code></td><td><code>000</code> &mdash; ROM checksum (virtual)</td></tr>
                     <tr><td><code>ATI2</code></td><td><code>OK</code> &mdash; ROM self-test</td></tr>
-                    <tr><td><code>ATI3</code></td><td><code>Ethernet Gateway v0.9.8 (Hayes-compatible)</code></td></tr>
+                    <tr><td><code>ATI3</code></td><td><code>Ethernet Gateway v1.0.0-RC1 (Hayes-compatible)</code></td></tr>
                     <tr><td><code>ATI4</code></td><td><code>Hayes-compatible virtual modem over TCP</code></td></tr>
                     <tr><td><code>ATI5</code></td><td><code>B00</code> &mdash; OEM / country code</td></tr>
                     <tr><td><code>ATI6</code></td><td><code>No link diagnostics available</code></td></tr>
@@ -785,7 +785,7 @@
                 <ul>
                     <li><strong>Case-swaps letters in both directions</strong>, because a C64 in upper/graphics mode maps the cases opposite to ASCII &mdash; so an ASCII BBS like <code>telehack.com</code> reads in the right case.</li>
                     <li>Maps <strong>ASCII Backspace &harr; PETSCII Delete</strong> (0x14) so the C64 <span class="kbd">INST/DEL</span> key edits correctly, including while you type the <code>AT</code> command line itself.</li>
-                    <li><strong>Translates inbound ANSI into PETSCII</strong> (since 0.9.8; it used to strip it). Colour becomes PETSCII colour, <code>ESC&nbsp;[2J</code> clears the screen and the cursor moves become their PETSCII equivalents &mdash; so an ASCII BBS renders in colour on a C64 instead of losing it. Anything with no PETSCII equivalent, such as cursor addressing or a per-character background, is still dropped rather than sprayed as garbage.</li>
+                    <li><strong>Translates inbound ANSI into PETSCII</strong> (since 1.0.0-RC1; it used to strip it). Colour becomes PETSCII colour, <code>ESC&nbsp;[2J</code> clears the screen and the cursor moves become their PETSCII equivalents &mdash; so an ASCII BBS renders in colour on a C64 instead of losing it. Anything with no PETSCII equivalent, such as cursor addressing or a per-character background, is still dropped rather than sprayed as garbage.</li>
                     <li><strong>Rewrites the Commodore&rsquo;s own keys on the way out</strong>: the <span class="kbd">&larr;</span> back-arrow is sent as <strong>ESC</strong>, which is what a C64 user means by that key and what the far end needs, and the four cursor keys are sent as ANSI sequences rather than as raw PETSCII control bytes (CRSR&nbsp;DOWN is <code>0x11</code> &mdash; XON &mdash; which a host with software flow control read as permission to resume sending). The cost is that an underscore cannot be typed at the far end.</li>
                     <li><strong>Normalizes punctuation</strong> the C64 can't show: the back-tick and UTF-8 &ldquo;smart&rdquo; single quotes fold to <code>'</code>, smart double quotes to <code>"</code>, tilde / en- / em-dashes to <code>-</code>, the ellipsis to <code>...</code>; other undisplayable high bytes are dropped or shown as <code>?</code>.</li>
                 </ul>
@@ -1110,7 +1110,7 @@ A/                       <span class="output-text">(repeats the dial, no AT/Ente
         <!-- FOOTER                                            -->
         <!-- ══════════════════════════════════════════════════ -->
         <footer class="site-footer">
-            Ethernet Gateway v0.9.8 &mdash; &copy; 2026 Ricky Bryce &mdash;
+            Ethernet Gateway v1.0.0-RC1 &mdash; &copy; 2026 Ricky Bryce &mdash;
             Licensed under GPL-3.0-or-later &mdash;
             <a href="index.html">User Manual</a>
         </footer>

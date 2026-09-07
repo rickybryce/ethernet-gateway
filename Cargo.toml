@@ -1,6 +1,6 @@
 [package]
 name = "ethernetgateway"
-version = "0.9.8"
+version = "1.0.0-RC1"
 edition = "2024"
 authors = ["Ricky Bryce"]
 license = "GPL-3.0-or-later"
