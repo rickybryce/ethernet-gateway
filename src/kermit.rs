@@ -1560,7 +1560,17 @@ pub(crate) enum KermitFlavor {
     C64Kermit,
     EmbeddedKermit,
     MsKermit,
+    /// The peer named itself, but not as anything we recognise -- the string
+    /// is what it said, which is more useful than a guess.
     Unknown(String),
+    /// The peer sent no identity at all.
+    ///
+    /// Kermit's peer-id lives in the optional CAPAS tail, so a Send-Init
+    /// without one is perfectly conformant -- NovaTerm 9.6c sends none.  Kept
+    /// separate from `Unknown` because the two say different things and
+    /// "Unknown Kermit (unidentified)" reads like a fault rather than like a
+    /// peer that simply did not introduce itself.
+    Unidentified,
 }
 
 impl KermitFlavor {
@@ -1575,6 +1585,7 @@ impl KermitFlavor {
             Self::EmbeddedKermit => "Embedded Kermit (E-Kermit)".into(),
             Self::MsKermit => "MS Kermit".into(),
             Self::Unknown(s) => format!("Unknown Kermit ({})", s),
+            Self::Unidentified => "classic Kermit (no identity sent)".into(),
         }
     }
 }
@@ -1625,7 +1636,15 @@ pub(crate) fn detect_flavor(c: &Capabilities) -> KermitFlavor {
     if c.long_packets && !c.attribute_packets {
         return KermitFlavor::Kermit86;
     }
-    KermitFlavor::Unknown("unidentified".into())
+    // **Do not guess from here.**  The branches above key off capability bits
+    // that genuinely narrow the field; below them the shape is just "classic
+    // Kermit", which is what most vintage implementations look like.  Naming
+    // one would be asserting an identity from a proxy signal -- NovaTerm
+    // 9.6c misses the classic branch above by four bytes of MAXL (94 against
+    // its `<= 90`), and widening that to catch it would have reported
+    // "G-Kermit", which is flatly wrong.  Nothing reads this but the `Peer:`
+    // line, so an honest non-answer costs nothing and a wrong name misleads.
+    KermitFlavor::Unidentified
 }
 
 // =============================================================================
@@ -13713,6 +13732,46 @@ mod tests {
     /// not `our_caps`.  Older Kermits NAK on a Send-Init ACK whose data
     /// field carries CAPAS bytes / extension fields they didn't propose
     /// — `session` (the intersection) is the safe-for-vintage source.
+    /// A peer that sends no identity is reported as unidentified, not guessed
+    /// at.
+    ///
+    /// NovaTerm 9.6c offers MAXL=94, CHKT=1, window=1, no long packets and no
+    /// attributes -- four bytes of MAXL above the classic branch's `<= 90`.
+    /// Widening that threshold to catch it would report "G-Kermit", which is
+    /// flatly wrong; the honest answer is that it did not say.  Nothing but
+    /// the `Peer:` line reads this, so a non-answer costs nothing and a wrong
+    /// name misleads.
+    #[test]
+    fn a_peer_that_sends_no_identity_is_not_guessed_at() {
+        let novaterm = Capabilities {
+            maxl: 94,
+            chkt: b'1',
+            window: 1,
+            long_packets: false,
+            attribute_packets: false,
+            peer_id: None,
+            ..Capabilities::default()
+        };
+        let f = detect_flavor(&novaterm);
+        assert_eq!(f, KermitFlavor::Unidentified, "measured NovaTerm 9.6c shape");
+        assert!(
+            !f.display().to_ascii_lowercase().contains("g-kermit"),
+            "an unidentified peer must never be named as a specific Kermit"
+        );
+        assert_eq!(f.display(), "classic Kermit (no identity sent)");
+
+        // A peer that DOES name itself keeps its own words, which are more
+        // useful than any classification of ours.
+        let named = Capabilities {
+            peer_id: Some("Weird Kermit 1.0".into()),
+            ..Capabilities::default()
+        };
+        assert_eq!(
+            detect_flavor(&named).display(),
+            "Unknown Kermit (Weird Kermit 1.0)"
+        );
+    }
+
     #[test]
     fn test_si_ack_built_from_session_drops_unilateral_extensions() {
         // Our proposal: full extended set.
