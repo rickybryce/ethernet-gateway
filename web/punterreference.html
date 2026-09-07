@@ -772,20 +772,44 @@ for b in bytes[4..end]:
                 </p>
                 <table class="data-table">
                     <tr><th>Byte</th><th>Type</th><th>Meaning</th></tr>
-                    <tr><td><code>0</code></td><td>PRG</td><td>Load-address-prefixed Commodore program.</td></tr>
-                    <tr><td><code>1</code></td><td>SEQ</td><td>Flat sequential file.</td></tr>
-                    <tr><td><code>2</code></td><td>USR</td><td>Flat user-defined file.</td></tr>
-                    <tr><td><code>3</code></td><td>&mdash;</td><td>Unknown / none.</td></tr>
+                    <tr><td><code>0</code></td><td>&mdash;</td><td>The table's unused slot &mdash; unknown / none.</td></tr>
+                    <tr><td><code>1</code></td><td>PRG</td><td>Load-address-prefixed Commodore program.</td></tr>
+                    <tr><td><code>2</code></td><td>SEQ</td><td>Flat sequential file.</td></tr>
+                    <tr><td><code>3</code></td><td>USR</td><td>Flat user-defined file.</td></tr>
                 </table>
+                <p class="dim-text">
+                    The byte is an <strong>index into CCGMS's own <code>upltyp</code>
+                    table</strong>, <code>ccgmsterm/src/xfer.s</code>:
+                    <code>.byte 0,'P','S','U'</code>. Its <code>prompt_file_type</code>
+                    matches the operator's keypress against that table and stores the
+                    matching index &mdash; counting down from 3 and never reaching 0 &mdash;
+                    and <code>punter.s</code> writes that value straight into the block,
+                    reads it straight back on receive, and displays it by indexing the same
+                    table. NovaTerm 9.6c agrees, measured in both directions.
+                </p>
+                <div class="callout callout-warn">
+                    <strong>This page said <code>0</code>&nbsp;=&nbsp;PRG until v0.9.8, and
+                    so did the code.</strong> The mapping had been inferred from a table of
+                    type <em>names</em> on the assumption that the wire value was that
+                    list's 0-based index, and it was then &ldquo;confirmed&rdquo; by
+                    <code>ccgmsterm/test/punter.c</code>, which hardcodes
+                    <code>xfer_buffer[7] = 1;</code> with the comment <code>// SEQ</code>
+                    &mdash; a comment that contradicts CCGMS's own table. A real captured
+                    CCGMS transfer, a proptest suite and the whole unit suite all passed
+                    with the mapping shifted, because the only value anyone had ever checked
+                    was the one the mislabelled comment produced. It took a PRG file sent
+                    with a filename that had <em>no</em> extension before the misread could
+                    reach a decision at all.
+                </div>
                 <p class="dim-text">
                     Linux has no CBM directory entry to carry this, so the gateway maps it to
                     the filename extension. On <strong>send</strong>, the outbound type is
                     auto-detected from the extension (<code>.prg</code> / <code>.seq</code> /
                     <code>.usr</code>). On <strong>receive</strong>, the matching extension is
                     appended when the saved filename lacks one &mdash; preserving the
-                    round-trip. A type byte outside <code>0..=3</code> is treated as
-                    <strong>Unknown</strong> (left without a suffix) rather than silently
-                    coerced to SEQ.
+                    round-trip. <code>0</code> and anything above <code>3</code> are treated
+                    as <strong>Unknown</strong> (left without a suffix) rather than silently
+                    coerced to a real type.
                 </p>
 
                 <div class="cat">Phase B &mdash; data blocks</div>

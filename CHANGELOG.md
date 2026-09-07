@@ -11,6 +11,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Punter's file-type byte was off by one, in both directions.**  The Phase-A
+  type byte is an index into CCGMS's own `upltyp` table
+  (`ccgmsterm/src/xfer.s`, `.byte 0,'P','S','U'`), so the wire values are
+  1&nbsp;=&nbsp;PRG, 2&nbsp;=&nbsp;SEQ, 3&nbsp;=&nbsp;USR with 0 unused.  Ours
+  were 0/1/2, inferred from a table of type *names* on the assumption that the
+  wire value was that list's 0-based index.
+
+  The effect was metadata, never content: an upload saved with a filename that
+  had no extension got the wrong one appended, and a download reached a
+  Commodore with the wrong CBM directory type.  Measured against NovaTerm
+  9.6c, which agrees with the CCGMS source -- fourteen samples in one session.
+
+  Worth recording how it survived: `ccgmsterm/test/punter.c` hardcodes
+  `xfer_buffer[7] = 1;` with the comment `// SEQ`, which contradicts CCGMS's
+  own table, and this project's captured-wire fixture asserted that
+  mislabelled reading.  A real CCGMS capture, a proptest suite and the whole
+  unit suite all passed with the mapping shifted, because the only value
+  anyone had ever checked was the one the wrong comment produced.
+
+- **A Punter receiver left two of the sender's three closing `S/B` on the
+  wire.**  A C1 sender closes with three; a conforming receiver consumes one
+  to finish the SYN/S-B exchange and drains two more.  Ours took one, and the
+  remainder reached the menu the transfer returned to -- where C1's handshake
+  codes are literal ASCII whose letters are commands, so a leftover `S/B`
+  selected "Back" and a `GOO` opened the Gateway Shell.  Measured on a C64.
+
+- **The end of a transfer said nothing, and then said it to nobody.**  A
+  vintage terminal owns the screen during a transfer and *restores* it
+  afterwards, so a summary printed at the instant one ends is erased unseen:
+  a byte-perfect download left the operator looking at "Start XMODEM-1K
+  receive now" with no sign it had worked.  Four things now cooperate to fix
+  that -- the outcome is carried to the next screen the terminal actually
+  draws, the "press any key" prompt is re-offered until somebody answers it,
+  the line is settled until quiet before that prompt rather than for a guessed
+  interval, and the prompt (and the first menu behind it) ignores input for
+  400&nbsp;ms, because a byte arriving before a person could have read the
+  screen is not a keypress.  Without that last part a protocol's teardown
+  answered on the operator's behalf and walked through menus on its own.
+
+- **A Commodore's shifted AT commands lost every letter.**  The modem's
+  command reader accepted printable ASCII only, and PETSCII puts shifted
+  letters at 0xC1..=0xDA -- which is a C64's own uppercase.  NovaTerm's stored
+  init string `ATE1M1V1X4&C1&D2&K3S0=0S11=50` arrived as `1114&1&2&30=011=50`
+  and was refused, so echo, verbose and extended result codes, DCD/DTR
+  handling and S0/S11 were silently never applied.  It went unnoticed because
+  the dial string a terminal *generates* is plain ASCII: dialling worked while
+  configuring did not.
+
 - **ZMODEM ignored the buffer length a receiver advertises, and could lose
   almost the whole file to a receiver that states one.**  `ZRINIT`'s
   `ZP0`/`ZP1` field was read as nothing at all: the sender always streamed
@@ -97,6 +145,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spanning a block boundary.
 
 ### Added
+
+- **Both ends waiting to receive is now named instead of timing out.**  A
+  start request (`C` or `NAK`) is only ever sent *by* a receiver, so one
+  arriving while the gateway is sending them is conclusive: both ends are
+  waiting for a sender -- the shape of choosing Upload here and Download on
+  the terminal.  It used to log a dozen "ignoring unexpected byte" lines and
+  fail with a bare negotiation timeout.  It is a diagnosis and not an abort,
+  because the condition is not permanent: the gateway keeps re-sending for the
+  whole window, so switching the terminal to send still completes.
+
+- **Kermit no longer reports a peer that did not introduce itself as a
+  fault.**  The `Peer:` line read "Unknown Kermit (unidentified)"; Kermit's
+  peer-id lives in the optional CAPAS tail, so a Send-Init without one is
+  perfectly conformant.  It now reads "classic Kermit (no identity sent)".
+  The flavour classifier was deliberately left alone rather than widened to
+  guess a name from capability bits.
 
 - **`web/novatermreference.html`** -- a measured reference for NovaTerm 9.6c:
   the `C=` terminal commands, the settings a transfer needs, how to drive it

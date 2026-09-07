@@ -704,7 +704,26 @@
                         <li>The sender transmits <code>EOT</code> (0x04); the gateway answers with <code>ACK</code>.</li>
                         <li>The gateway sends one more <code>C</code> and reads the next block 0. If its filename is <strong>non-empty</strong>, it is the <strong>next file in the batch</strong> &mdash; the gateway loops back to Step 2 and receives it too, saving each file to <code>transfer_dir</code> under its own name. A real multi-file send (<code>sb file1 file2 &hellip;</code>) is received in full, not just the first file.</li>
                         <li>When the block 0's filename is <strong>empty</strong>, it is the <strong>end-of-batch block 0</strong> &mdash; &ldquo;no more files.&rdquo; The gateway <code>ACK</code>s it and the session ends.</li>
+                        <li><strong>And when nothing comes at all.</strong> Plenty of senders
+                        simply stop after the last <code>EOT</code> and never send the
+                        end-of-batch block. The gateway waits a bounded ten seconds for it and
+                        then ends the batch, treating the sender as lax rather than failing a
+                        transfer whose file is already complete and written to disk.</li>
                     </ol>
+                    <div class="callout callout-info">
+                        <strong>That wait is the sender's silence, not a stall.</strong> The
+                        bound is deliberately its own, not <code>xmodem_block_timeout</code>
+                        (20&nbsp;s), which governs a peer that has gone quiet <em>mid</em>-transfer
+                        where a long wait is right. Here the file has already arrived, and the
+                        only open question is whether another one follows &mdash; so the whole
+                        pause is visible at the end of a transfer that has in fact succeeded.
+                        Measured against NovaTerm 9.6c, which is <em>inconsistent</em> about it:
+                        it sent the terminator on one run and omitted it on the next, on the
+                        same wiring. That is why the bound is not tightened further &mdash;
+                        it is covering a coin flip, not a peer that never cooperates, and a
+                        shorter wait would risk cutting off the next file of a real batch from
+                        a sender that is merely slow to open it.
+                    </div>
                 </div>
 
                 <div class="cat">Step 5 &mdash; Save with exact size and metadata</div>
