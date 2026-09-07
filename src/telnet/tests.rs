@@ -9864,13 +9864,18 @@ async fn test_a_transfer_arms_the_menu_prompt_exactly_once() {
     // settle simply drains it -- which is the whole point of both, and is
     // what a real operator does anyway: they read the prompt first.
     let keypress = tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        // After the settle's quiet gap AND the arming window, or the key is
+        // simply absorbed -- which is what both of those exist to do.  Kept
+        // generous rather than tuned to the current constants: a test that
+        // tracks them exactly would break every time one is widened, and it
+        // has already broken once that way.
+        tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
         peer.write_all(b"\r").await.unwrap();
         peer.flush().await.unwrap();
         peer
     });
     let done = tokio::time::timeout(
-        std::time::Duration::from_secs(6),
+        std::time::Duration::from_secs(20),
         session.press_any_key_after_transfer(),
     )
     .await

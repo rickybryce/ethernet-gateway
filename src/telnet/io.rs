@@ -1292,8 +1292,10 @@ impl TelnetSession {
         self.arm_keypress_prompt().await;
         self.wait_for_key().await?;
         // If a late byte is what answered the prompt after all, the rest of
-        // its burst is still queued and the next screen drawn is a menu.
-        self.drain_input_until_quiet(150, Some(1000)).await;
+        // its burst is still queued and the next screen drawn is a menu.  Same
+        // reasoning as the settle above: the gap must outlast the peer's
+        // pauses, not merely its bursts.
+        self.drain_input_until_quiet(600, Some(3000)).await;
         // And the menu itself is armed, because a teardown can still be
         // trickling when it is drawn -- see `arm_next_prompt`.
         self.arm_next_prompt = true;
@@ -1312,7 +1314,25 @@ impl TelnetSession {
         // A quiet gap costs nothing when the line is already silent and
         // absorbs the whole burst when it is not.  Capped so a peer that never
         // stops cannot hold the session here.
-        self.drain_input_until_quiet(250, Some(3000)).await;
+        //
+        // **The gap has to outlast the peer's own pauses, not just its bursts.**
+        // 250 ms was not enough: a Punter receiver answers each of our three
+        // closing `S/B` with `GOO`, and NovaTerm writes the last block to a
+        // 1541 between them, so `GOOGOOGOO` arrives spread over a second or
+        // more.  Whatever was still in flight then reached the menu, where
+        // C1's handshake codes are literal ASCII and their letters are menu
+        // keys -- `G` for Gateway Shell, the `D` of `BAD` for Download a file
+        // -- and the tail ended up echoed into the file picker's `Select #:`
+        // line prompt, which sat waiting for a RETURN while the operator's own
+        // keystrokes appended to it and nothing appeared to respond.
+        //
+        // Collecting those replies inside the protocol looks like the tidier
+        // fix and is not one: `end_off_sender` documents, from measurement,
+        // that reading after the closing `S/B` swallows a receiver's opening
+        // signal for its next phase, and doing it desynced the independent
+        // reference receiver outright.  So the bytes are absorbed here, where
+        // a delay is harmless, rather than where they would change a protocol.
+        self.drain_input_until_quiet(1000, Some(6000)).await;
     }
 
     /// Show a multi-line informational message and wait for a keypress.
