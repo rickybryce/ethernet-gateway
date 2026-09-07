@@ -1075,12 +1075,13 @@ mod tests {
     /// it.
     #[test]
     fn test_our_blank_altair_matches_the_guests_own_format() {
+        use crate::cpm::fetch::hex_of;
         use sha2::{Digest, Sha256};
         let alt = by_token("altair8").unwrap();
         let blank = alt.blank_image().expect("the Altair has a measured blank");
         assert_eq!(blank.len(), 337_568);
         assert_eq!(
-            format!("{:x}", Sha256::digest(&blank)),
+            hex_of(&Sha256::digest(&blank)),
             "a950b6638d426ecb0266e63767945d928962599f13c2af5ddb86916bf00a1132",
             "our blank Altair image is not what FORMAT.COM produces"
         );

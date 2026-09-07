@@ -2169,6 +2169,7 @@ mod tests {
     #[test]
     #[ignore]
     fn test_altair_extraction_matches_the_booted_guest() {
+        use crate::cpm::fetch::hex_of;
         use sha2::{Digest, Sha256};
         /// (file, SHA-256 of what the guest's own CP/M sent out).
         const EXPECT: &[(&str, &str)] = &[
@@ -2193,7 +2194,7 @@ mod tests {
                 .read_whole(0, &n, &e, 8 << 20)
                 .unwrap()
                 .unwrap_or_else(|| panic!("{file} is not on the disk"));
-            let sum = format!("{:x}", Sha256::digest(&got));
+            let sum = hex_of(&Sha256::digest(&got));
             assert_eq!(&sum, want, "{file}: {} bytes, wrong content", got.len());
         }
         println!("{} files match the guest's own reading", EXPECT.len());

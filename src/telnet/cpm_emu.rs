@@ -3591,6 +3591,7 @@ mod egt80_tests {
     ///     sha256sum EGT8080/EGT8080.COM
     #[test]
     fn test_bundled_terminals_match_pinned_hashes() {
+        use crate::cpm::fetch::hex_of;
         use sha2::{Digest, Sha256};
 
         // Same order as `BUNDLED_TERMINALS`, which the zip below checks
@@ -3606,7 +3607,7 @@ mod egt80_tests {
             // Zipped, so a terminal added to one list and not the other is a
             // length mismatch rather than a silently unchecked binary.
             assert_eq!(name, pin_name, "the two lists have drifted out of order");
-            let actual = format!("{:x}", Sha256::digest(*bytes));
+            let actual = hex_of(&Sha256::digest(*bytes));
             assert_eq!(
                 &actual, pinned,
                 "\n{name} has changed but its pinned hash has not.\n\
