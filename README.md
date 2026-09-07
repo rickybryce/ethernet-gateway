@@ -216,6 +216,15 @@ this software on untrusted networks.
 Portions of this project were developed with the assistance of AI tools,
 principally Claude Code (Anthropic) with ChatGPT (OpenAI) alongside it.
 
+## Contributing
+
+Bug reports and patches are welcome — see
+[`CONTRIBUTING.md`](CONTRIBUTING.md) for how to build, what the gates are, and
+the handful of rules that carry most of the review feedback (chiefly: **don't
+run `cargo fmt`**, measure rather than reason about hardware behaviour, and new
+functionality comes with tests). Security issues go through
+[`SECURITY.md`](SECURITY.md), not the issue tracker.
+
 ## License
 
 This project is licensed under the
