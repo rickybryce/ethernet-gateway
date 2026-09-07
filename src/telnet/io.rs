@@ -1258,6 +1258,21 @@ impl TelnetSession {
     /// so discarding it costs a real operator nothing.
     const PROMPT_ARM_MS: u64 = 400;
 
+    /// How long each offer of the post-transfer prompt waits before being
+    /// re-printed, and how many times.
+    ///
+    /// A vintage terminal owns the screen during a transfer and RESTORES it
+    /// afterwards, so the first offers are painted into a blackout and then
+    /// erased -- the operator sees no prompt and has to guess that a keypress
+    /// works.  Re-offering costs nothing for what is lost and puts a visible
+    /// prompt on the screen as soon as the terminal is back.
+    ///
+    /// Kept few and slow: each offer is a line on a 40-column screen, so an
+    /// operator who waits sees a short stack rather than a wall, and after
+    /// these the code falls through to a plain wait so nothing can hang.
+    const PROMPT_OFFER_MS: u64 = 4_000;
+    const PROMPT_OFFERS: usize = 4;
+
     /// Discard anything that arrives in the first `PROMPT_ARM_MS` after a
     /// prompt is drawn -- see that constant.
     pub(in crate::telnet) async fn arm_keypress_prompt(&mut self) {
@@ -1286,11 +1301,45 @@ impl TelnetSession {
         &mut self,
     ) -> Result<(), std::io::Error> {
         self.post_transfer_settle().await;
-        self.send_line("").await?;
-        self.send("  Press any key to continue.").await?;
-        self.flush().await?;
-        self.arm_keypress_prompt().await;
-        self.wait_for_key().await?;
+        // **Re-offer the prompt until somebody answers it.**  Printing it once
+        // sends it into the blackout while a vintage terminal is restoring its
+        // screen, and the restore then erases it: measured on a C64 after an
+        // upload, the operator saw no prompt at all and had to discover that
+        // pressing a key worked anyway.  No pause before printing can fix
+        // that, because there is no way to know when the terminal is back --
+        // the same shape as Kermit's Send-Init, which was one shot at a peer
+        // that was not listening yet, and was cured by retransmitting rather
+        // than by timing the shot better.
+        //
+        // Whatever is lost in the blackout costs nothing, and the first offer
+        // after the restore is the one the operator reads.  Bounded, then it
+        // falls through to a plain wait: the session must never hang on this,
+        // and an operator who has already pressed something has answered.
+        let mut answered = false;
+        for _ in 0..Self::PROMPT_OFFERS {
+            self.send_line("").await?;
+            self.send("  Press any key to continue.").await?;
+            self.flush().await?;
+            self.arm_keypress_prompt().await;
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(Self::PROMPT_OFFER_MS),
+                self.wait_for_key(),
+            )
+            .await
+            {
+                Ok(r) => {
+                    r?;
+                    answered = true;
+                    break;
+                }
+                // Nobody there yet -- the terminal is very likely still
+                // repainting.  Offer it again.
+                Err(_) => continue,
+            }
+        }
+        if !answered {
+            self.wait_for_key().await?;
+        }
         // If a late byte is what answered the prompt after all, the rest of
         // its burst is still queued and the next screen drawn is a menu.  Same
         // reasoning as the settle above: the gap must outlast the peer's

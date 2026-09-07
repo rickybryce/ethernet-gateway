@@ -9896,3 +9896,53 @@ async fn test_a_transfer_arms_the_menu_prompt_exactly_once() {
         "the arming must apply to one prompt only"
     );
 }
+
+/// The post-transfer prompt is re-offered until somebody answers it.
+///
+/// A vintage terminal owns the screen during a transfer and restores it
+/// afterwards, so a prompt printed once lands in the blackout and is then
+/// erased: measured on a C64 after a hand-driven upload, the operator saw no
+/// prompt at all and had to discover that pressing a key worked anyway.  No
+/// pause before printing fixes that, because nothing tells us when the
+/// terminal is back -- the same shape as Kermit's Send-Init, cured by
+/// retransmitting rather than by timing the shot.
+#[tokio::test]
+async fn test_the_post_transfer_prompt_is_offered_more_than_once() {
+    let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
+    use tokio::io::AsyncReadExt;
+
+    // Nobody answers, so the exchange should keep offering and then fall
+    // through to a plain wait rather than hanging on one lost prompt.
+    let session_task = tokio::spawn(async move {
+        let _ = session.press_any_key_after_transfer().await;
+    });
+
+    // Read for long enough to span more than one offer.
+    let mut seen = String::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(12);
+    let mut buf = vec![0u8; 4096];
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            peer.read(&mut buf),
+        )
+        .await
+        {
+            Ok(Ok(n)) if n > 0 => seen.push_str(&String::from_utf8_lossy(&buf[..n])),
+            Ok(Ok(_)) => break,
+            _ => {}
+        }
+        if seen.matches("Press any key").count() >= 2 {
+            break;
+        }
+    }
+    session_task.abort();
+
+    assert!(
+        seen.matches("Press any key").count() >= 2,
+        "the prompt must be re-offered, or a terminal that was repainting when \
+         it was first printed never sees one; got {} offer(s) in:\n{}",
+        seen.matches("Press any key").count(),
+        seen
+    );
+}
