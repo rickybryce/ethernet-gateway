@@ -1241,6 +1241,62 @@ impl TelnetSession {
     /// CR/LF from a dialog-dismiss keypress, etc.) so the subsequent
     /// `wait_for_key` actually waits for a human keypress instead of
     /// being satisfied by leftover noise.
+    /// How long a freshly-drawn prompt ignores input before it will accept a
+    /// keypress.
+    ///
+    /// **A byte that arrives before a person could have read the prompt is not
+    /// a keypress.**  That is a statement about people, not a guess about the
+    /// peer, which is what makes it a guard rather than another race: settling
+    /// the line first only covers bytes already in flight, and a protocol can
+    /// speak again after the line has gone quiet -- NovaTerm writes the last
+    /// block to a 1541 and then sends its final handshake, which is far later
+    /// than any drain would wait for.  Measured: the summary flashed up and
+    /// the session returned to the file list on its own, with nobody touching
+    /// the keyboard.
+    ///
+    /// Nobody reads a new line of text and presses a key inside this window,
+    /// so discarding it costs a real operator nothing.
+    const PROMPT_ARM_MS: u64 = 400;
+
+    /// Discard anything that arrives in the first `PROMPT_ARM_MS` after a
+    /// prompt is drawn -- see that constant.
+    pub(in crate::telnet) async fn arm_keypress_prompt(&mut self) {
+        let until = tokio::time::Instant::now()
+            + std::time::Duration::from_millis(Self::PROMPT_ARM_MS);
+        loop {
+            let remaining = until.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return;
+            }
+            match tokio::time::timeout(remaining, self.session_read_byte()).await {
+                // A byte inside the window: discarded, and we keep waiting out
+                // the rest of it rather than arming early -- a burst is a burst.
+                Ok(Ok(Some(_))) => continue,
+                // Window elapsed, or the peer is gone.  Either way, stop.
+                _ => return,
+            }
+        }
+    }
+
+    /// The whole "that transfer is over, press something" exchange, in one
+    /// place so the upload and download paths cannot drift apart: settle the
+    /// line, ask, ignore what the protocol is still saying, wait for a real
+    /// key, then swallow whatever followed it.
+    pub(in crate::telnet) async fn press_any_key_after_transfer(
+        &mut self,
+    ) -> Result<(), std::io::Error> {
+        self.post_transfer_settle().await;
+        self.send_line("").await?;
+        self.send("  Press any key to continue.").await?;
+        self.flush().await?;
+        self.arm_keypress_prompt().await;
+        self.wait_for_key().await?;
+        // If a late byte is what answered the prompt after all, the rest of
+        // its burst is still queued and the next screen drawn is a menu.
+        self.drain_input_until_quiet(150, Some(1000)).await;
+        Ok(())
+    }
+
     pub(in crate::telnet) async fn post_transfer_settle(&mut self) {
         // **Wait for the line to go quiet; don't guess how long.**  A protocol
         // keeps talking after its last data byte, and a fixed pause either

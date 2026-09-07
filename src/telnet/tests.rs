@@ -9784,3 +9784,56 @@ async fn test_a_protocol_teardown_is_not_a_keypress() {
          that is how Punter's trailing GOO opened the Gateway Shell"
     );
 }
+
+/// A byte arriving before a person could have read the prompt is not a
+/// keypress.
+///
+/// Settling the line only covers what is already in flight, and a protocol can
+/// speak again after it has gone quiet: NovaTerm writes the last block to a
+/// 1541 and then sends its final handshake, far later than any drain would
+/// wait.  Measured on a C64 -- the summary flashed up and the session returned
+/// to the file list on its own, with nobody touching the keyboard.  So the
+/// prompt ignores its first `PROMPT_ARM_MS`, which is a statement about people
+/// rather than a guess about the peer.
+#[tokio::test]
+async fn test_a_late_protocol_byte_still_does_not_answer_the_prompt() {
+    let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
+    use tokio::io::AsyncWriteExt;
+
+    // The line is quiet when we settle, so the drain sees nothing...
+    session.post_transfer_settle().await;
+    // ...and only then does the peer speak, the way a 1541 write does.
+    peer.write_all(b"SYN").await.unwrap();
+    peer.flush().await.unwrap();
+
+    session.arm_keypress_prompt().await;
+    let waited = tokio::time::timeout(
+        std::time::Duration::from_millis(400),
+        session.wait_for_key(),
+    )
+    .await;
+    assert!(
+        waited.is_err(),
+        "a byte arriving inside the arming window must not answer the prompt"
+    );
+}
+
+/// And the guard must not lock a real operator out: a key pressed after the
+/// window is honoured immediately.  Without this the fix would trade a
+/// cosmetic flash for a session nobody can leave.
+#[tokio::test]
+async fn test_the_arming_window_still_lets_a_person_continue() {
+    let (mut session, mut peer) = make_test_session_with_peer(TerminalType::Ansi);
+    use tokio::io::AsyncWriteExt;
+
+    session.arm_keypress_prompt().await;
+    peer.write_all(b"\r").await.unwrap();
+    peer.flush().await.unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_millis(1000),
+        session.wait_for_key(),
+    )
+    .await
+    .expect("a keypress after the arming window must be accepted")
+    .expect("wait_for_key must not error on a real key");
+}
