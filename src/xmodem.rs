@@ -216,6 +216,21 @@ pub(crate) async fn xmodem_receive_batch(
     // start a CRC-capable sender.
     let mut mode = TransferMode::Crc16;
     let mut attempt: u32 = 0;
+    // **Receiving the byte we are transmitting means the peer is receiving
+    // too.**  A start request -- `C` or `NAK` -- is only ever sent BY a
+    // receiver, so seeing one arrive while we are sending them is not noise
+    // and not a coincidence: both ends are waiting for a sender.  Measured on
+    // a C64: `U` pressed here instead of `D`, with NovaTerm told to download,
+    // produced twelve rounds of "ignoring unexpected byte 0x43" and then
+    // "Negotiation timeout", which names neither the cause nor the remedy.
+    //
+    // It is recorded rather than acted on, because **the condition is not
+    // permanent**: we keep re-sending for the whole negotiation window, so an
+    // operator who notices and switches their terminal to *send* still
+    // completes normally.  Aborting on the first mirrored byte would destroy
+    // that recovery.  The diagnosis is instead attached to the failure, which
+    // is the message that reaches a terminal whose screen has come back.
+    let mut peer_also_receiving = false;
 
     // `.max(1)` on the divisor guards against a divide-by-zero panic if
     // `negotiation_retry_interval` is ever 0 — today the config layer floors
@@ -225,10 +240,28 @@ pub(crate) async fn xmodem_receive_batch(
     let max_negotiation_attempts = crc_attempts + max_retries as u32;
     loop {
         if tokio::time::Instant::now() >= negotiation_deadline {
-            return Err("Negotiation timeout: start your XMODEM sender".into());
+            return Err(if peer_also_receiving {
+                // The diagnosis goes here rather than mid-wait: a vintage
+                // terminal is inside its own transfer screen while we wait,
+                // so anything printed then is lost to its screen restore.
+                // This message lands on the screen it comes back to.
+                "Both ends were waiting to receive: the peer sent start \
+                 requests too. Start a send on your terminal, or choose \
+                 Download here."
+                    .into()
+            } else {
+                "Negotiation timeout: start your XMODEM sender".to_string()
+            });
         }
         if attempt >= max_negotiation_attempts {
-            return Err("Negotiation failed: no response from sender".into());
+            return Err(if peer_also_receiving {
+                "Both ends were waiting to receive: the peer sent start \
+                 requests too. Start a send on your terminal, or choose \
+                 Download here."
+                    .into()
+            } else {
+                "Negotiation failed: no response from sender".to_string()
+            });
         }
 
         let request = if attempt < crc_attempts { CRC_REQUEST } else { NAK };
@@ -417,7 +450,22 @@ pub(crate) async fn xmodem_receive_batch(
                     return Ok(files);
                 }
                 // CAN handled above by is_can_abort + single-CAN continue.
-                if verbose { glog!("XMODEM recv: ignoring unexpected byte 0x{:02X}", byte); }
+                if byte == CRC_REQUEST || byte == NAK {
+                    // Our own kind of byte, coming the other way -- see
+                    // `peer_also_receiving`.  Logged once; the peer sends
+                    // these on a timer and repeating it would bury the rest.
+                    if !peer_also_receiving {
+                        peer_also_receiving = true;
+                        glog!(
+                            "XMODEM recv: the peer is sending start requests too \
+                             (0x{:02X}) — both ends are waiting to receive. Start \
+                             a send on the far end, or choose Download here.",
+                            byte
+                        );
+                    }
+                } else if verbose {
+                    glog!("XMODEM recv: ignoring unexpected byte 0x{:02X}", byte);
+                }
             }
             Ok(Err(e)) => return Err(e),
             Err(_) => {
@@ -3654,6 +3702,100 @@ mod tests {
         let mut expected = vec![0x41u8; XMODEM_BLOCK_SIZE];
         expected.extend_from_slice(&[0x42u8; XMODEM_BLOCK_SIZE]);
         assert_eq!(data, expected, "both blocks must survive");
+    }
+
+    /// Two receivers facing each other must be named, not reported as a
+    /// generic timeout -- and must NOT be aborted on.
+    ///
+    /// A start request (`C` or `NAK`) is only ever sent by a receiver, so one
+    /// arriving while we send them is conclusive: both ends are waiting for a
+    /// sender.  Measured on a C64 -- `U` chosen here instead of `D`, with
+    /// NovaTerm told to download -- which produced twelve rounds of "ignoring
+    /// unexpected byte 0x43" and then a timeout naming neither cause nor
+    /// remedy.
+    ///
+    /// **The condition is not permanent**, which is why this is a diagnosis
+    /// and not an abort: we keep re-sending for the whole negotiation window,
+    /// so an operator who switches their terminal to send still completes.
+    /// The second half of this test is that recovery, and it is the half that
+    /// would break if a future change decided to fail fast on the mirror.
+    #[tokio::test(start_paused = true)]
+    async fn test_two_receivers_facing_each_other_are_named_not_just_timed_out() {
+        // A peer that only ever sends start requests: we must fail, and the
+        // failure must say what is wrong.
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+        let recv_task = tokio::spawn(async move {
+            xmodem_receive(&mut recv_read, &mut recv_write, false, false, false).await
+        });
+        // Mirror its own request back at it, as a receiving peer does.
+        let mirror = tokio::spawn(async move {
+            for _ in 0..30 {
+                if raw_read_byte(&mut send_read, false).await.is_err() {
+                    break;
+                }
+                if raw_write_byte(&mut send_write, CRC_REQUEST, false).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let err = match tokio::time::timeout(
+            std::time::Duration::from_secs(600),
+            recv_task,
+        )
+        .await
+        {
+            Ok(Ok(Err(e))) => e,
+            other => panic!("expected a named failure, got {:?}", other.is_ok()),
+        };
+        mirror.abort();
+        assert!(
+            err.to_ascii_lowercase().contains("both ends"),
+            "the failure must name the mirrored start requests, not just time \
+             out; got {:?}",
+            err
+        );
+
+        // And the recovery: a peer that mirrors briefly and THEN sends is
+        // served normally.  Failing fast on the mirror would break this.
+        let (sender_half, receiver_half) = tokio::io::duplex(16384);
+        let (mut send_read, mut send_write) = tokio::io::split(sender_half);
+        let (mut recv_read, mut recv_write) = tokio::io::split(receiver_half);
+        let recv_task = tokio::spawn(async move {
+            xmodem_receive(&mut recv_read, &mut recv_write, false, false, false).await
+        });
+        // One mirrored request -- the operator's mistake -- then they notice.
+        assert_eq!(raw_read_byte(&mut send_read, false).await.unwrap(), CRC_REQUEST);
+        raw_write_byte(&mut send_write, CRC_REQUEST, false).await.unwrap();
+        // They switch their terminal to send, and it works.  The receiver may
+        // re-prompt while our block is in flight -- it is on a retry timer and
+        // the paused clock advances whenever both tasks are idle -- so read
+        // past any further start requests rather than demanding the ACK be the
+        // very next byte.
+        send_write.write_all(&make_crc_data_block(1, 0x41)).await.unwrap();
+        let mut ack = None;
+        for _ in 0..8 {
+            match raw_read_byte(&mut send_read, false).await.unwrap() {
+                ACK => {
+                    ack = Some(ACK);
+                    break;
+                }
+                CRC_REQUEST | NAK => continue,
+                other => panic!("unexpected response to block 1: 0x{:02X}", other),
+            }
+        }
+        assert_eq!(ack, Some(ACK), "block 1 must be ACKed once the peer sends");
+        finish_plain_eot(&mut send_read, &mut send_write).await;
+        let (data, _) = recv_task
+            .await
+            .unwrap()
+            .expect("a peer that corrects itself mid-window must be served");
+        assert_eq!(
+            data,
+            vec![0x41u8; XMODEM_BLOCK_SIZE],
+            "the recovery path must deliver the file"
+        );
     }
 
     /// A spurious EOT followed by the sender's duplicate resend must NOT leave
