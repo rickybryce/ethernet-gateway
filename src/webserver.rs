@@ -4224,8 +4224,11 @@ fn numfield<T: std::fmt::Display>(name: &str, label: &str, value: T) -> String {
     numfield_attr(name, label, value, "")
 }
 
-fn textfield(name: &str, label: &str, value: &str, password: bool, size: usize) -> String {
-    textfield_attr(name, label, value, password, size, "")
+/// One labelled `<input>`.  `masked` renders it as `type="password"` -- named
+/// for what it does to the field rather than for the kind of field that wants
+/// it, the same rename and the same reason as `gui::singleline_with_menu`.
+fn textfield(name: &str, label: &str, value: &str, masked: bool, size: usize) -> String {
+    textfield_attr(name, label, value, masked, size, "")
 }
 
 /// Like [`textfield`] but with an extra attribute string (e.g. `"disabled"`),
@@ -4234,11 +4237,11 @@ fn textfield_attr(
     name: &str,
     label: &str,
     value: &str,
-    password: bool,
+    masked: bool,
     size: usize,
     attr: &str,
 ) -> String {
-    let kind = if password { "password" } else { "text" };
+    let kind = if masked { "password" } else { "text" };
     format!(
         "<span class=\"label\">{label}:</span><input type=\"{kind}\" name=\"{name}\" value=\"{value}\" size=\"{size}\" {attr}>",
         kind = kind,

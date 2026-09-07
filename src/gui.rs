@@ -4658,19 +4658,25 @@ fn labeled_password(ui: &mut egui::Ui, label: &str, buf: &mut String) {
 }
 
 /// A singleline `TextEdit` with a Cut/Copy/Paste/Select All right-click menu.
-/// When `password` is true, Cut/Copy are disabled so the password text is
-/// never written to the clipboard.
+/// When `masked` is true the characters are drawn as dots *and* Cut/Copy are
+/// disabled, so a secret is never written to the clipboard.
+///
+/// **Named for what it does to the widget, not for the kind of field that
+/// wants it.**  It was `password: bool`, which reads as a credential at every
+/// call site -- and CodeQL read it that way too, reporting the literal at
+/// every ordinary field as a hard-coded password.  The same rename went
+/// through `webserver::textfield`, which had the identical parameter.
 fn singleline_with_menu(
     ui: &mut egui::Ui,
     buf: &mut String,
-    password: bool,
+    masked: bool,
     desired_width: Option<f32>,
 ) -> egui::Response {
     let id = ui.next_auto_id();
     let prev_range = TextEditState::load(ui.ctx(), id)
         .and_then(|s| s.cursor.char_range());
 
-    let mut te = egui::TextEdit::singleline(buf).password(password);
+    let mut te = egui::TextEdit::singleline(buf).password(masked);
     if let Some(w) = desired_width {
         te = te.desired_width(w);
     }
@@ -4682,7 +4688,7 @@ fn singleline_with_menu(
         &mut output.state,
         prev_range,
     );
-    attach_text_edit_menu(ui.ctx(), &output.response.response, output.state, buf, password);
+    attach_text_edit_menu(ui.ctx(), &output.response.response, output.state, buf, masked);
     output.response.response
 }
 
@@ -4753,7 +4759,7 @@ fn attach_text_edit_menu(
     response: &egui::Response,
     mut state: TextEditState,
     buf: &mut String,
-    password: bool,
+    masked: bool,
 ) {
     let cursor_range = state.cursor.char_range();
     let id = response.id;
@@ -4762,7 +4768,7 @@ fn attach_text_edit_menu(
     response.context_menu(move |ui| {
         let has_selection = cursor_range.is_some_and(|r| !r.is_empty());
 
-        ui.add_enabled_ui(has_selection && !password, |ui| {
+        ui.add_enabled_ui(has_selection && !masked, |ui| {
             if ui.button("Cut").clicked() {
                 if let Some(range) = cursor_range {
                     let [start, end] = range.sorted_cursors();
