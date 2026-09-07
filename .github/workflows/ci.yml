@@ -55,7 +55,7 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -160,8 +160,27 @@ jobs:
     env:
       RUSTFLAGS: ""
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # **Do not let a dependency bot move this SHA.**  `dtolnay/rust-toolchain`
+      # publishes each toolchain as a version-named BRANCH, not a tag, so the
+      # pin below is the head of `refs/heads/1.92.0` (commit message
+      # "toolchain: 1.92.0").  The `# stable` pins elsewhere in this file are a
+      # different commit in the same repository ("toolchain: stable").  Both
+      # are legitimate; they install different compilers.
+      #
+      # Dependabot proposed exactly that swap in PR #17 (2026-09-07): it
+      # offered to repoint this line at the *stable* commit while leaving the
+      # `# 1.92.0` comment in place.  CI went green on the PR, because stable
+      # builds the crate fine -- which is the whole hazard.  This job would
+      # have installed the newest compiler, passed, and enforced nothing, and
+      # the MSRV floor exists because it has drifted for real before (1.87 was
+      # declared while the crate needed let-chains, and a reader of the README
+      # found out first).
+      #
+      # If a bump to this line is ever wanted, resolve the branch head:
+      #   gh api repos/dtolnay/rust-toolchain/git/matching-refs/heads/<version>
+      # and confirm the commit message names that version, not "stable".
       - name: Install Rust 1.92 (the declared minimum)
         uses: dtolnay/rust-toolchain@ffaa7fb73f2b6e3c49bc425913220fa3d71c3ee5 # 1.92.0
 
@@ -206,7 +225,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -271,7 +290,7 @@ jobs:
     name: rustfmt check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: rustfmt
@@ -288,7 +307,7 @@ jobs:
     # advisory `rustfmt`/`audit` jobs, this one GATES (no
     # continue-on-error): a license regression is a real problem.
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
           command: check licenses
@@ -304,7 +323,7 @@ jobs:
       contents: read
       checks: write
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
