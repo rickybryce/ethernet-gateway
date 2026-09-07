@@ -9,6 +9,30 @@ use super::*;
 impl TelnetSession {
     // ─── File Transfer menu ──────────────────────────────────
 
+    /// Draw the last transfer's outcome, once, and forget it.
+    ///
+    /// Written as one function with two callers rather than two copies: the
+    /// download flow returns to its own file picker and the menu is drawn on
+    /// other paths, so both have to carry it, and two renderings of the same
+    /// fact would be free to disagree about width or colour.  `take` is what
+    /// makes "once" true no matter which screen appears first.
+    async fn draw_transfer_note(&mut self) -> Result<(), std::io::Error> {
+        let Some(note) = self.last_transfer_note.take() else {
+            return Ok(());
+        };
+        // A PETSCII screen is 40 columns and `truncate_to_width` does not
+        // wrap -- it drops the end, which on these lines is the byte count.
+        let max_note = if self.terminal_type == TerminalType::Petscii {
+            34
+        } else {
+            74
+        };
+        let line = truncate_to_width(&note.text, max_note);
+        let painted = if note.ok { self.green(&line) } else { self.red(&line) };
+        self.send_line(&format!("  {}", painted)).await?;
+        Ok(())
+    }
+
     pub(in crate::telnet) async fn render_file_transfer(&mut self) -> Result<(), std::io::Error> {
         self.clear_screen().await?;
         let sep = self.separator();
@@ -25,19 +49,7 @@ impl TelnetSession {
         let dir_str = truncate_path_to_width(&self.transfer_dir_display(), max_dir);
         self.send_line(&format!("  Dir: {}", self.amber(&dir_str)))
             .await?;
-        // The last transfer's outcome, on the first screen the terminal draws
-        // after it -- see `TransferNote`.  Taken, so it shows once and a stale
-        // result can never be read as this visit's.
-        if let Some(note) = self.last_transfer_note.take() {
-            let max_note = if self.terminal_type == TerminalType::Petscii {
-                34
-            } else {
-                74
-            };
-            let line = truncate_to_width(&note.text, max_note);
-            let painted = if note.ok { self.green(&line) } else { self.red(&line) };
-            self.send_line(&format!("  {}", painted)).await?;
-        }
+        self.draw_transfer_note().await?;
         self.send_line("").await?;
         self.send_line(&format!(
             "  {}  Upload a file",
@@ -1227,6 +1239,14 @@ impl TelnetSession {
             ))
             .await?;
             self.send_line(&sep).await?;
+            // The outcome of the transfer just finished, if this is the screen
+            // the terminal draws next -- which for a download it is: the flow
+            // returns to this picker rather than to the File Transfer menu, so
+            // a note drawn only there would never be seen on this path and
+            // would surface later, stale, on a screen that had nothing to do
+            // with it.  `take` means whichever screen comes first shows it,
+            // once.  See `TransferNote`.
+            self.draw_transfer_note().await?;
             self.send_line("").await?;
             self.send_line(&format!(
                 "   {} {:<22} {}",
