@@ -140,7 +140,36 @@ jobs:
           # appimagetool is a self-contained AppImage; GitHub runners
           # lack FUSE, so extract it and invoke AppRun directly.  Each
           # arch has its own appimagetool build with a matching runtime.
+          #
+          # **Verified by hash, because this URL is mutable and this binary
+          # packages our release.**  It is fetched and executed inside the job
+          # that builds the artifacts users download, so whatever sits behind
+          # the URL gets to touch them.  `continuous` is a rolling prerelease:
+          # it was published 2023-03-08 and its assets were last replaced
+          # 2025-07-26, so "the version we tested with" and "the version we
+          # get" are not the same statement.  Pinning to the last numbered
+          # release is not an option -- upstream renamed tag 13's copies
+          # `obsolete-appimagetool-*`, so there is no supported immutable URL.
+          #
+          # The hashes below are the bytes that built v1.0.0-RC1, measured
+          # from the live URL.  **If upstream republishes `continuous`, a
+          # release cut will stop here with a checksum mismatch.**  That is the
+          # intended direction -- refusing to run unrecognised code beats
+          # silently packaging with it -- but it is a failure a release can
+          # hit, so: verify the new binary is genuinely upstream's, then
+          # update the hash here in its own commit, never as part of a release.
+          case "$ARCH" in
+            x86_64)  APPIMAGETOOL_SHA256=b90f4a8b18967545fda78a445b27680a1642f1ef9488ced28b65398f2be7add2 ;;
+            aarch64) APPIMAGETOOL_SHA256=a48972e5ae91c944c5a7c80214e7e0a42dd6aa3ae979d8756203512a74ff574d ;;
+            *) echo "no recorded appimagetool hash for arch ${ARCH}" >&2; exit 1 ;;
+          esac
           wget -q "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-${ARCH}.AppImage" -O appimagetool
+          echo "${APPIMAGETOOL_SHA256}  appimagetool" | sha256sum -c - || {
+              echo "FATAL: appimagetool for ${ARCH} does not match the recorded hash." >&2
+              echo "  expected ${APPIMAGETOOL_SHA256}" >&2
+              echo "  got      $(sha256sum appimagetool | cut -d' ' -f1)" >&2
+              exit 1
+          }
           chmod +x appimagetool
           ./appimagetool --appimage-extract >/dev/null
           mkdir -p AppDir/usr/bin
