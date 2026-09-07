@@ -279,6 +279,32 @@ impl Report {
 /// Written out rather than pulled in: this is the only hash this crate needs,
 /// a dependency for it would be a supply-chain decision taken for one function,
 /// and the algorithm is fixed for ever by its own specification.
+/// Lower-case hex of a byte slice, for tests that compare a digest by string.
+///
+/// It exists because `format!("{:x}", Sha256::digest(..))` is not portable
+/// across `sha2` versions: 0.10 returns a `GenericArray`, which implements
+/// `LowerHex`, and 0.11 a `hybrid_array::Array`, which does not -- so the
+/// obvious spelling compiles against exactly one of them and a routine
+/// dependency bump breaks the build in four places at once.  Both deref to
+/// `[u8]`, so going through the bytes works under either and cannot be broken
+/// by the next such change.
+///
+/// Deliberately **not** used by [`sha256`] below, and the difference is the
+/// point.  That function formats its eight `u32` state words directly
+/// (`{w:08x}`); this one walks bytes.  So the two paths disagree about
+/// byte order if either is wrong about it, which is exactly the mistake
+/// `test_sha256_agrees_with_an_independent_implementation` is there to catch
+/// -- routing both through one formatter would make them agree about hex
+/// whether or not either was right about SHA-256.
+#[cfg(test)]
+pub(crate) fn hex_of(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push_str(&format!("{:02x}", b));
+    }
+    out
+}
+
 pub(in crate::cpm) fn sha256(data: &[u8]) -> String {
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
@@ -891,6 +917,46 @@ mod tests {
             sha256(&[b'a'; 64]),
             "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb"
         );
+    }
+
+    /// The same hash, against an **independent implementation**, at every
+    /// length that matters.
+    ///
+    /// The four published vectors above are 0, 3, 56 and 64 bytes; the files
+    /// this function actually verifies are 90 KB to 4 MB.  Nothing was checked
+    /// between those two scales, and the arithmetic that differs there is the
+    /// multi-block loop and the 64-bit length field -- not the padding rule the
+    /// short vectors cover.  A hash that is right on four inputs and wrong on
+    /// the fifth accepts a corrupted download silently, which is the one thing
+    /// this function exists to prevent.
+    ///
+    /// `sha2` is a dev-dependency and a separate implementation, so this is a
+    /// real oracle rather than the code agreeing with itself.  The lengths are
+    /// chosen around the seams: every offset either side of a 64-byte block,
+    /// either side of the 56-byte padding threshold, and a size in the range a
+    /// real disk occupies.
+    #[test]
+    fn test_sha256_agrees_with_an_independent_implementation() {
+        use sha2::{Digest, Sha256};
+
+
+        // Deterministic, not random: a property test that fails on case 3,141
+        // is a bug report nobody can reproduce, and the seams are known.
+        let mut lengths: Vec<usize> = vec![0, 1, 55, 56, 57, 63, 64, 65, 119, 120, 127, 128, 129];
+        lengths.extend([1000, 4095, 4096, 4097, 90_000, 337_568]);
+
+        for len in lengths {
+            // A varying, non-repeating fill: an all-zero or all-'a' buffer
+            // hides a byte-order or index mistake, because most wrong answers
+            // read the right value anyway.
+            let data: Vec<u8> = (0..len).map(|i| (i * 31 + 7) as u8).collect();
+            assert_eq!(
+                sha256(&data),
+                super::hex_of(&Sha256::digest(&data)),
+                "our sha256 disagrees with the sha2 crate at {} bytes",
+                len
+            );
+        }
     }
 
     /// **The real thing, end to end**: fetch every disk from the pinned URLs
