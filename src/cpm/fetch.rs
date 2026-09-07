@@ -155,7 +155,7 @@ fn manifest_text() -> &'static str {
 /// readable and reviewable in a diff — the same choice as `repodisks.txt`. A
 /// malformed line is skipped rather than fatal: a catalogue that refuses to
 /// load at all would cost the operator the whole feature over one bad row, and
-/// [`test_the_manifest_parses_completely`] is what stops that happening
+/// `test_the_manifest_parses_completely` is what stops that happening
 /// silently.
 pub fn catalogue() -> Vec<Disk> {
     manifest_text()

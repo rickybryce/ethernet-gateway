@@ -854,7 +854,9 @@ async fn receive_block(
 ///
 /// Per Forsberg YMODEM §6.1 the block-0 payload is:
 ///
-///     filename\0length<SP>modtime<SP>mode<SP>sno<SP>...\0<NUL fill>
+/// ```text
+/// filename\0length<SP>modtime<SP>mode<SP>sno<SP>...\0<NUL fill>
+/// ```
 ///
 /// where `length` is decimal and `modtime`/`mode`/`sno` are octal.
 /// All metadata fields are optional from the receiver's standpoint —

@@ -7,7 +7,7 @@
 //!
 //! The work splits five ways:
 //!
-//! * [`format`] — geometry.  Where the 128-byte CP/M records sit inside the
+//! * [`mod@format`] — geometry.  Where the 128-byte CP/M records sit inside the
 //!   file, and the CP/M parameters (block size, directory size, sector skew)
 //!   that describe the filesystem laid over them.
 //!

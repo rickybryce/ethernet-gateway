@@ -28,8 +28,8 @@
 //!
 //! Public surface (used by `telnet.rs`):
 //! - [`kermit_receive`] — read one or more files from the peer (upload).
-//! - [`kermit_send`] — send one or more files to the peer (download).
-//! - [`kermit_server`] — idle as a Kermit server until the peer sends
+//! - `kermit_send` — send one or more files to the peer (download).
+//! - `kermit_server` — idle as a Kermit server until the peer sends
 //!   commands (file uploads, downloads, generic commands).
 //!
 //! Within a session we auto-detect the peer's flavor (C-Kermit, G-Kermit,
@@ -5100,7 +5100,7 @@ pub(crate) struct KermitServerOutcome {
     pub idle_timeout: bool,
 }
 
-/// Same as [`kermit_server`] but returns a [`KermitServerOutcome`]
+/// Same as `kermit_server` but returns a [`KermitServerOutcome`]
 /// so the caller can distinguish idle-timeout from clean exits.  See
 /// the struct doc for what the flag means and why it matters.
 ///
@@ -5119,7 +5119,7 @@ pub(crate) async fn kermit_server_with_outcome(
     kermit_server_dispatch(reader, writer, is_tcp, is_petscii, verbose, on_file, false).await
 }
 
-/// Shared server-mode dispatch loop behind [`kermit_server`] and
+/// Shared server-mode dispatch loop behind `kermit_server` and
 /// [`kermit_server_with_outcome`].  `retain_data` controls whether each
 /// received file's bytes are kept in the returned `Vec<KermitReceive>`
 /// after the `on_file` hook runs: production passes `false` (free them —

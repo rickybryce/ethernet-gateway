@@ -62,11 +62,11 @@ const MAX_DOM_DEPTH: usize = 512;
 
 /// Result of fetching and rendering a web page.
 pub(crate) struct WebPage {
-    /// Page title extracted from <title>, if any.
+    /// Page title extracted from `<title>`, if any.
     pub title: Option<String>,
     /// Rendered text lines (plain text, already wrapped to target width).
     pub lines: Vec<String>,
-    /// Extracted link URLs, indexed starting at 1 (links[0] = link [1]).
+    /// Extracted link URLs, indexed starting at 1 (`links[0]` = link `[1]`).
     pub links: Vec<String>,
     /// Final URL after redirects.
     pub url: String,
@@ -1233,7 +1233,7 @@ fn find_forms(node: &Handle, forms: &mut Vec<WebForm>) {
 }
 
 /// Try to find a human-readable label for a form field, checking (in order):
-/// placeholder, aria-label, title, associated <label> element, then field name.
+/// placeholder, aria-label, title, associated `<label>` element, then field name.
 ///
 /// `labels` is a pre-built `id → label-text` map for the whole form (see
 /// [`collect_field_labels`]).  It replaces a per-field recursive subtree scan

@@ -3156,7 +3156,7 @@ pub(crate) fn commit_kermit_upload(
 
 /// Run a persistent Kermit server directly on an already-open serial
 /// port.  Bridges the blocking wire to an async duplex (via
-/// [`run_kermit_bridge_inline`]) and runs [`kermit::kermit_server_with_outcome`]
+/// [`run_kermit_bridge_inline`]) and runs [`crate::kermit::kermit_server_with_outcome`]
 /// on the async half — the same server entry point the `ATDT KERMIT`
 /// modem dial uses, but always-on and with no AT command layer.
 ///
@@ -4734,7 +4734,7 @@ pub(crate) const GATEWAY_PHONE_NUMBER: &str = "1001000";
 /// applied.
 #[derive(Debug, PartialEq)]
 struct ParsedDial {
-    /// The clean dial target (host[:port] or phone number) with all
+    /// The clean dial target (`host[:port]` or phone number) with all
     /// modifiers stripped.
     target: String,
     /// Total time to sleep before the TCP connect: sum of S8×(commas) plus
@@ -4968,7 +4968,7 @@ fn handle_dial(state: &mut ModemState, target: &str) {
 /// target.  Mirrors the standalone `handle_dial` resolution but produces
 /// a [`crate::relay::RelayTarget`] for the master instead of dialing
 /// locally: the gateway keywords/number map to the master's menu; a
-/// phone number is looked up in the *local* phonebook; a host[:port]
+/// phone number is looked up in the *local* phonebook; a `host[:port]`
 /// becomes an onward dial.  Returns `None` (→ NO CARRIER) for an
 /// unresolvable number or an unsupported keyword (e.g. the local-only
 /// Kermit-server entry, which has no relay meaning).

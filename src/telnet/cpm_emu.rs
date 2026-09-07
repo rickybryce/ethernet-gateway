@@ -302,7 +302,7 @@ const EGT80_NAME: &str = "EGT80.COM";
 /// binary could not serve every machine after all.
 ///
 /// **EGT8080 is first and that is load-bearing** — see
-/// [`test_the_terminal_that_runs_on_both_comes_first`].
+/// `test_the_terminal_that_runs_on_both_comes_first`.
 const BUNDLED_TERMINALS: &[(&str, &[u8])] =
     &[(EGT8080_NAME, EGT8080_COM), (EGT80_NAME, EGT80_COM)];
 

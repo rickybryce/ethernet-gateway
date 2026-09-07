@@ -15,7 +15,7 @@
 //! ## Jailing
 //! Every command resolves names under `transfer_dir` and can never touch
 //! anything above it.  We reuse the transfer subsystem's tested jail
-//! primitives rather than inventing new path logic: [`validate_filename`]
+//! primitives rather than inventing new path logic: [`TelnetSession::validate_filename`]
 //! gates every path component, the current directory is the shared
 //! `self.transfer_subdir`, and directory operands are canonicalized and
 //! checked with `starts_with(transfer_dir)` for symlink defense — the same
@@ -112,7 +112,7 @@ impl TelnetSession {
     /// The CP/M-style COPY/MOVE reminder + examples shown in the entry banner
     /// so users meet the (unusual today) destination-first operand order
     /// before their first COPY/MOVE.  Mirrors the "DEST first" lines in
-    /// [`cpm_help_lines`]; keep the two in sync.  Lines embed their own
+    /// [`TelnetSession::cpm_help_lines`]; keep the two in sync.  Lines embed their own
     /// indentation and are fit-tested for 40-col PETSCII via
     /// `all_help_line_groups`.
     pub(in crate::telnet) const CPM_ENTRY_TIPS: &'static [&'static str] = &[
@@ -218,7 +218,7 @@ impl TelnetSession {
         self.send_line(&format!("  {}", colored)).await
     }
 
-    /// Like [`cpm_err`], but follows the red error with a dim usage-example
+    /// Like [`Self::cpm_err`], but follows the red error with a dim usage-example
     /// line.  Used by COPY / MOVE, whose CP/M-style **destination-first**
     /// operand order (`COPY dst src`) is the reverse of the src-first order
     /// most users expect today, so a failing command (typically "File not
@@ -355,7 +355,7 @@ impl TelnetSession {
     /// - A leading `/` resolves from the root; otherwise from `cwd`.
     /// - `.` is skipped, `..` pops one component (popping past the root is
     ///   an `Access denied.` error — the jail can never be escaped).
-    /// - Every real component is gated by [`validate_filename`], so illegal
+    /// - Every real component is gated by [`TelnetSession::validate_filename`], so illegal
     ///   characters, over-length names, leading dots, and `..`-embedding are
     ///   all rejected here, before any disk access.
     ///

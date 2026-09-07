@@ -300,7 +300,7 @@ pub fn tests_lock() -> std::sync::MutexGuard<'static, ()> {
 
 /// Images a booted session is running, by canonical path.
 ///
-/// This lives here rather than in the boot module because [`mount_image`] has
+/// This lives here rather than in the boot module because [`super::mount_image`] has
 /// to be able to ask.  A booted image that is *not* mounted anywhere has no
 /// loan and no busy mark, so nothing stopped a second session mounting the same
 /// file on a drive and writing to it — and the boot's write-back then replaced

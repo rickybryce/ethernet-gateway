@@ -7,7 +7,7 @@
 
 use super::*;
 
-/// Compose the "<label> set to <value> <unit>." confirmation a numeric setting
+/// Compose the `"<label> set to <value> <unit>."` confirmation a numeric setting
 /// prints after it is changed, split across two lines when one would not fit.
 ///
 /// `content_width` is the room available *after* the caller's two-space indent.
