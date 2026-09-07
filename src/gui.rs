@@ -4260,7 +4260,9 @@ impl App {
                 if ui.button("Copy").clicked() {
                     if let Some(range) = cursor_range {
                         let [start, end] = range.sorted_cursors();
-                        let (s, e) = (start.index, end.index);
+                        // egui 0.35 made `CCursor.index` a `CharIndex` newtype; take
+                        // usize here so the char arithmetic below is unchanged.
+                        let (s, e): (usize, usize) = (start.index.into(), end.index.into());
                         let selected: String =
                             text.chars().skip(s).take(e.saturating_sub(s)).collect();
                         ctx.copy_text(selected);
@@ -4772,7 +4774,8 @@ fn attach_text_edit_menu(
             if ui.button("Cut").clicked() {
                 if let Some(range) = cursor_range {
                     let [start, end] = range.sorted_cursors();
-                    let (s, e) = (start.index, end.index);
+                    // egui 0.35: `CCursor.index` is a `CharIndex` newtype.
+                    let (s, e): (usize, usize) = (start.index.into(), end.index.into());
                     let selected: String =
                         buf.chars().skip(s).take(e.saturating_sub(s)).collect();
                     ctx.copy_text(selected);
@@ -4788,7 +4791,8 @@ fn attach_text_edit_menu(
             if ui.button("Copy").clicked() {
                 if let Some(range) = cursor_range {
                     let [start, end] = range.sorted_cursors();
-                    let (s, e) = (start.index, end.index);
+                    // egui 0.35: `CCursor.index` is a `CharIndex` newtype.
+                    let (s, e): (usize, usize) = (start.index.into(), end.index.into());
                     let selected: String =
                         buf.chars().skip(s).take(e.saturating_sub(s)).collect();
                     ctx.copy_text(selected);
@@ -4803,7 +4807,7 @@ fn attach_text_edit_menu(
                 let (s, e) = match cursor_range {
                     Some(range) => {
                         let [start, end] = range.sorted_cursors();
-                        (start.index, end.index)
+                        (usize::from(start.index), usize::from(end.index))
                     }
                     None => {
                         let n = buf.chars().count();
@@ -4935,7 +4939,7 @@ impl eframe::App for App {
             .resizable(true)
             .min_size(140.0)
             .default_size(240.0)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 egui::Frame::NONE.fill(CONSOLE_BG).show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
                     ui.add_space(4.0);
