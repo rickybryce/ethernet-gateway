@@ -3260,9 +3260,10 @@ fn render_more_popups(cfg: &Config) -> String {
     };
     // Server More — session cap, idle timeout, GUI scale, gateway advanced.
     out.push_str(&format!(
-        "<div class=\"modal\" id=\"more-server\"><div class=\"modal-body\">\
+        "<div class=\"modal\" id=\"more-server\"><div class=\"modal-body wide\">\
          <div class=\"modal-head\"><span class=\"title\">Server \u{2014} More</span>\
          <button type=\"button\" class=\"close\" data-close=\"more-server\">\u{00d7}</button></div>\
+         <div class=\"two-col\"><div>\
          <div class=\"row\">{portcheck} <span class=\"sub\">{portcheck_note}</span></div>\
          <div class=\"row\"><span class=\"hint\">Remember to open these ports on your \
          firewall &mdash; a check from this machine cannot see a router that is not \
@@ -3287,12 +3288,14 @@ fn render_more_popups(cfg: &Config) -> String {
          <option value=\"password\" {pwd_sel}>Password</option>\
          </select></div>\
          {gwpubkey}\
+         </div><div>\
          <h3>Commodore (PETSCII) terminals</h3>\
          <div class=\"row\">{tpet}</div>\
          <h3>Terminal size reported to remote</h3>\
          <div class=\"row\">{gwcols} {gwrows}</div>\
          <div class=\"row\"><span class=\"hint\">{gwgeom_hint}</span></div>\
          {master_slave}\
+         </div></div>\
          <div class=\"modal-foot\">{save}</div>\
          </div></div>",
         portcheck = save_button("portcheck", "Test ports", "secondary"),
@@ -3617,9 +3620,10 @@ fn render_more_popups(cfg: &Config) -> String {
         })
         .collect();
     out.push_str(&format!(
-        "<div class=\"modal\" id=\"more-ai\"><div class=\"modal-body\">\
+        "<div class=\"modal\" id=\"more-ai\"><div class=\"modal-body wide\">\
          <div class=\"modal-head\"><span class=\"title\">AI, Browser, Weather &amp; CP/M \u{2014} More</span>\
          <button type=\"button\" class=\"close\" data-close=\"more-ai\">\u{00d7}</button></div>\
+         <div class=\"two-col\"><div>\
          <div class=\"row\"><span class=\"label\">Groq API Key (optional):</span>\
          <input type=\"password\" name=\"groq_api_key\" value=\"{key}\">\
          <span class=\"label\">AI model:</span>\
@@ -3658,8 +3662,11 @@ fn render_more_popups(cfg: &Config) -> String {
          <div class=\"row\">{cpmx}{cpmdcd}</div>\
          <div class=\"row\">{cpmsregs}</div>\
          <div class=\"row\">{cpmuart}</div>\
-         <div class=\"row\">{cpmboot}</div>\
+         <div class=\"row\">{cpmcpu}</div>\
          <div class=\"row\">{cpmdisks}</div>\
+         </div><div>\
+         <div class=\"row\">{cpmboot}</div>\
+         </div></div>\
          <div class=\"modal-foot\">{save}</div>\
          </div></div>",
         key = html_escape(&cfg.groq_api_key),
@@ -3793,16 +3800,7 @@ fn render_more_popups(cfg: &Config) -> String {
              BDOS service with no port at all, and ignored entirely when printer \
              output is off. Measured against real software: Altair Hard Disk \
              BASIC answering LINEPRINTER? C sends one character per byte to data \
-             register 03h.</span>\
-             <span class=\"label\">CPU:</span>\
-             <select name=\"cpm_cpu\">{cpm_cpu_options}</select>\
-             <span class=\"hint\">The one setting here that applies to the \
-             emulator as well as to a booted disk. The Z80 runs the 8080 \
-             software these disks are made of; the 8080 is the processor the \
-             Altair shipped with, and is what period diagnostics that identify \
-             the CPU from DCR A expect. <b>EGT8080.COM</b> is placed on drive \
-             A:: built to the 8080's instruction set, so it runs on either \
-             setting.</span>",
+             register 03h.</span>",
             // Offered beside the select rather than only where the disks are
             // fetched, because a ROM is chosen here: an operator who picks one
             // and saves would otherwise learn at boot time that the file was
@@ -3820,6 +3818,21 @@ fn render_more_popups(cfg: &Config) -> String {
                 .into_iter()
                 .collect::<Vec<_>>()
                 .join(" and "),
+        ),
+        // The CPU sits in the *left* column, with the emulator settings, and
+        // not with the booted-disk choices on the right: it is the one setting
+        // in this popup that reaches both machines, which its own hint says --
+        // and it is what brings the two columns to about the same height.
+        cpmcpu = format_args!(
+            "<span class=\"label\">CPU:</span>\
+             <select name=\"cpm_cpu\">{cpm_cpu_options}</select>\
+             <span class=\"hint\">The one setting here that applies to the \
+             emulator as well as to a booted disk. The Z80 runs the 8080 \
+             software these disks are made of; the 8080 is the processor the \
+             Altair shipped with, and is what period diagnostics that identify \
+             the CPU from DCR A expect. <b>EGT8080.COM</b> is placed on drive \
+             A:: built to the 8080's instruction set, so it runs on either \
+             setting.</span>",
         ),
         cpmdisks = {
             // Before the mount button, and only while there is something to
@@ -3861,9 +3874,10 @@ fn render_more_popups(cfg: &Config) -> String {
     // the primary frame to mirror the GUI's draw_file_transfer_-
     // advanced section), plus ZMODEM and Kermit settings.
     out.push_str(&format!(
-        "<div class=\"modal\" id=\"more-xfer\"><div class=\"modal-body\">\
+        "<div class=\"modal\" id=\"more-xfer\"><div class=\"modal-body wide\">\
          <div class=\"modal-head\"><span class=\"title\">File Transfer \u{2014} More</span>\
          <button type=\"button\" class=\"close\" data-close=\"more-xfer\">\u{00d7}</button></div>\
+         <div class=\"two-col\"><div>\
          <h3>Bundled CP/M Terminals</h3>\
          <div class=\"row\">{terms}</div>\
          <div class=\"row\"><span class=\"hint\">EGT8080.COM and EGT80.COM are \
@@ -3877,6 +3891,7 @@ fn render_more_popups(cfg: &Config) -> String {
          <h3>ZMODEM</h3>\
          <div class=\"row\">{zneg} {zfrm}</div>\
          <div class=\"row\">{zret} {zint}</div>\
+         </div><div>\
          <h3>Kermit</h3>\
          <div class=\"row\">{kneg} {kpkt}</div>\
          <div class=\"row\">{kidle} {kret}</div>\
@@ -3899,6 +3914,7 @@ fn render_more_popups(cfg: &Config) -> String {
          <div class=\"row\">{pbs} {pneg}</div>\
          <div class=\"row\">{pblk} {pret} {pbad} {pint}</div>\
          <div class=\"row\">{phang}</div>\
+         </div></div>\
          <div class=\"modal-foot\">{save}</div>\
          </div></div>",
         save = save_button("save", "Save", "secondary"),
@@ -4616,6 +4632,22 @@ textarea.pubkey {
 .modal-body input[type=text], .modal-body input[type=password], .modal-body select {
   background: var(--popup-input);
 }
+/* Two-column popups.  Server, File Transfer and the AI/CP/M panel each grew a
+   setting at a time until they were taller than the screen, and a modal that
+   runs off the bottom takes its Save button with it.  Half the rows beside the
+   other half is the trade: twice the width for half the height.  The same cut
+   points as the desktop editor's popups, so the two surfaces read alike. */
+.modal-body.wide { max-width: 1240px; }
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 0 20px; align-items: start; }
+/* A grid item's automatic minimum is its min-content, so without this a long
+   unbroken hint would push its column past its half and overflow the modal --
+   the same rule the phone breakpoint already needed for the serial rows. */
+.two-col > div { min-width: 0; }
+/* Below this there is no room for two of them, and one narrow column of
+   labelled fields is worse than the tall single column we started with.  Its
+   own breakpoint rather than the 640 phone one: two columns of settings stop
+   being readable well before a page stops being a desktop page. */
+@media (max-width: 1000px) { .two-col { grid-template-columns: 1fr; } }
 .modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
 .modal-head .title { color: var(--amber-bright); font-weight: bold; font-size: 16px; }
 /* Warning modals: dark-red panel + red border/title so they read as a
@@ -6780,6 +6812,117 @@ mod tests {
     /// Grouping is the part of "looks like the GUI" that is structural rather
     /// than cosmetic: these popups were flat lists, so a reader had to know
     /// already which control belonged to which subsystem.
+    /// **The three long popups are two columns, and each has exactly two of
+    /// them.**
+    ///
+    /// Server, File Transfer and the AI/CP/M panel each grew a setting at a
+    /// time until they were taller than the screen, taking their Save button
+    /// with them.  The cure is a `.two-col` grid, and its failure mode is
+    /// silent: the grid is `1fr 1fr`, so a stray `</div><div>` makes a *third*
+    /// column that lands outside the modal with nothing to say it did.  The
+    /// count of direct children is therefore the assertion, not the presence
+    /// of the class.
+    ///
+    /// Checked on the rendered page rather than on the format strings, because
+    /// what matters is the div nesting after every `{...}` has been filled in
+    /// -- `{master_slave}` and `{gwpubkey}` are whole blocks of markup that
+    /// appear only for some configurations.
+    #[test]
+    fn test_the_long_popups_are_two_balanced_columns() {
+        // A config that fills in every optional block those popups carry, so
+        // the nesting is checked at its most complicated: a slave draws the
+        // Master/Slave fields, and key auth draws the public-key box.
+        let cfg = Config {
+            gateway_role: "slave".into(),
+            ssh_gateway_auth: "key".into(),
+            ..Config::default()
+        };
+        let html = render_more_popups(&cfg);
+        for id in ["more-server", "more-xfer", "more-ai"] {
+            let at = html
+                .find(&format!("id=\"{id}\""))
+                .unwrap_or_else(|| panic!("{id} is not on the page"));
+            let modal = &html[at..balanced_div_end(&html, at)];
+            assert!(
+                modal.contains("modal-body wide"),
+                "{id} is laid out in two columns but is not the wide body they need"
+            );
+            let cols = html_direct_children(modal, "class=\"two-col\"");
+            assert_eq!(
+                cols, 2,
+                "{id} has {cols} columns; the grid is two, so a third lands outside the modal"
+            );
+        }
+        // The narrow popups keep one column: a General popup of five rows in
+        // two columns is worse than the tall one this fixes.
+        assert!(
+            !html[html.find("id=\"more-general\"").unwrap()..]
+                .split("modal-foot")
+                .next()
+                .unwrap()
+                .contains("two-col"),
+            "the General popup is short and should stay one column"
+        );
+    }
+
+    /// End of the `<div>` that starts at or after `from`, by counting nesting.
+    fn balanced_div_end(html: &str, from: usize) -> usize {
+        let start = html[..from].rfind("<div").expect("no opening div");
+        let mut depth = 0usize;
+        let mut i = start;
+        while i < html.len() {
+            let next_open = html[i..].find("<div").map(|o| i + o);
+            let next_close = html[i..].find("</div>").map(|o| i + o);
+            match (next_open, next_close) {
+                (Some(o), Some(c)) if o < c => {
+                    depth += 1;
+                    i = o + 4;
+                }
+                (_, Some(c)) => {
+                    depth -= 1;
+                    i = c + 6;
+                    if depth == 0 {
+                        return i;
+                    }
+                }
+                _ => break,
+            }
+        }
+        html.len()
+    }
+
+    /// How many `<div>`s sit directly inside the element whose opening tag
+    /// carries `marker`.
+    fn html_direct_children(html: &str, marker: &str) -> usize {
+        let Some(at) = html.find(marker) else { return 0 };
+        let mut i = html[at..].find('>').map(|o| at + o + 1).unwrap_or(at);
+        let end = balanced_div_end(html, at);
+        let mut depth = 0usize;
+        let mut children = 0usize;
+        while i < end {
+            let next_open = html[i..end].find("<div").map(|o| i + o);
+            let next_close = html[i..end].find("</div>").map(|o| i + o);
+            match (next_open, next_close) {
+                (Some(o), Some(c)) if o < c => {
+                    if depth == 0 {
+                        children += 1;
+                    }
+                    depth += 1;
+                    i = o + 4;
+                }
+                (_, Some(c)) => {
+                    if depth == 0 {
+                        break; // the closing tag of the container itself
+                    }
+                    depth -= 1;
+                    i = c + 6;
+                }
+                _ => break,
+            }
+        }
+        children
+    }
+
     #[test]
     fn test_more_popups_carry_the_guis_section_headings() {
         let html = render_more_popups(&Config::default());

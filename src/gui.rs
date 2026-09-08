@@ -132,7 +132,7 @@ pub fn run(
             Some((x, y, w, h)) => viewport
                 .with_position([x as f32, y as f32])
                 .with_inner_size([w as f32, h as f32]),
-            None => viewport.with_inner_size([1120.0, 810.0]),
+            None => viewport.with_inner_size([WINDOW_DEFAULT_W, WINDOW_DEFAULT_H]),
         };
         let mut options = eframe::NativeOptions {
             viewport,
@@ -2544,6 +2544,16 @@ impl App {
             };
             ui.label(egui::RichText::new(note).small().color(colour));
         });
+    }
+
+    /// The CP/M rows that name a *thing* -- which disk runs, on what machine,
+    /// with which ROM, printer and CPU -- plus the virtual modem's saved
+    /// profile.  The popup's second column.
+    ///
+    /// The cut is where the checkboxes stop and the `cpm_choice_row` list
+    /// starts, so each column holds one shape of control rather than half of
+    /// each.
+    fn draw_cpm_choice_rows(&mut self, ui: &mut egui::Ui) {
         // What the CP/M menu item runs: our emulator, or a disk image booted
         // on emulated Altair hardware.  The same `boot_choices` list the telnet
         // and web screens build, so the three cannot drift apart.
@@ -2917,7 +2927,10 @@ impl App {
     /// SSH gateway mode choices.  Shown only in the popup.  These are
     /// persisted server-wide so the gateway menus no longer prompt the
     /// operator for mode/auth on every connect.
-    fn draw_server_advanced(&mut self, ui: &mut egui::Ui) {
+    /// The Telnet and SSH Gateway settings — the first column of the Server
+    /// popup's gateway group.  See `draw_server_gateway_terminal` for the
+    /// settings that belong to both gateways at once.
+    fn draw_server_gateways(&mut self, ui: &mut egui::Ui) {
         ui.label(egui::RichText::new("Telnet Gateway").strong().color(AMBER));
         ui.horizontal(|ui| {
             ui.label("Mode:");
@@ -2984,9 +2997,16 @@ impl App {
             multiline_with_menu(ui, &mut key_display, 2);
         }
 
-        ui.add_space(6.0);
-        ui.separator();
-        ui.add_space(2.0);
+    }
+
+    /// The second column of the Server popup's gateway settings: the terminal
+    /// size both gateways report, and the Commodore translation switch.
+    ///
+    /// Split from `draw_server_gateways` so the popup can lay the group out as
+    /// two columns; the cut is between the two *gateways* and the settings
+    /// that apply to **both** of them, which is the seam the headings already
+    /// describe.
+    fn draw_server_gateway_terminal(&mut self, ui: &mut egui::Ui) {
         // Applies to BOTH gateways, so it gets its own group rather than
         // sitting under Telnet Gateway or SSH Gateway — the SSH gateway sends
         // it as its PTY request, the Telnet Gateway as NAWS, and both resolve
@@ -3711,9 +3731,13 @@ impl App {
             );
         });
 
-        ui.add_space(6.0);
-        ui.separator();
-        ui.add_space(2.0);
+    }
+
+    /// The rest of the File Transfer popup's advanced options: Kermit and
+    /// Punter.  Drawn in the popup's second column, continuing where
+    /// `draw_file_transfer_advanced` stops -- Kermit alone is a third of the
+    /// form, which is why the cut is here and not at the midpoint of the list.
+    fn draw_file_transfer_advanced_more(&mut self, ui: &mut egui::Ui) {
         ui.label(egui::RichText::new("KERMIT").strong().color(AMBER));
         ui.label(
             egui::RichText::new(
@@ -4463,6 +4487,110 @@ const POPUP_CONTENT_W: f32 = 640.0;
 
 const CPM_LABEL_W: f32 = 196.0;
 const CPM_CONTROL_W: f32 = 330.0;
+
+/// Gutter between the two columns of a wide "More" popup.
+const POPUP_COL_GAP: f32 = 20.0;
+
+/// The size the console window opens at when the operator has not resized it.
+///
+/// **Wide enough for the two-column "More" popups to open inside it.**  An
+/// `egui::Window` is constrained to the host window, so a popup wider than
+/// this is not scrolled or moved -- it is squeezed, and a `cpm_choice_row`
+/// that is squeezed clips the first character off its control, which is the
+/// `ave` defect again.  This was 1120 until 1.0.0, which is 130 short of the
+/// AI/Browser/Weather/CP/M panel.  `test_the_window_can_hold_its_widest_popup`
+/// holds the two together.  The height is unchanged: the columns are what took
+/// those popups off the bottom of the screen, not a taller window.
+const WINDOW_DEFAULT_W: f32 = 1300.0;
+const WINDOW_DEFAULT_H: f32 = 810.0;
+
+/// What a popup costs beyond its columns: the window frame's own margins plus
+/// its border.  Measured from the running window (content at x=23 in a window
+/// at x=0), not assumed.
+const POPUP_CHROME_W: f32 = 24.0;
+
+/// The width to open a two-column popup at, from the width of its columns.
+/// One statement of the arithmetic, so the window it has to fit inside can be
+/// checked against the same sum the popups are built from.
+fn popup_window_width(left_w: f32, right_w: f32) -> f32 {
+    left_w + right_w + POPUP_COL_GAP + POPUP_CHROME_W
+}
+
+/// Lay a long popup out as two columns, the second continuing where the first
+/// stops.
+///
+/// **The height was the problem, and height is the one dimension a popup
+/// cannot buy more of.**  These windows grew a setting at a time until File
+/// Transfer, Server and the AI/CP/M panel were taller than the screen they are
+/// drawn on, and an `egui::Window` neither scrolls nor moves above the desktop
+/// window it lives in -- so the bottom of the form, Save included, was simply
+/// unreachable.  Half the rows beside the other half is the trade that exists:
+/// twice the width for half the height, on a screen that has width to spare.
+///
+/// **The widths are constants, not fractions of `available_width`.**  That is
+/// the same rule `POPUP_CONTENT_W` is about, one level in: a column sized from
+/// what is available is sized by its own content, and a wrapping label inside
+/// one ratchets the window wider every frame.  Fixed columns cannot feed back.
+/// They are passed per popup rather than shared, because a column has to fit
+/// the widest row that cannot wrap and those differ -- the CP/M rows are
+/// `CPM_LABEL_W + CPM_CONTROL_W` and nothing shrinks them.
+///
+/// Taking `fn` pointers rather than closures is what lets both halves be
+/// `App` methods: two closures capturing `self` mutably cannot coexist, while
+/// two calls through `&mut *app` are simply sequential.
+fn popup_two_columns(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    left_w: f32,
+    right_w: f32,
+    left: fn(&mut App, &mut egui::Ui),
+    right: fn(&mut App, &mut egui::Ui),
+) {
+    ui.horizontal_top(|ui| {
+        let done = ui.allocate_ui_with_layout(
+            egui::vec2(left_w, 0.0),
+            egui::Layout::top_down(egui::Align::LEFT),
+            |ui| left(app, ui),
+        );
+        // `allocate_ui_with_layout` caps the width but advances the cursor by
+        // what was *used*, so a short row in the left column would otherwise
+        // drag the right one leftward -- the same trap `draw_server_controls`
+        // documents for its checkbox columns.
+        pad_to(ui, left_w, done.response.rect.width());
+        ui.add_space(POPUP_COL_GAP);
+        ui.allocate_ui_with_layout(
+            egui::vec2(right_w, 0.0),
+            egui::Layout::top_down(egui::Align::LEFT),
+            |ui| right(app, ui),
+        );
+    });
+}
+
+/// The columns of the Server popup: its rows are the listener grid and the
+/// gateway settings, none of them wider than the 520 the popup already was.
+const POPUP_SERVER_COL_W: f32 = 520.0;
+
+/// The columns of the File Transfer popup.  Wider than the 520 that popup used
+/// to be, and unequal, because two rows there do not wrap: Punter's four
+/// labelled fields on one line and Kermit's `Idle timeout (s, 0=disabled)`.
+/// Measured from the running window rather than counted -- see
+/// `POPUP_CPM_LEFT_W`.
+const POPUP_XFER_LEFT_W: f32 = 612.0;
+const POPUP_XFER_RIGHT_W: f32 = 576.0;
+
+/// The two columns of the AI/Browser/Weather/CP/M popup, which are **not**
+/// equal.  Its rows are `cpm_choice_row`s: they allocate the label column and
+/// the control box exactly and clip rather than wrap, so neither column can be
+/// narrower than the widest row it holds -- and the right-hand one is wider,
+/// because a `cpm_combo` is `CPM_CONTROL_W` plus its own button padding and
+/// two of those rows carry a trailing button as well.
+///
+/// **Measured, not derived from `CPM_LABEL_W + CPM_CONTROL_W`.**  That sum is
+/// 534 and the real rows are 542 and 650: the arithmetic version would have
+/// clipped the first character off every control in the right column, which is
+/// exactly the `ave` defect `cpm_choice_row` already caused once.
+const POPUP_CPM_LEFT_W: f32 = 552.0;
+const POPUP_CPM_RIGHT_W: f32 = 660.0;
 
 /// Helper: one `label: [control]` row of the CP/M popup, aligned on the colon.
 ///
@@ -5681,24 +5809,39 @@ impl eframe::App for App {
             // port inputs visible padding without bumping the popup
             // big enough to look misplaced against the half-width
             // frame underneath.
-            .default_width(462.0)
+            // Two columns: the listeners and the gateways on the left, what
+            // both gateways report and the Master/Slave pair on the right.
+            // One column ran off the bottom of a 900-line screen.
+            .default_width(popup_window_width(POPUP_SERVER_COL_W, POPUP_SERVER_COL_W))
+            .max_width(popup_window_width(POPUP_SERVER_COL_W, POPUP_SERVER_COL_W))
             .frame(popup_frame)
             .show(&ctx, |ui| {
                 // Lighter-green text-entry backgrounds scoped to this popup.
                 ui.visuals_mut().extreme_bg_color = POPUP_INPUT_BG;
-                self.draw_server_controls(ui, false);
-                ui.add_space(6.0);
-                ui.separator();
-                ui.add_space(4.0);
-                self.draw_server_more_only(ui);
-                ui.add_space(6.0);
-                ui.separator();
-                ui.add_space(4.0);
-                self.draw_server_advanced(ui);
-                ui.add_space(6.0);
-                ui.separator();
-                ui.add_space(4.0);
-                self.draw_server_relay(ui);
+                popup_two_columns(
+                    self,
+                    ui,
+                    POPUP_SERVER_COL_W,
+                    POPUP_SERVER_COL_W,
+                    |app, ui| {
+                        app.draw_server_controls(ui, false);
+                        ui.add_space(6.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+                        app.draw_server_more_only(ui);
+                        ui.add_space(6.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+                        app.draw_server_gateways(ui);
+                    },
+                    |app, ui| {
+                        app.draw_server_gateway_terminal(ui);
+                        ui.add_space(6.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+                        app.draw_server_relay(ui);
+                    },
+                );
                 ui.add_space(8.0);
                 ui.separator();
                 ui.add_space(4.0);
@@ -5754,12 +5897,22 @@ impl eframe::App for App {
         .open(&mut ai_browser_open)
         .resizable(true)
         .collapsible(false)
-        .default_width(420.0)
-        .max_width(POPUP_CONTENT_W)
+        // Two columns, both a `cpm_choice_row` wide: the switches and the
+        // buttons on the left, the rows that name a disk, a machine, a ROM, a
+        // printer and a CPU on the right.
+        .default_width(popup_window_width(POPUP_CPM_LEFT_W, POPUP_CPM_RIGHT_W))
+        .max_width(popup_window_width(POPUP_CPM_LEFT_W, POPUP_CPM_RIGHT_W))
         .frame(popup_frame)
         .show(&ctx, |ui| {
             ui.visuals_mut().extreme_bg_color = POPUP_INPUT_BG;
-            self.draw_ai_browser_more(ui);
+            popup_two_columns(
+                self,
+                ui,
+                POPUP_CPM_LEFT_W,
+                POPUP_CPM_RIGHT_W,
+                |app, ui| app.draw_ai_browser_more(ui),
+                |app, ui| app.draw_cpm_choice_rows(ui),
+            );
             ui.add_space(8.0);
             ui.separator();
             ui.add_space(4.0);
@@ -5878,15 +6031,27 @@ impl eframe::App for App {
         .open(&mut ft_open)
         .resizable(true)
         .collapsible(false)
-        .default_width(520.0)
+        // Two columns: the directory, the bundled terminals and the
+        // XMODEM/ZMODEM tunables on the left, Kermit and Punter on the right.
+        .default_width(popup_window_width(POPUP_XFER_LEFT_W, POPUP_XFER_RIGHT_W))
+        .max_width(popup_window_width(POPUP_XFER_LEFT_W, POPUP_XFER_RIGHT_W))
         .frame(popup_frame)
         .show(&ctx, |ui| {
             ui.visuals_mut().extreme_bg_color = POPUP_INPUT_BG;
-            self.draw_file_transfer_controls(ui, false);
-            ui.add_space(6.0);
-            ui.separator();
-            ui.add_space(4.0);
-            self.draw_file_transfer_advanced(ui);
+            popup_two_columns(
+                self,
+                ui,
+                POPUP_XFER_LEFT_W,
+                POPUP_XFER_RIGHT_W,
+                |app, ui| {
+                    app.draw_file_transfer_controls(ui, false);
+                    ui.add_space(6.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+                    app.draw_file_transfer_advanced(ui);
+                },
+                |app, ui| app.draw_file_transfer_advanced_more(ui),
+            );
             ui.add_space(8.0);
             ui.separator();
             ui.add_space(4.0);
@@ -6674,6 +6839,65 @@ mod tests {
         );
         assert!(app.cfg.password.is_empty());
         assert_eq!(password_box_hint(&app.last_synced_cfg.password), "(hidden)");
+    }
+
+    // ── The two-column "More" popups ─────────────────────────
+
+    /// **A popup wider than the window it lives in is clipped, not scrolled.**
+    ///
+    /// `egui::Window` constrains itself to the host window, so widening these
+    /// popups into two columns spent the console window's width as surely as
+    /// it saved their height -- and the failure is silent and one-sided: a
+    /// squeezed `cpm_choice_row` loses the first character of its control, the
+    /// `ave` defect `POPUP_CONTENT_W` documents.  The two numbers were settled
+    /// by measuring the running window (the AI panel's columns are 552 and 660
+    /// because its rows are, not because 534 is the sum of `CPM_LABEL_W` and
+    /// `CPM_CONTROL_W`), so this holds them together rather than restating
+    /// either.
+    ///
+    /// The margin is what makes the popup readable as a *window* rather than
+    /// as the whole screen -- and the widest popup is the AI panel, which is
+    /// why it is the one the window has to be sized for.
+    #[test]
+    fn test_the_window_can_hold_its_widest_popup() {
+        let widest = [
+            (
+                "Server",
+                popup_window_width(POPUP_SERVER_COL_W, POPUP_SERVER_COL_W),
+            ),
+            (
+                "File Transfer",
+                popup_window_width(POPUP_XFER_LEFT_W, POPUP_XFER_RIGHT_W),
+            ),
+            (
+                "AI/Browser/Weather/CP/M",
+                popup_window_width(POPUP_CPM_LEFT_W, POPUP_CPM_RIGHT_W),
+            ),
+        ];
+        for (name, w) in widest {
+            assert!(
+                w <= WINDOW_DEFAULT_W - 20.0,
+                "the {name} popup is {w} wide and the window opens at {WINDOW_DEFAULT_W}: \
+                 it would be squeezed, and a squeezed control loses its first character"
+            );
+        }
+        // The right-hand column of the CP/M popup holds `cpm_choice_row`s with
+        // a trailing button beside the control, so it cannot be the narrower
+        // of the two -- swapping the widths would clip exactly those rows.
+        // Through bindings, not as bare comparisons of two constants: clippy
+        // reads `assert!` on a const-evaluable expression as an assertion with
+        // a constant value, and CI builds with `-D warnings`.
+        let right_is_the_wider = POPUP_CPM_RIGHT_W > POPUP_CPM_LEFT_W;
+        assert!(
+            right_is_the_wider,
+            "the CP/M popup's choice rows are in the right column and are the wider ones"
+        );
+        // A column has to hold a whole `cpm_choice_row`; nothing in one wraps.
+        let holds_a_choice_row = POPUP_CPM_LEFT_W >= CPM_LABEL_W + CPM_CONTROL_W;
+        assert!(
+            holds_a_choice_row,
+            "a column narrower than a label plus its control clips the control"
+        );
     }
 
     // ── Closing the window vs stopping the server ────────────
