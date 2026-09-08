@@ -51,6 +51,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   malformed one that no longer authenticates.  Saving with the box empty leaves
   the password untouched; type in it only when you mean to change it.
 
+- **The long "More" popups are two columns, on the desktop and in the web
+  UI.**  Server, File Transfer and AI/Browser/Weather/CP/M had each grown a
+  setting at a time until they were taller than the screen they open on, and a
+  popup that runs off the bottom takes its Save button with it -- neither an
+  `egui::Window` nor the web modal scrolls to reach it.  Each now puts its
+  lower half beside its upper half, at the same cut points on both surfaces, so
+  the two read alike.  The AI/CP/M panel drops from about 1850&nbsp;px of one
+  column to 1040 of two.
+
+  Two follow-ons.  The desktop console window now **opens at 1300&nbsp;px wide**
+  instead of 1120, because an `egui::Window` is constrained to the window it
+  lives in -- a popup wider than that is squeezed, not scrolled, and a squeezed
+  control loses the first character of its text.  A window you have already
+  resized keeps the size you gave it (`gui_window_geometry`), so widen it by
+  hand if a popup opens cramped.  And the web modals fall back to one column
+  below 1000&nbsp;px, where two would be narrower than the fields in them.
+
+- **The password box says `(hidden)` rather than sitting blank.**  Empty has
+  meant "leave the password alone" since the box stopped echoing the stored
+  value, but nothing on screen said so, and a blank field reads as *no password
+  set*.  The desktop editor now draws a greyed `(hidden)` in it until you type,
+  and again after a save -- or `(not set)` when there really is no stored
+  password.  The web page has said `unchanged` there all along.
+
 - **The web UI authenticates on the way in rather than on every request.**  HTTP
   Basic auth re-presents the credential with every request, and verifying a hash
   is deliberately expensive -- measured at 237&nbsp;ms.  The booted-disk screen

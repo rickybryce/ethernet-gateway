@@ -1208,8 +1208,9 @@ not a default.
 <p>
 <strong>The configuration web server behaves differently on purpose.</strong>
 Because its page renders the Groq API key into a form field (the login
-password is never echoed &mdash; the box is blank, and blank means
-&ldquo;leave it alone&rdquo;), enabling "Require Login" does <em>not</em> open it to any IP the way
+password is never echoed &mdash; the box shows a greyed
+<code>(hidden)</code> until you type in it, and leaving it alone leaves the
+password alone), enabling "Require Login" does <em>not</em> open it to any IP the way
 it does for telnet: the web server keeps the private-IP allowlist whether or
 not login is required, and <code>disable_ip_safety</code> is the only switch
 that lifts it. So to reach the web UI from a non-private address you must set
