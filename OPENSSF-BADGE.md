@@ -100,7 +100,7 @@ Repository: <https://github.com/rickybryce/ethernetgateway>
 | `crypto_password_storage` | MUST | Met | The inbound `password` is stored as a PBKDF2-HMAC-SHA256 PHC string with a per-password salt and 210,000 iterations (`src/credential.rs`). See the note below for what is deliberately *not* hashed, and why. |
 | `crypto_random` | MUST | Met | `rand::rng()` (OS CSPRNG) for key generation. |
 | `delivery_mitm` | MUST | Met | Releases are downloaded over HTTPS from GitHub. |
-| `delivery_unsigned` | MUST | Met | Every release artifact carries a cosign signature (`.sig`), certificate (`.pem`) and `.sha256`. |
+| `delivery_unsigned` | MUST | Met | Every release artifact carries a keyless cosign Sigstore bundle (`.sigstore.json` — signature, certificate and Rekor proof in one file) and a `.sha256`. |
 | `vulnerabilities_fixed_60_days` | MUST | Met | Nine `russh` advisories (two HIGH) were fixed the day they were identified, in `977ff64`. |
 | `vulnerabilities_critical_fixed` | SHOULD | Met | As above. |
 | `no_leaked_credentials` | MUST | Met | No credentials in the repository. The `Config` type has a redacting `Debug` so a stray format cannot log one, guarded by a test. |

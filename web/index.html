@@ -605,8 +605,9 @@
                 <p>
                     Every file is published with a SHA-256 sum and a keyless
                     <a href="https://www.sigstore.dev/">Sigstore</a> signature
-                    (<code>.sha256</code>, <code>.sig</code>, <code>.pem</code>) so a download can be
-                    verified. Older versions, the checksums and the full release notes are on the
+                    (<code>.sha256</code> and a <code>.sigstore.json</code> bundle) so a download
+                    can be verified with
+                    <code>cosign verify-blob</code> (v2.5 or newer). Older versions, the checksums and the full release notes are on the
                     <a href="https://github.com/rickybryce/ethernetgateway/releases">releases page</a>;
                     the source is on <a href="https://github.com/rickybryce/ethernetgateway">GitHub</a>
                     and builds with <code>cargo build --release</code> on rustc 1.92 or newer.

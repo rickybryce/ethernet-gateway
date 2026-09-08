@@ -6963,6 +6963,111 @@ mod tests {
         );
     }
 
+    /// The signature file the release workflow *writes* is the one it
+    /// *publishes*, and the one the docs tell people to look for.
+    ///
+    /// **The failure this exists for is silent.** `action-gh-release` runs with
+    /// `fail_on_unmatched_files: false`, so if the `files:` glob stops matching
+    /// what `cosign sign-blob` produced, the release publishes with **no
+    /// signatures at all** and every job stays green -- there is no red build,
+    /// no missing-file error, just a release nobody can verify. Nothing else
+    /// can catch that: release.yml is run by nothing but a tag push, so it has
+    /// no CI cover of its own (`versionchange.txt` says so at length), and the
+    /// asset count is checked by a human after the fact.
+    ///
+    /// It is a live hazard rather than a hypothetical: the artifact set has
+    /// already moved once, from the `.sig` + `.pem` pair to a single
+    /// `.sigstore.json` bundle, and that move touched the sign step, the upload
+    /// list and three separate documents. The next move will be under the same
+    /// pressure -- cosign is deprecating the flags either way -- and it will
+    /// arrive as an automated pin bump rather than as a decision.
+    ///
+    /// So the extension is **read out of the cosign command** rather than
+    /// written here: pinning a literal to a copy of itself is the opposite of a
+    /// guarantee, and the point is to hold four places to one source.
+    #[test]
+    fn test_the_signature_the_release_signs_is_the_one_it_publishes() {
+        let workflow = include_str!("../.github/workflows/release.yml")
+            .replace("\r\n", "\n");
+
+        // What `cosign sign-blob --bundle "${f}.EXT"` actually writes.  Taken
+        // from the command line, not from the comment above it -- a comment
+        // claiming what the code does is this project's most repeated defect.
+        let cmd = workflow
+            .lines()
+            .find(|l| l.contains("cosign sign-blob"))
+            .expect("release.yml no longer runs `cosign sign-blob`");
+        let arg = cmd
+            .split("--bundle")
+            .nth(1)
+            .expect("the cosign command does not pass --bundle")
+            .trim();
+        let inner = arg
+            .trim_start_matches('"')
+            .strip_prefix("${f}")
+            .expect("--bundle no longer names the artifact as ${f}.<ext>");
+        let ext: String = inner
+            .chars()
+            .take_while(|c| *c == '.' || c.is_ascii_alphanumeric())
+            .collect();
+        assert!(
+            ext.starts_with('.') && ext.len() > 1,
+            "could not read a signature extension out of {cmd:?}"
+        );
+
+        // 1. The upload list publishes it.  This is the silent one.
+        // **Whole lines, never `contains`.**  `dist/*.sigstore.json` has
+        // `dist/*.sig` inside it, so a substring test would report the retired
+        // glob as still present and pass the new one for the wrong reason --
+        // measured, this test failed exactly that way when first run.
+        let globs: Vec<&str> = workflow
+            .split("files: |")
+            .nth(1)
+            .expect("the release step no longer lists files")
+            .split("fail_on_unmatched_files")
+            .next()
+            .unwrap()
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert!(
+            globs.contains(&format!("dist/*{ext}").as_str()),
+            "the release signs into `*{ext}` but the upload list is {globs:?} -- \
+             with fail_on_unmatched_files: false that publishes NO signatures \
+             and stays green"
+        );
+
+        // 2. No glob for an artifact the signing step has stopped producing:
+        //    a leftover is not fatal, but it is a claim the release no longer
+        //    keeps, and it is how the list drifts out of agreement in the first
+        //    place.
+        for retired in [".sig", ".pem"] {
+            if ext == retired {
+                continue;
+            }
+            assert!(
+                !globs.contains(&format!("dist/*{retired}").as_str()),
+                "the upload list still publishes `*{retired}`, which nothing signs any more"
+            );
+        }
+
+        // 3. Every document that tells a user which file to verify against
+        //    names the same one.  These are hand-written prose beside a
+        //    code-rendered fact, which is the half that rots.
+        for (name, text) in [
+            ("web/index.html", include_str!("../web/index.html")),
+            ("README.md", include_str!("../README.md")),
+            ("OPENSSF-BADGE.md", include_str!("../OPENSSF-BADGE.md")),
+        ] {
+            assert!(
+                text.contains(&ext),
+                "{name} tells people to verify a download but never names `{ext}`, \
+                 which is what the release actually signs"
+            );
+        }
+    }
+
 
     /// A `{:?}` of a `Config` cannot print a secret.
     ///

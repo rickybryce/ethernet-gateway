@@ -129,8 +129,9 @@ Per-distro dependency one-liners (Debian/Fedora/Arch/macOS/Windows) are in the
 Pre-built, signed binaries for Linux, macOS, and Windows are on the
 [Releases](https://github.com/rickybryce/ethernetgateway/releases) page. Each
 ships a SHA-256 checksum, an optional GPG signature, and a keyless
-[Sigstore](https://www.sigstore.dev/) signature, so you can verify a download
-against its GitHub Actions build.
+[Sigstore](https://www.sigstore.dev/) bundle (`.sigstore.json`), so you can
+verify a download against its GitHub Actions build with `cosign verify-blob`
+(v2.5 or newer).
 
 ## Running as a Service
 

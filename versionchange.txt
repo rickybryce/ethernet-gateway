@@ -237,6 +237,13 @@ CHANGELOG.md            # Pre-release, the next version's notes accumulate under
 #   gets the binary; a validation error appears immediately, well before the
 #   network work, so even a sandbox with no egress gives a verdict.
 #
+#   RC2 was rescued with `--new-bundle-format=false --use-signing-config=false`,
+#   and that was a STOPGAP, now spent: v3.1.3 deprecates `--new-bundle-format`
+#   itself ("this will be the only supported format in future versions").
+#   This workflow now signs into one `<name>.sigstore.json` bundle per artifact
+#   with no flags but `--bundle`, which is cosign 3's own default path.
+#   Verifying a bundle needs cosign v2.5+ (measured: 2.4.0 refuses it).
+#
 #   A failed cut with no release published is recovered by fixing the workflow
 #   and re-pointing the tag (delete the remote tag, re-tag, push).  Do NOT use
 #   the `workflow_dispatch` tag input for this: `NAME=` and the release name
@@ -247,7 +254,9 @@ CHANGELOG.md            # Pre-release, the next version's notes accumulate under
 #   gh run list --workflow=release.yml --limit 3
 #   until [ "$(gh run view <id> --json status -q .status)" = completed ]; \
 #       do sleep 30; done; gh run view <id> --json conclusion -q .conclusion
-#   gh release view vX.Y.Z --json assets -q '.assets | length'   # expect 24
+#   gh release view vX.Y.Z --json assets -q '.assets | length'   # expect 18
+#     6 payloads + 6 .sha256 + 6 .sigstore.json.  It was 24 up to 1.0.0-RC2,
+#     when the signature was a .sig + .pem PAIR; one bundle replaced the two.
 #   Then spot-check one artifact.  Two things bite here every time:
 #     * `gh release download` refuses to run inside this repo -- "Stopping at
 #       filesystem boundary".  Run it from a scratch directory and pass
@@ -257,3 +266,12 @@ CHANGELOG.md            # Pre-release, the next version's notes accumulate under
 #       reports "No such file" -- which reads like a corrupt download.
 #   Then extract and run the binary to confirm it prints the new version, and
 #   check the archive contains everything in the shipped-files list above.
+#
+#   VERIFY ONE SIGNATURE -- a correctly *named* .sigstore.json proves nothing:
+#     cosign verify-blob --bundle <artifact>.sigstore.json \
+#       --certificate-identity \
+#         "https://github.com/rickybryce/ethernetgateway/.github/workflows/release.yml@refs/tags/vX.Y.Z" \
+#       --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+#       <artifact>
+#   The identity must name the TAG.  A bundle that verifies under a different
+#   ref is a bundle signed by a different run, which is the thing being checked.

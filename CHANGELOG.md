@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Release artifacts are signed into one Sigstore bundle each,
+  `<name>.sigstore.json`, replacing the `.sig` + `.pem` pair.**  The signature,
+  the Fulcio certificate and the Rekor inclusion proof now travel in one file,
+  so a release carries 18 assets rather than 24.
+
+  **To verify a download you need cosign v2.5 or newer** (any v3 works), and
+  the command changes from `--signature`/`--certificate` to `--bundle`:
+
+  ```sh
+  cosign verify-blob --bundle <artifact>.sigstore.json \
+    --certificate-identity \
+      "https://github.com/rickybryce/ethernetgateway/.github/workflows/release.yml@refs/tags/<tag>" \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    <artifact>
+  ```
+
+  The `.sha256` sums are unchanged, so a plain checksum check needs nothing new.
+
+  This is upstream's doing rather than a preference: `--output-signature` and
+  `--output-certificate` are already deprecated in the cosign the release
+  workflow installs, and cosign v3.1.3 deprecates `--new-bundle-format` as well
+  -- the flag 1.0.0-RC2 used to keep producing the old pair -- saying the new
+  format "will be the only supported format in future versions".  The matching
+  `verify-blob --signature`/`--certificate` flags carry the same warning.
+
 
 ## [1.0.0-RC2] - 2026-09-08
 

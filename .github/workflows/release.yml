@@ -300,44 +300,47 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
-      # **The two flags hold cosign 3 to the signatures this project
-      # publishes**, and they are here because a supply-chain pin moved the
-      # tool underneath the command.
+      # **One Sigstore bundle per artifact, `<name>.sigstore.json`.**  The
+      # signature, the Fulcio certificate and the Rekor inclusion proof travel
+      # in one file instead of the `.sig` + `.pem` pair this project published
+      # up to 1.0.0-RC2.
       #
-      # Pinning `cosign-installer` by digest pins the INSTALLER, and each
-      # installer carries its own default cosign: v3 shipped cosign 2.x, and
-      # v4.1.2 -- taken for the Scorecard findings after 1.0.0-RC1 was cut --
-      # defaults to cosign v3.0.6.  In cosign 3 `--new-bundle-format` defaults
-      # to true, which IGNORES `--output-signature`/`--output-certificate` and
-      # writes a single bundle to `--bundle` instead; with no `--bundle` given
-      # it tries to create one at the empty path and the release stops with
-      # `create bundle file: open : no such file or directory`.  Measured: the
-      # v1.0.0-RC2 cut, four green build jobs and a dead sign-and-publish.
+      # The pair is gone because cosign is retiring the flags that produce it.
+      # Measured against the real binaries rather than the release notes:
+      # `--output-signature` and `--output-certificate` are already DEPRECATED
+      # in v3.0.6 -- the version `cosign-installer@v4.1.2` installs today, and
+      # they are not even listed in `sign-blob --help` any more -- and in
+      # v3.1.3 `--new-bundle-format` is deprecated too, saying in as many
+      # words: "this will be the only supported format in future versions".
+      # So `--new-bundle-format=false`, the escape hatch added when RC2's cut
+      # died here, is itself on the way out.  `verify-blob --signature` and
+      # `--certificate` carry the same warning, so the pair was becoming
+      # awkward to *check* as well as to produce.
       #
-      # `--use-signing-config=false` is not optional decoration.  It also
-      # defaults to true in cosign 3, and turning off the bundle format alone
-      # is REFUSED: "must provide --new-bundle-format or --bundle where
-      # applicable with --signing-config or --use-signing-config".  Verified
-      # against the real v3.0.6 binary before this was committed -- the
-      # one-flag version reproduces that error and the two-flag version gets
-      # past validation.
+      # That mattered more than usual because nothing runs this workflow but a
+      # tag push (see versionchange.txt): the change that broke RC2 was an
+      # automated pin bump, and the next one could land a cosign where the
+      # flags are removed rather than deprecated.  Deprecated-but-working is a
+      # window, not a state.
       #
-      # The .sig + .pem pair is a published promise (web/index.html names those
-      # extensions, and every release since has carried them), so a release cut
-      # is not where the artifact set changes.  Moving to `--bundle` and a
-      # `.sigstore.json` per artifact is the direction upstream is going and is
-      # worth doing -- in its own commit, with the landing page, the README, the
-      # manual and the 24-asset expectation updated together, the same rule the
-      # appimagetool hash carries above.
+      # No flags now beyond `--bundle` itself: cosign 3 defaults
+      # `--new-bundle-format` and `--use-signing-config` to true, and both want
+      # exactly the `--bundle` this passes, so the command is the tool's own
+      # default path.  Verified against v3.0.6 and v3.1.3 before committing --
+      # both reach the OIDC step with no deprecation warning and no validation
+      # refusal, where the previous one-flag attempt was rejected outright.
+      #
+      # **Verifying needs cosign v2.5 or newer** (or any v3).  Measured, not
+      # assumed: v2.5.0 and v2.6.5 both read this bundle, v2.4.0 and v2.2.4
+      # refuse it with "payload must be a valid DSSE envelope".  cosign 2 is
+      # still maintained -- v2.6.5 shipped the same day as v3.1.3 -- so a
+      # verifier is not forced onto 3 by this change.
       - name: Sigstore-sign artifacts
         run: |
           cd dist
           for f in ethernetgateway-*.tar.gz ethernetgateway-*.zip Ethernet_Gateway-*.AppImage; do
             [ -f "$f" ] || continue
-            cosign sign-blob --yes \
-              --new-bundle-format=false --use-signing-config=false \
-              --output-signature "${f}.sig" \
-              --output-certificate "${f}.pem" "$f"
+            cosign sign-blob --yes --bundle "${f}.sigstore.json" "$f"
           done
           ls -la
 
@@ -375,6 +378,5 @@ jobs:
             dist/*.AppImage
             dist/*.sha256
             dist/*.asc
-            dist/*.sig
-            dist/*.pem
+            dist/*.sigstore.json
           fail_on_unmatched_files: false
