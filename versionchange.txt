@@ -221,6 +221,28 @@ CHANGELOG.md            # Pre-release, the next version's notes accumulate under
 #     runs the tests, so it is green regardless.
 #   gh run view <id> --log-failed        # if red, before doing anything else
 #
+# ── release.yml IS NOT COVERED BY CI ───────────────────────────
+#   Nothing runs this workflow but a tag push, so a change to it is untested
+#   until a release cut -- and the thing most likely to change it is not a
+#   person.  1.0.0-RC2 stopped dead in `sign & publish` because a Scorecard
+#   pin bump (`sigstore/cosign-installer@v3` -> `@v4.1.2`, cut AFTER RC1) moved
+#   the default cosign from 2.x to 3.0.6, where `--new-bundle-format` defaults
+#   to true and ignores the `--output-signature`/`--output-certificate` flags
+#   this workflow passes.  Four build jobs green, no release published.
+#
+#   So: after ANY dependabot or Scorecard change to release.yml, read what the
+#   bumped action actually installs -- pinning the installer does not pin the
+#   tool -- and if a CLI is involved, run the exact command against that
+#   version before the next cut.  `gh release download -R <repo> <tag> -p <asset>`
+#   gets the binary; a validation error appears immediately, well before the
+#   network work, so even a sandbox with no egress gives a verdict.
+#
+#   A failed cut with no release published is recovered by fixing the workflow
+#   and re-pointing the tag (delete the remote tag, re-tag, push).  Do NOT use
+#   the `workflow_dispatch` tag input for this: `NAME=` and the release name
+#   both read `github.ref_name`, which under a dispatch is the BRANCH -- the
+#   assets would be published as `ethernetgateway-master-<target>`.
+#
 # ── AFTER TAGGING: watch the release pipeline ──────────────────
 #   gh run list --workflow=release.yml --limit 3
 #   until [ "$(gh run view <id> --json status -q .status)" = completed ]; \
