@@ -3997,9 +3997,10 @@ fn serial_more_popup(
         ))
         .collect::<String>();
     format!(
-        "<div class=\"modal\" id=\"more-{prefix}\"><div class=\"modal-body\">\
+        "<div class=\"modal\" id=\"more-{prefix}\"><div class=\"modal-body wide\">\
          <div class=\"modal-head\"><span class=\"title\">{label} \u{2014} More</span>\
          <button type=\"button\" class=\"close\" data-close=\"more-{prefix}\">\u{00d7}</button></div>\
+         <div class=\"two-col\"><div>\
          <div class=\"row\"><span class=\"label\">Mode:</span>\
          <select name=\"{prefix}_mode\">\
          <option value=\"modem\" {ms_modem}>Modem (AT)</option>\
@@ -4015,6 +4016,7 @@ fn serial_more_popup(
          <h3>Hayes AT Saved State</h3>\
          <div class=\"row\">{echo} {verb} {quiet} {petscii}</div>\
          <div class=\"row\">{xc} {dtr} {flw} {dcd} {carrier}</div>\
+         </div><div>\
          <h3>S-Registers</h3>\
          <div class=\"row\"><span class=\"label\">S-registers:</span>\
          <input type=\"text\" name=\"{prefix}_s_regs\" value=\"{sregs}\" size=\"40\"></div>\
@@ -4027,6 +4029,7 @@ fn serial_more_popup(
          shown on each port because either port's modem can reach them.</span></div>\
          <div class=\"row\">{atd}</div>\
          <div class=\"row\">{apd}</div>\
+         </div></div>\
          <div class=\"modal-foot\">{save}</div>\
          </div></div>",
         save = save_button("save_and_restart_serial", "Save", "secondary"),
@@ -6838,7 +6841,16 @@ mod tests {
             ..Config::default()
         };
         let html = render_more_popups(&cfg);
-        for id in ["more-server", "more-xfer", "more-ai"] {
+        for id in [
+            "more-server",
+            "more-xfer",
+            "more-ai",
+            // Both ports, not one: they are rendered by the same function, so
+            // a single `serial_a` check would pass on a call that never ran
+            // for `serial_b`.
+            "more-serial_a",
+            "more-serial_b",
+        ] {
             let at = html
                 .find(&format!("id=\"{id}\""))
                 .unwrap_or_else(|| panic!("{id} is not on the page"));

@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The Serial Port "More" panel is laid out in two columns**, on the desktop
+  editor and the web UI alike -- the last of the long popups still running off
+  the bottom of the screen after 1.0.0-RC2 split the other three.  How the wire
+  is driven (mode, framing and the Hayes AT switches) is on the left; what has
+  been stored into it (the S-registers, the four phone-number slots and the two
+  dial targets) is on the right.  Nothing moved between screens and no setting
+  changed: the panel is about half as tall and its Save button is reachable
+  without a taller window.
+
 - **Release artifacts are signed into one Sigstore bundle each,
   `<name>.sigstore.json`, replacing the `.sig` + `.pem` pair.**  The signature,
   the Fulcio certificate and the Rekor inclusion proof now travel in one file,

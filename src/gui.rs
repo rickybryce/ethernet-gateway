@@ -3503,9 +3503,24 @@ impl App {
             );
         });
 
-        ui.add_space(6.0);
-        ui.separator();
-        ui.add_space(2.0);
+    }
+
+    /// The rest of one port's advanced options: the S-registers, the stored
+    /// phone numbers and the two dial-target switches.  Drawn in the popup's
+    /// **second column**, continuing where `draw_serial_advanced` stops.
+    ///
+    /// The cut is where the port stops describing *itself* and starts holding
+    /// *values*: everything above is how this wire is driven -- its mode, its
+    /// framing, and the AT switches that say how the modem answers -- and
+    /// everything here is state the operator has stored into it, ending with
+    /// the two targets an `ATD` can reach.  That is a seam the headings
+    /// already describe, which is the same rule the other three popups' cuts
+    /// follow.
+    fn draw_serial_stored_state(
+        &mut self,
+        ui: &mut egui::Ui,
+        id: crate::config::SerialPortId,
+    ) {
         ui.label(egui::RichText::new("S-Registers").strong().color(AMBER));
         ui.label(
             egui::RichText::new(
@@ -4538,19 +4553,27 @@ fn popup_window_width(left_w: f32, right_w: f32) -> f32 {
 /// Taking `fn` pointers rather than closures is what lets both halves be
 /// `App` methods: two closures capturing `self` mutably cannot coexist, while
 /// two calls through `&mut *app` are simply sequential.
-fn popup_two_columns(
+///
+/// `arg` is threaded through to both halves for the popups that are drawn once
+/// **per port** -- a `fn` pointer captures nothing, so a `SerialPortId` cannot
+/// ride along in a closure and has to be passed.  The popups that need no such
+/// value pass `()`.  One layout function rather than a per-port copy of it,
+/// because the `pad_to` trap below is the kind that is fixed in one copy and
+/// left in the other.
+fn popup_two_columns<T: Copy>(
     app: &mut App,
     ui: &mut egui::Ui,
     left_w: f32,
     right_w: f32,
-    left: fn(&mut App, &mut egui::Ui),
-    right: fn(&mut App, &mut egui::Ui),
+    arg: T,
+    left: fn(&mut App, &mut egui::Ui, T),
+    right: fn(&mut App, &mut egui::Ui, T),
 ) {
     ui.horizontal_top(|ui| {
         let done = ui.allocate_ui_with_layout(
             egui::vec2(left_w, 0.0),
             egui::Layout::top_down(egui::Align::LEFT),
-            |ui| left(app, ui),
+            |ui| left(app, ui, arg),
         );
         // `allocate_ui_with_layout` caps the width but advances the cursor by
         // what was *used*, so a short row in the left column would otherwise
@@ -4561,7 +4584,7 @@ fn popup_two_columns(
         ui.allocate_ui_with_layout(
             egui::vec2(right_w, 0.0),
             egui::Layout::top_down(egui::Align::LEFT),
-            |ui| right(app, ui),
+            |ui| right(app, ui, arg),
         );
     });
 }
@@ -4589,6 +4612,27 @@ const POPUP_XFER_RIGHT_W: f32 = 576.0;
 /// 534 and the real rows are 542 and 650: the arithmetic version would have
 /// clipped the first character off every control in the right column, which is
 /// exactly the `ave` defect `cpm_choice_row` already caused once.
+/// The two columns of a per-port "Serial Port — More" popup.
+///
+/// **The left one is a floor and the right one is a choice**, which is why
+/// they are not derived from each other.  Everything on the left is a
+/// horizontal row that cannot wrap or shrink -- the mode row, the
+/// Bits/Stop/Parity/Flow row, and the Hayes AT switches -- so the column has
+/// to be at least as wide as the widest of them or a control is clipped, the
+/// `ave` defect again.  Measured with egui's own metrics under `apply_theme`,
+/// not counted: 542, 404 and 559 px respectively, so 559 is the floor and this
+/// is it plus the same ~10 px the other popups carry.
+///
+/// The right one holds the opposite kind of row.  Its S-register box and its
+/// four stored-number fields are set to expand, so they will take whatever
+/// they are given and its *floor* is only 338 -- the width of the dial-target
+/// switches underneath them.  It is set to what those fields already get in
+/// the 520-wide single column this replaces, so the migration to two columns
+/// takes nothing away from the fields an operator actually types into.
+/// `test_the_serial_columns_fit_the_rows_they_hold` re-measures both.
+const POPUP_SERIAL_LEFT_W: f32 = 570.0;
+const POPUP_SERIAL_RIGHT_W: f32 = 496.0;
+
 const POPUP_CPM_LEFT_W: f32 = 552.0;
 const POPUP_CPM_RIGHT_W: f32 = 660.0;
 
@@ -5823,7 +5867,8 @@ impl eframe::App for App {
                     ui,
                     POPUP_SERVER_COL_W,
                     POPUP_SERVER_COL_W,
-                    |app, ui| {
+                    (),
+                    |app, ui, ()| {
                         app.draw_server_controls(ui, false);
                         ui.add_space(6.0);
                         ui.separator();
@@ -5834,7 +5879,7 @@ impl eframe::App for App {
                         ui.add_space(4.0);
                         app.draw_server_gateways(ui);
                     },
-                    |app, ui| {
+                    |app, ui, ()| {
                         app.draw_server_gateway_terminal(ui);
                         ui.add_space(6.0);
                         ui.separator();
@@ -5910,8 +5955,9 @@ impl eframe::App for App {
                 ui,
                 POPUP_CPM_LEFT_W,
                 POPUP_CPM_RIGHT_W,
-                |app, ui| app.draw_ai_browser_more(ui),
-                |app, ui| app.draw_cpm_choice_rows(ui),
+                (),
+                |app, ui, ()| app.draw_ai_browser_more(ui),
+                |app, ui, ()| app.draw_cpm_choice_rows(ui),
             );
             ui.add_space(8.0);
             ui.separator();
@@ -5993,17 +6039,40 @@ impl eframe::App for App {
             .open(&mut serial_open)
             .resizable(true)
             .collapsible(false)
-            .default_width(520.0)
+            // Two columns: how the wire is driven on the left -- mode,
+            // framing and the AT switches -- and the values stored into it on
+            // the right.  One column ran off the bottom of the screen once the
+            // erase key and the gateway-PETSCII rows joined it; this was the
+            // tallest single-column popup left after 1.0.0-RC2 split the other
+            // three.
+            .default_width(popup_window_width(
+                POPUP_SERIAL_LEFT_W,
+                POPUP_SERIAL_RIGHT_W,
+            ))
+            .max_width(popup_window_width(
+                POPUP_SERIAL_LEFT_W,
+                POPUP_SERIAL_RIGHT_W,
+            ))
             .frame(popup_frame)
             .show(&ctx, |ui| {
                 ui.visuals_mut().extreme_bg_color = POPUP_INPUT_BG;
-                self.draw_serial_mode_row(ui, id);
-                ui.add_space(4.0);
-                self.draw_serial_more_framing_row(ui, id);
-                ui.add_space(6.0);
-                ui.separator();
-                ui.add_space(4.0);
-                self.draw_serial_advanced(ui, id);
+                popup_two_columns(
+                    self,
+                    ui,
+                    POPUP_SERIAL_LEFT_W,
+                    POPUP_SERIAL_RIGHT_W,
+                    id,
+                    |app, ui, id| {
+                        app.draw_serial_mode_row(ui, id);
+                        ui.add_space(4.0);
+                        app.draw_serial_more_framing_row(ui, id);
+                        ui.add_space(6.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+                        app.draw_serial_advanced(ui, id);
+                    },
+                    |app, ui, id| app.draw_serial_stored_state(ui, id),
+                );
                 ui.add_space(8.0);
                 ui.separator();
                 ui.add_space(4.0);
@@ -6043,14 +6112,15 @@ impl eframe::App for App {
                 ui,
                 POPUP_XFER_LEFT_W,
                 POPUP_XFER_RIGHT_W,
-                |app, ui| {
+                (),
+                |app, ui, ()| {
                     app.draw_file_transfer_controls(ui, false);
                     ui.add_space(6.0);
                     ui.separator();
                     ui.add_space(4.0);
                     app.draw_file_transfer_advanced(ui);
                 },
-                |app, ui| app.draw_file_transfer_advanced_more(ui),
+                |app, ui, ()| app.draw_file_transfer_advanced_more(ui),
             );
             ui.add_space(8.0);
             ui.separator();
@@ -6751,6 +6821,86 @@ mod tests {
     use super::*;
 
     /// Build a test App with default config and fresh shutdown/restart flags.
+    /// Each column of the Serial Port popup is at least as wide as the rows it
+    /// has to hold.
+    ///
+    /// **Measured with egui's own layout, not counted or derived.**  The left
+    /// column's rows -- the mode row, the Bits/Stop/Parity/Flow row and the
+    /// Hayes AT switches -- are `ui.horizontal` runs of controls that neither
+    /// wrap nor shrink, so a column narrower than the widest of them does not
+    /// reflow: it clips, silently, which is the defect that once rendered a
+    /// Save button as `ave`.  A row is one added combo box away from growing,
+    /// and nothing about adding one says the popup got wider.
+    ///
+    /// The measurement is the *point* of the test, so the widths are read out
+    /// of a real layout pass rather than asserted against remembered numbers:
+    /// pinning a literal to a copy of itself is the opposite of a guarantee.
+    /// Run under `apply_theme` for the same reason
+    /// `test_every_column_label_fits_its_column` is -- this program sets Body
+    /// to 16.8 px where egui's default is 14, and that 20% is more than the
+    /// margin these columns carry.
+    ///
+    /// The right column is checked the same way but is expected to have slack:
+    /// its fields expand, so its floor is the dial-target switches under them
+    /// rather than anything it displays.
+    #[test]
+    fn test_the_serial_columns_fit_the_rows_they_hold() {
+        let ctx = egui::Context::default();
+        super::apply_theme(&ctx);
+        let id = crate::config::SerialPortId::A;
+
+        // Each section drawn alone into a deliberately *narrow* Ui.  What
+        // comes back is the width the content refused to fit into, which is
+        // the natural width of the widest row that cannot shrink -- measuring
+        // against a wide Ui returns the Ui, because the expanding fields fill
+        // whatever they are offered.
+        let natural = |which: u8| -> f32 {
+            let mut app = test_app();
+            let mut w = 0.0f32;
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                {
+                    ui.set_max_width(80.0);
+                    match which {
+                        0 => app.draw_serial_mode_row(ui, id),
+                        1 => app.draw_serial_more_framing_row(ui, id),
+                        2 => app.draw_serial_advanced(ui, id),
+                        _ => app.draw_serial_stored_state(ui, id),
+                    }
+                    w = ui.min_rect().width();
+                }
+            });
+            w
+        };
+
+        for (name, which) in [("mode", 0u8), ("framing", 1), ("Hayes AT", 2)] {
+            let w = natural(which);
+            assert!(
+                w <= super::POPUP_SERIAL_LEFT_W,
+                "the serial popup's {name} row needs {w:.1}px but the left column \
+                 is {}px -- it will be clipped, not wrapped",
+                super::POPUP_SERIAL_LEFT_W
+            );
+        }
+        let right = natural(3);
+        assert!(
+            right <= super::POPUP_SERIAL_RIGHT_W,
+            "the serial popup's stored-state rows need {right:.1}px but the right \
+             column is {}px",
+            super::POPUP_SERIAL_RIGHT_W
+        );
+
+        // A positive control: the probe must actually be measuring something.
+        // Every assertion above passes trivially if `natural` returns 0 -- a
+        // renamed draw fn or a layout pass that never ran would do that, and
+        // the test would go green having checked nothing.
+        assert!(
+            natural(2) > 100.0,
+            "the Hayes AT row measured {:.1}px, which means this test is not \
+             laying anything out",
+            natural(2)
+        );
+    }
+
     fn test_app() -> App {
         App::new(
             Config::default(),
@@ -6872,6 +7022,10 @@ mod tests {
             (
                 "AI/Browser/Weather/CP/M",
                 popup_window_width(POPUP_CPM_LEFT_W, POPUP_CPM_RIGHT_W),
+            ),
+            (
+                "Serial Port",
+                popup_window_width(POPUP_SERIAL_LEFT_W, POPUP_SERIAL_RIGHT_W),
             ),
         ];
         for (name, w) in widest {
