@@ -8,7 +8,7 @@
 # Cargo.toml updates them automatically — the doc files below must be matched
 # by hand.
 #
-# Current version: 1.0.0-RC1
+# Current version: 1.0.0-RC2
 #
 # ── Source of truth ─────────────────────────────────────────────
 Cargo.toml              # package version (line 3 only — NOT the russh/dep "0.60" specs); Cargo.lock follows on build
@@ -184,6 +184,23 @@ CHANGELOG.md            # Pre-release, the next version's notes accumulate under
 #                         Then tag vX.Y.Z and merge dev -> master to trigger the Release workflow.
 #
 # Verify after a bump:
+#   REVIEW EVERY LINE THE BUMP CHANGED, because a blanket replace hits
+#   HISTORICAL references too, and they must keep the old number.  It is no
+#   longer only the manual's "removed in v0.6.0": the reference pages have
+#   grown their own, and a sed across web/ silently rewrote three of them at
+#   1.0.0-RC2 --
+#       usermanual.html / web/atcommandreference.html  "(since <VER>)" on the
+#                                                      PETSCII ANSI translation
+#       web/punterreference.html                       "This page said 0 = PRG
+#                                                      until v<VER>"
+#       web/novatermreference.html                     "Before v<VER> the
+#                                                      gateway refused BINARY"
+#   -- each of which then claimed the change had landed in the release being
+#   cut.  No test can catch this: "(since <NEW VERSION>)" is exactly right for
+#   a feature that IS new in this release, so only a human knows which is
+#   which.  Print the changed lines with context and read them:
+#     for f in usermanual.html web/*.html; do grep -on '<NEW VERSION>' $f; done
+#
 #   grep -rnF '<OLD VERSION>' web/ README.md usermanual.html  # expect: none
 #     NOTE THE -F.  Without it the dots are wildcards and `0.8.1` matches
 #     `9600 8N1` in the serial chapter -- two false positives that look

@@ -48,7 +48,7 @@ Repository: <https://github.com/rickybryce/ethernetgateway>
 | `repo_interim` | MUST | Met | Work lands on `dev` and `master` continuously between releases. |
 | `repo_distributed` | SUGGESTED | Met | Git is distributed. |
 | `version_unique` | MUST | Met | `Cargo.toml` version; every release is uniquely numbered. |
-| `version_semver` | SUGGESTED | Met | Semantic versioning (e.g. `1.0.0-RC1`). |
+| `version_semver` | SUGGESTED | Met | Semantic versioning, pre-releases included (`MAJOR.MINOR.PATCH[-RCn]`). |
 | `version_tags` | SUGGESTED | Met | Releases are tagged `vX.Y.Z`. |
 | `release_notes` | MUST | Met | `CHANGELOG.md` plus per-release GitHub release notes. |
 | `release_notes_vulns` | MUST | Met | Security-relevant fixes are described in the changelog and commit messages. |

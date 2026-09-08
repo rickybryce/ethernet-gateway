@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+## [1.0.0-RC2] - 2026-09-08
+
 ### Security
 
 - **The login password is stored as a PBKDF2 hash, not in plain text.**
@@ -42,14 +45,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **The password box is empty on every configuration screen, and empty means
-  "leave it alone".**  The web and desktop editors used to pre-fill it with the
-  stored value; telnet and the setup wizard never did.  Now none of them do.
-  Beyond not putting the credential in a page's source, this removes a way to
-  lock yourself out: the desktop editor bound the stored value to an editable
-  field, so once it is a hash a single stray keystroke would produce a
-  malformed one that no longer authenticates.  Saving with the box empty leaves
-  the password untouched; type in it only when you mean to change it.
+- **The password box no longer echoes the stored value, and leaving it alone
+  leaves the password alone.**  The web and desktop editors used to pre-fill it;
+  telnet and the setup wizard never did.  Now none of them do.  Beyond not
+  putting the credential in a page's source, this removes a way to lock
+  yourself out: the desktop editor bound the stored value to an editable field,
+  so once it is a hash a single stray keystroke would produce a malformed one
+  that no longer authenticates.  Type in the box only when you mean to change
+  the password.
+
+  **And it says so.**  A blank field reads as *no password set*, so the desktop
+  editor draws a greyed `(hidden)` in it until you type -- and again after a
+  save, which empties it -- or `(not set)` when there really is no stored
+  password.  The web page has said `unchanged` there all along.
 
 - **The long "More" popups are two columns, on the desktop and in the web
   UI.**  Server, File Transfer and AI/Browser/Weather/CP/M had each grown a
@@ -67,13 +75,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resized keeps the size you gave it (`gui_window_geometry`), so widen it by
   hand if a popup opens cramped.  And the web modals fall back to one column
   below 1000&nbsp;px, where two would be narrower than the fields in them.
-
-- **The password box says `(hidden)` rather than sitting blank.**  Empty has
-  meant "leave the password alone" since the box stopped echoing the stored
-  value, but nothing on screen said so, and a blank field reads as *no password
-  set*.  The desktop editor now draws a greyed `(hidden)` in it until you type,
-  and again after a save -- or `(not set)` when there really is no stored
-  password.  The web page has said `unchanged` there all along.
 
 - **The web UI authenticates on the way in rather than on every request.**  HTTP
   Basic auth re-presents the credential with every request, and verifying a hash
@@ -6786,7 +6787,8 @@ Otherwise the gateway will create fresh files and SSH clients will see a
 - Windows build fix for `GetDiskFreeSpaceExW`.
 - S-register persistence via `AT&W`.
 
-[Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v1.0.0-RC1...HEAD
+[Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v1.0.0-RC2...HEAD
+[1.0.0-RC2]: https://github.com/rickybryce/ethernetgateway/releases/tag/v1.0.0-RC2
 [1.0.0-RC1]: https://github.com/rickybryce/ethernetgateway/releases/tag/v1.0.0-RC1
 [0.9.7]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.9.7
 [0.9.6]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.9.6
