@@ -3124,7 +3124,7 @@ impl App {
             });
             ui.horizontal(|ui| {
                 labeled_field(ui, "User:", &mut self.cfg.slave_master_username, 120.0);
-                labeled_password(ui, "Pass:", &mut self.cfg.slave_master_password);
+                labeled_password(ui, "Pass:", &mut self.cfg.slave_master_password, "");
             });
         });
         // No transport control: SSH is the only implemented relay
@@ -4678,10 +4678,31 @@ fn server_more_button(ui: &mut egui::Ui, blocked: usize) -> bool {
     .inner
 }
 
-/// Helper: labeled password field in a horizontal row.
-fn labeled_password(ui: &mut egui::Ui, label: &str, buf: &mut String) {
+/// Helper: labeled password field in a horizontal row.  `hint` is the greyed
+/// placeholder shown while the box is empty -- see `password_box_hint`; pass
+/// `""` for a field whose buffer holds the real value, where an empty box
+/// means an empty credential and a placeholder would be a claim about a
+/// value that is not there.
+fn labeled_password(ui: &mut egui::Ui, label: &str, buf: &mut String, hint: &str) {
     ui.label(label);
-    singleline_with_menu(ui, buf, true, None);
+    singleline_with_hint(ui, buf, true, None, hint);
+}
+
+/// What the greyed placeholder in the gateway password box should say.
+///
+/// **The box is empty because the stored credential is a hash, not because
+/// there is no password** (`App::new` blanks it; see the note there), and an
+/// empty box has meant "leave it alone" ever since -- but nothing on screen
+/// said so, so the field read as an unset password.  The placeholder is the
+/// sentence telnet's `security_set_field` has always printed, in the one
+/// place the desktop had room for it.
+///
+/// It is derived from the **stored** value rather than being a constant: a
+/// gateway with no password saved has nothing to hide, and telling the
+/// operator otherwise is the same class of untruth as a label naming a
+/// setting instead of an outcome.
+fn password_box_hint(stored: &str) -> &'static str {
+    if stored.is_empty() { "(not set)" } else { "(hidden)" }
 }
 
 /// A singleline `TextEdit` with a Cut/Copy/Paste/Select All right-click menu.
@@ -4699,11 +4720,29 @@ fn singleline_with_menu(
     masked: bool,
     desired_width: Option<f32>,
 ) -> egui::Response {
+    singleline_with_hint(ui, buf, masked, desired_width, "")
+}
+
+/// `singleline_with_menu` plus a greyed placeholder drawn while the buffer is
+/// empty.  egui draws hint text in `weak_text_color()` and only when the text
+/// is empty, so the first keystroke replaces it -- which is the whole point:
+/// a box that says `(hidden)` until the operator types is telling the truth
+/// about a stored credential the editor deliberately never echoes.
+fn singleline_with_hint(
+    ui: &mut egui::Ui,
+    buf: &mut String,
+    masked: bool,
+    desired_width: Option<f32>,
+    hint: &str,
+) -> egui::Response {
     let id = ui.next_auto_id();
     let prev_range = TextEditState::load(ui.ctx(), id)
         .and_then(|s| s.cursor.char_range());
 
     let mut te = egui::TextEdit::singleline(buf).password(masked);
+    if !hint.is_empty() {
+        te = te.hint_text(hint.to_string());
+    }
     if let Some(w) = desired_width {
         te = te.desired_width(w);
     }
@@ -5338,8 +5377,18 @@ impl eframe::App for App {
                                     // "Login" label preserves the visual
                                     // weight of the leading row label.
                                     ui.label(egui::RichText::new("Login").color(AMBER_DIM));
+                                    // The stored credential, not the (blank)
+                                    // box, decides what the placeholder says.
+                                    let hint = password_box_hint(
+                                        &self.last_synced_cfg.password,
+                                    );
                                     labeled_field(ui, "User:", &mut self.cfg.username, 70.0);
-                                    labeled_password(ui, "Pass:", &mut self.cfg.password);
+                                    labeled_password(
+                                        ui,
+                                        "Pass:",
+                                        &mut self.cfg.password,
+                                        hint,
+                                    );
                                 });
                                 let natural = ui.min_rect().height();
                                 if target0 > natural {
@@ -6592,6 +6641,39 @@ mod tests {
             app.cfg.password.is_empty(),
             "a resync put a password back into the editable box"
         );
+    }
+
+    /// **The blank box now says why it is blank, and it says it from the
+    /// stored value.**
+    ///
+    /// The box being empty is a rule about hashes, not a report that no
+    /// password is set -- but with nothing drawn in it the two read alike,
+    /// which is what was reported.  `(hidden)` is telnet's own word for this
+    /// field.  A constant would have been the easy version and would lie on a
+    /// gateway that has no password stored, so the placeholder is derived
+    /// from the credential the sync snapshot keeps; the surviving cases are
+    /// pinned here because the drawing code above has no test cover.
+    #[test]
+    fn test_the_password_placeholder_comes_from_the_stored_credential() {
+        assert_eq!(password_box_hint(""), "(not set)");
+        assert_eq!(
+            password_box_hint(&crate::credential::hash_for_test("hunter2")),
+            "(hidden)"
+        );
+        // The value the box is actually drawn from: an App built over a
+        // stored credential has a blank box and a snapshot that still knows
+        // there is something to hide.
+        let app = App::new(
+            Config {
+                password: crate::credential::hash_for_test("hunter2"),
+                ..Config::default()
+            },
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            None,
+        );
+        assert!(app.cfg.password.is_empty());
+        assert_eq!(password_box_hint(&app.last_synced_cfg.password), "(hidden)");
     }
 
     // ── Closing the window vs stopping the server ────────────
