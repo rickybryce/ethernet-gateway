@@ -79,7 +79,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Save-and-Restart, or a shutdown, could block for as long as the connect it
   interrupted -- up to 50 seconds for a dial that was waiting on a device at
   the far end to pick up, and about 15 for a port registering with its master.
-  All four now give up as soon as the restart is asked for.
+  Every relay connect made from a serial port's own thread now gives up as soon
+  as the restart is asked for.  (The CP/M emulator's announcer is a background
+  task rather than a port thread, so it never held a restart up and is
+  unchanged.)
 
 - **The Kermit and modem relay loops report a rejected login as one.**  Both
   said the master was "unreachable" whatever had gone wrong, so a wrong

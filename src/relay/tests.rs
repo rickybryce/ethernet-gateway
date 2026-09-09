@@ -1090,31 +1090,45 @@ fn test_a_crossbar_claim_cannot_wedge_the_serial_thread() {
         // lookback that can quietly stop applying is worse than no lookback,
         // because it reports success either way.
         matched += 1;
+        // **The boundary is a column-0 `}`, not a list of `fn` spellings.**
+        // Enumerating them was wrong twice: first without `pub async fn` (the
+        // search ran past `cpm_slave_announce` into a neighbour that does use
+        // `block_on`), then with a comment claiming the list was exhaustive
+        // while `serial.rs` holds three `pub(crate) fn`.  A closing brace in
+        // the first column ends the previous top-level item whatever it was
+        // spelled, so there is nothing left to get wrong.
         let mut from = i;
-        while from > 0 {
-            let l = lines[from - 1];
-            // Every top-level form, `pub async fn` included -- omitting it ran
-            // the search past `cpm_slave_announce` into a neighbour that does
-            // use `block_on`, which is how an `async fn` site got counted as a
-            // blocking one.
-            if l.starts_with("fn ")
-                || l.starts_with("pub fn ")
-                || l.starts_with("async fn ")
-                || l.starts_with("pub async fn ")
-            {
-                break;
-            }
+        while from > 0 && lines[from - 1] != "}" {
             from -= 1;
         }
-        let window = lines[from..i].join("\n");
-        if !window.contains("block_on(") {
-            continue;
-        }
+        // **The race must be inside the same `block_on`, not merely somewhere
+        // in the function.**  Taking the whole enclosing item let a call borrow
+        // a neighbour's marker: a second, plainly unraced `block_on` added to
+        // `dial_master_relay` -- which already contains a raced one -- was
+        // reported as raced, and the only tripwire left was a count whose own
+        // message invites a developer to update it.  Slicing from the *last*
+        // `block_on(` before the call scopes the evidence to the block that
+        // actually wraps it.
+        let head = lines[from..i].join("\n");
+        let Some(bo) = head.rfind("block_on(") else {
+            continue; // not awaited on a blocking thread — see cpm_slave_announce
+        };
         sites += 1;
-        if !window.contains("wait_for_serial_abort") {
+        if !head[bo..].contains("wait_for_serial_abort") {
             unraced.push(format!("serial.rs:{}", i + 1));
         }
     }
+    // **The defect is asserted first, the bookkeeping after.**  Adding an
+    // unraced site moves both the finding and the counts, and with the counts
+    // checked first the failure read as "update this number deliberately" --
+    // an invitation to bump a constant and bury a real wedging site.  The
+    // dangerous answer must be the one the developer sees.
+    assert!(
+        unraced.is_empty(),
+        "a crossbar claim runs on the blocking serial thread and must be raced \
+         against wait_for_serial_abort, or a restart waits out the answer \
+         timeout: {unraced:?}"
+    );
     assert!(
         sites >= 6,
         "the scan found only {sites} block_on relay-call sites in serial.rs \
@@ -1128,12 +1142,6 @@ fn test_a_crossbar_claim_cannot_wedge_the_serial_thread() {
         matched, 7,
         "expected 7 relay calls in serial.rs ({sites} of them under block_on); \
          if a call site was added or removed, update this number deliberately"
-    );
-    assert!(
-        unraced.is_empty(),
-        "a crossbar claim runs on the blocking serial thread and must be raced \
-         against wait_for_serial_abort, or a restart waits out the answer \
-         timeout: {unraced:?}"
     );
 }
 
