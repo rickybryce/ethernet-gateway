@@ -653,6 +653,52 @@ fn test_parse_remote_peer_addr() {
     assert_eq!(parse_remote_peer_addr("192.168.1.1"), None);
 }
 
+/// **A displaced registration is announced.**
+///
+/// Two slaves behind one NAT address share the registry key `(peer IP, label)`,
+/// so each registration evicts the other's and both slaves re-register for
+/// ever.  The generation guard is for a different race (the same slave
+/// re-registering ahead of its own teardown) and correctly stays quiet here, so
+/// before this line the two were indistinguishable in the log and the flap had
+/// no stated cause.
+///
+/// The eviction is still allowed -- a re-register must win -- so the log line
+/// is the whole observable, which is why the test reads the buffer.  It asserts
+/// the quiet case too: an ordinary first registration must not cry collision,
+/// or an operator learns to ignore the line.
+#[test]
+fn test_a_displaced_registration_is_logged() {
+    use std::net::IpAddr;
+    // TEST-NET-3, unique to this test so the global registry and the shared
+    // log buffer cannot be confused by a parallel test's identical address.
+    let ip: IpAddr = "203.0.113.42".parse().unwrap();
+    let facts = || RemotePortFacts { mode: Some("console".into()), erase: None };
+    let marker = "203.0.113.42 re-registered port A";
+    // Without this the buffers do not exist, `snapshot` answers empty, and the
+    // quiet assertion below passes for the wrong reason -- which is exactly how
+    // it failed the first time this test was written.
+    crate::logger::init();
+
+    // First registration: nothing was displaced, so nothing is said.
+    let (_a, master_a) = tokio::io::duplex(64);
+    let _g1 = register_remote_port(ip, "A".to_string(), facts(), master_a);
+    assert!(
+        !crate::logger::snapshot(200).iter().any(|l| l.contains(marker)),
+        "a first registration displaced nothing and must not warn"
+    );
+
+    // Second registration on the same key: the first is evicted, and said so.
+    let (_b, master_b) = tokio::io::duplex(64);
+    let _g2 = register_remote_port(ip, "A".to_string(), facts(), master_b);
+    assert!(
+        crate::logger::snapshot(200).iter().any(|l| l.contains(marker)),
+        "displacing a live registration must name the address that did it"
+    );
+
+    // Leave the global registry as we found it.
+    let _ = super::remove_remote_port(ip, "A");
+}
+
 /// Phase 2b: claiming a registered remote port removes it, writes the
 /// activate byte the slave waits for, and — since protocol v2 — hands back a
 /// stream only once the slave says its endpoint answered.
@@ -897,6 +943,85 @@ fn test_a_slave_reports_the_outcome_it_got() {
     assert!(
         failures.is_empty(),
         "a slave must send the outcome it actually got, not a constant: {failures:?}"
+    );
+}
+
+/// **Every auto-reconnecting slave loop must classify the failure it got.**
+///
+/// The master's lockout map is shared by telnet, SSH *and* the web UI, so a
+/// slave that retries a rejected login on the network ladder bans the very
+/// address an operator would fix the password from -- and it is a headless
+/// product, so that recovery surface is often the only one.
+/// `relay_reconnect_delay` is where the auth class earns its 6-minute wait,
+/// deliberately longer than [`crate::telnet::LOCKOUT_DURATION`] so no two
+/// attempts ever share a window.
+///
+/// `cpm_slave_announce` was the loop that did not, for as long as it has
+/// existed: it had the `RelayConnectError` in hand, called `to_string()` on it
+/// and took the 30-second network cap, which is three rejections inside the
+/// master's five-minute window from **one** loop.  Four copies of a rule, one
+/// of them wrong, is what this scan is for -- a fifth loop must not be able to
+/// repeat it.
+///
+/// A one-shot dial (`dial_master_relay`, driven by `ATD`) is exempt and is why
+/// the rule keys on `loop {`: a human pressing return is not a retry ladder,
+/// and it has no backoff to classify.
+#[test]
+fn test_every_slave_reconnect_loop_classifies_its_failure() {
+    let src = include_str!("../serial.rs");
+    // Split on top-level `fn` items (column 0), so each chunk is one function.
+    let mut chunks: Vec<(String, String)> = Vec::new();
+    let mut name = String::from("<prelude>");
+    let mut body = String::new();
+    for line in src.lines() {
+        let is_item = (line.starts_with("fn ")
+            || line.starts_with("pub fn ")
+            || line.starts_with("async fn ")
+            || line.starts_with("pub async fn "))
+            && line.contains('(');
+        if is_item {
+            chunks.push((name, std::mem::take(&mut body)));
+            name = line
+                .trim_start_matches("pub ")
+                .trim_start_matches("async ")
+                .trim_start_matches("fn ")
+                .split('(')
+                .next()
+                .unwrap_or("?")
+                .to_string();
+        }
+        // Comments carry this rule's own prose (including the words below), so
+        // a scan that read them would match itself and pass vacuously.
+        let t = line.trim_start();
+        if !t.starts_with("//") {
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+    chunks.push((name, body));
+
+    let mut loops = 0usize;
+    let mut unclassified = Vec::new();
+    for (name, body) in &chunks {
+        if !body.contains("connect_master_") || !body.contains("loop {") {
+            continue;
+        }
+        loops += 1;
+        if !body.contains("relay_reconnect_delay(") {
+            unclassified.push(name.clone());
+        }
+    }
+    assert_eq!(
+        loops, 4,
+        "expected the four slave reconnect loops (console, Kermit, modem, \
+         CP/M announcer); found {loops} -- the scan has stopped finding them, \
+         so it is checking nothing"
+    );
+    assert!(
+        unclassified.is_empty(),
+        "these slave loops retry a master connect without classifying the \
+         failure, so a rejected login takes the network ladder and bans the \
+         slave's own IP: {unclassified:?}"
     );
 }
 

@@ -1654,6 +1654,42 @@ fn relay_reconnect_delay(
     }
 }
 
+/// The outage line for a failed slave->master connect: what went wrong, how
+/// long we are waiting, and — for the two classes an operator can act on —
+/// which setting to look at.
+///
+/// One statement of it because there were four connect loops and only the
+/// console one said any of this; the CP/M announcer had drifted furthest,
+/// reporting an auth rejection as "unreachable" while backing off on the
+/// network ladder (see `cpm_slave_announce`).  A caller adds its own subsystem
+/// prefix; this owns everything after it.
+fn relay_outage_message(
+    err: &crate::relay::RelayConnectError,
+    host: &str,
+    mport: u16,
+) -> String {
+    use crate::relay::RelayConnectError as E;
+    match err {
+        E::Network(m) => format!("master {}:{} unreachable: {}", host, mport, m),
+        E::Auth(m) => format!(
+            "master {}:{} auth rejected ({}) — backing off {}m; \
+             check slave_master_username/password",
+            host,
+            mport,
+            m,
+            RECONNECT_BACKOFF_AUTH.as_secs() / 60
+        ),
+        E::Refused(m) => format!(
+            "master {}:{} not accepting relays ({}) — backing off {}s; \
+             is it gateway_role=master with master_accept_relays=true?",
+            host,
+            mport,
+            m,
+            RECONNECT_BACKOFF_REFUSED.as_secs()
+        ),
+    }
+}
+
 /// "Log the outage once" (§9 #14): true only when `msg` differs from the
 /// last-logged outage, so a persistent failure produces one line, not a
 /// flood every retry.  The caller updates `last` when this returns true.
@@ -1771,27 +1807,8 @@ fn console_slave_register_tick(
         let relay = match connected {
             Ok(r) => r,
             Err(e) => {
-                use crate::relay::RelayConnectError as E;
                 let delay = relay_reconnect_delay(&e, &mut net_backoff);
-                let msg = match &e {
-                    E::Network(m) => format!("master {}:{} unreachable: {}", host, mport, m),
-                    E::Auth(m) => format!(
-                        "master {}:{} auth rejected ({}) — backing off {}m; \
-                         check slave_master_username/password",
-                        host,
-                        mport,
-                        m,
-                        RECONNECT_BACKOFF_AUTH.as_secs() / 60
-                    ),
-                    E::Refused(m) => format!(
-                        "master {}:{} not accepting relays ({}) — backing off {}s; \
-                         is it gateway_role=master with master_accept_relays=true?",
-                        host,
-                        mport,
-                        m,
-                        RECONNECT_BACKOFF_REFUSED.as_secs()
-                    ),
-                };
+                let msg = relay_outage_message(&e, &host, mport);
                 if should_log_outage(&last_outage, &msg) {
                     glog!("Serial console (Port {}): {}", label, msg);
                     last_outage = Some(msg);
@@ -2504,22 +2521,23 @@ pub async fn cpm_slave_announce(stop: Arc<AtomicBool>) {
                 }
             }
             Err(e) => {
+                // Classify before waiting.  This arm used to take the network
+                // ladder for *every* failure class, which made a wrong password
+                // retry every 30s -- three rejections inside the master's
+                // 5-minute window, so the slave banned its own IP out of the
+                // shared lockout map (telnet, SSH *and* the web UI it would be
+                // fixed from) and re-banned itself every window thereafter.
+                // One loop was enough; the other three already classified.
+                let delay = relay_reconnect_delay(&e, &mut backoff);
                 // Say WHY, once per distinct reason: repeating it every retry
                 // buries the log, but discarding it (as this used to) leaves an
                 // operator watching identical lines with nothing to act on.
-                let msg = e.to_string();
+                let msg = relay_outage_message(&e, &host, mport);
                 if should_log_outage(&last_err, &msg) {
-                    glog!(
-                        "CP/M emulator: master {}:{} unreachable: {} — retrying, backing off to {}s",
-                        host,
-                        mport,
-                        msg,
-                        backoff.as_secs().max(1)
-                    );
+                    glog!("CP/M emulator: {}", msg);
                     last_err = Some(msg);
                 }
-                cpm_announce_backoff(&stop, backoff).await;
-                backoff = next_network_backoff(backoff);
+                cpm_announce_backoff(&stop, delay).await;
             }
         }
         // The announcement is over however that arm ended — the call finished,
