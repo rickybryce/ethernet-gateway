@@ -41,6 +41,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with the answer above, and the four call sites that turn an outcome into a
   result code became one.
 
+- **A slave with the wrong master password no longer locks its own address out
+  of the master.**  The reconnect loops wait 6 minutes after a rejected login,
+  deliberately longer than the master's 5-minute lockout window, so repeated
+  wrong-credential attempts never accumulate to the three-strike ban.  The CP/M
+  emulator's announcer was not doing that: it treated a rejection as an
+  unreachable master and retried on the network schedule, reaching three
+  attempts within seconds.
+
+  The master's lockout is shared between telnet, SSH and the web UI on purpose
+  -- so that an attacker cannot bounce between protocols to reset the counter
+  -- which meant a slave that banned itself also lost the web page its password
+  would have been corrected on, and re-earned the ban every window thereafter.
+  If you have ever seen a slave "come right" for a few seconds every five
+  minutes, this was why.
+
+  The log line was wrong in the same way and is now right: a rejected login
+  says so, names `slave_master_username` / `slave_master_password`, and reports
+  the wait it is actually taking, instead of reporting the master as
+  unreachable.
+
+- **A master says when one slave's registration displaced another's.**  Ports
+  are registered under the address the master sees, so two gateways behind a
+  single NAT address -- or two instances on one host -- both claim port `A`, and
+  each registration silently evicted the other's.  Both slaves then reconnect
+  for ever, and nothing in the log named the collision as the cause.  The
+  eviction still happens (a re-registration has to be allowed to win), but it
+  is now logged with the address that caused it.
+
 ### Changed
 
 - **The master/slave relay protocol is now v2, and both ends must be on it.**
