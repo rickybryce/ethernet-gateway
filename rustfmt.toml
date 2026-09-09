@@ -1,0 +1,16 @@
+# This repository is hand-formatted and has never been rustfmt-formatted.
+# `cargo fmt --check` disagrees with it at ~3,160 locations across 77 of the
+# 79 source files, so one `cargo fmt` run would rewrite essentially the whole
+# tree -- and the damage would not stop at the hand-alignment.
+#
+# 88 tests read this crate's own source with `include_str!` and parse it line
+# by line, to hold rules the type system cannot: that a function has exactly
+# one caller, that a hand-written list has not drifted from the struct beside
+# it, that no second path writes guest memory.  Reformatting breaks those, and
+# the dangerous failure is the quiet one -- a parser that matches nothing and
+# passes vacuously.  See CONTRIBUTING.md.
+#
+# CONTRIBUTING.md has said all this since the rule was made; this file is what
+# makes it reach a contributor whose editor formats on save, who rewrites the
+# tree before reading a word of it.
+disable_all_formatting = true

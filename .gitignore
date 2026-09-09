@@ -56,3 +56,11 @@ EGT8080/tools/__pycache__/
 # generated key escape .gitignore when the data directory moved.
 __pycache__/
 tools/serial-transfer-smoke/work/
+
+# Test and harness residue that reached the tree before the rules above.
+# `dirtest_*` is the output of telnet/tests.rs's directory-transfer test, which
+# wrote into the repo's own transfer dir before it moved to `temp_dir()`;
+# `*.log.mark` is the punter-vice harness's log position marker.  Both bare, so
+# they match at any depth -- an anchored form is what let the two escape.
+dirtest_*/
+*.log.mark
