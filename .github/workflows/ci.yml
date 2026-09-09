@@ -184,6 +184,38 @@ jobs:
       - name: Install Rust 1.92 (the declared minimum)
         uses: dtolnay/rust-toolchain@ffaa7fb73f2b6e3c49bc425913220fa3d71c3ee5 # 1.92.0
 
+      # **This job passes just as well on the wrong compiler, so it says which
+      # one it got.**  Installing a toolchain and running `cargo check` proves
+      # the crate builds; it proves nothing about the FLOOR unless the compiler
+      # is the floor.  Swap the pin above for the `stable` commit -- which is a
+      # one-character-looking change a dependency bot has now proposed twice,
+      # in PR #17 and PR #19 -- and every check here goes green while enforcing
+      # nothing.  A guard that cannot go red is worse than no guard, because
+      # the green tick is then a claim nobody re-checks.
+      #
+      # The expected version is read out of `Cargo.toml`, not written here:
+      # `rust-version` is the declaration this job exists to enforce, and a
+      # literal copy of it would agree with itself while both drifted from the
+      # pin.  It matches on a prefix because `rust-version = "1.92"` is
+      # satisfied by rustc `1.92.0` -- and a stable rustc, being newer, cannot
+      # match a floor's prefix, which is the case being caught.
+      - name: Verify the installed toolchain IS the declared minimum
+        run: |
+          want=$(grep -m1 '^rust-version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          got=$(rustc --version | awk '{print $2}')
+          echo "Cargo.toml rust-version = ${want}; installed rustc = ${got}"
+          case "${got}" in
+            "${want}"|"${want}".*)
+              echo "OK: this job is checking the declared floor." ;;
+            *)
+              echo "::error::The msrv job installed rustc ${got}, but the declared \
+          minimum is ${want}. The toolchain pin in this job has been moved off \
+          refs/heads/${want} -- most likely onto the 'stable' commit, which builds \
+          fine and so enforces nothing. Resolve the branch head with: gh api \
+          repos/dtolnay/rust-toolchain/git/matching-refs/heads/${want}"
+              exit 1 ;;
+          esac
+
       - name: Install Linux build dependencies
         run: |
           sudo apt-get update
