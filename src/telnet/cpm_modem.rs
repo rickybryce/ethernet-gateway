@@ -489,10 +489,26 @@ impl CpmModem {
                                     self.mode = Mode::Online;
                                     self.result(out, "CONNECT");
                                 }
-                                // The guest's AT layer speaks only CONNECT
-                                // and NO CARRIER here, so the outcome is not
-                                // narrowed further -- unlike the serial modem,
-                                // which has BUSY and NO ANSWER to offer.
+                                // Narrowed exactly as the local arm below
+                                // does.  This said the guest's AT layer
+                                // "speaks only CONNECT and NO CARRIER here,
+                                // unlike the serial modem, which has BUSY and
+                                // NO ANSWER to offer" -- contradicted fifteen
+                                // lines down in this same `match`, where the
+                                // local peer-dial emits both.  Believing it
+                                // made `ATD A@<ip>` answer differently from
+                                // `ATD A` for the same busy device, which is
+                                // the difference the outcome byte exists to
+                                // remove.  `result` folds both to NO CARRIER
+                                // at X0, exactly as it does for the local arm,
+                                // so a guest that has not asked for the
+                                // extended codes still hears something true.
+                                crate::relay::PeerClaim::Failed(PeerCallOutcome::Busy) => {
+                                    self.result(out, "BUSY")
+                                }
+                                crate::relay::PeerClaim::Failed(PeerCallOutcome::NoAnswer) => {
+                                    self.result(out, "NO ANSWER")
+                                }
                                 crate::relay::PeerClaim::Failed(_)
                                 | crate::relay::PeerClaim::NotRegistered => {
                                     self.result(out, "NO CARRIER")

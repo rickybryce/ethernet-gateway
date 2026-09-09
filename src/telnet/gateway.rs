@@ -3063,14 +3063,36 @@ impl TelnetSession {
             // on, since "it is in use" and "it is gone" call for different ones.
             crate::relay::PeerClaim::Failed(why) => {
                 use crate::serial::PeerCallOutcome as O;
-                let lines: [&str; 2] = match why {
-                    O::Busy => ["That remote port is already", "in a call. Try again later."],
-                    O::NoAnswer | O::Answered => {
-                        ["The device on that remote port", "did not answer."]
+                // The literals are written at each call rather than matched
+                // into one, because `test_show_error_literals_fit_petscii`
+                // reads them out of the *call's* argument: bound to a variable
+                // first, as they were, all six became invisible to it and the
+                // scanner's own >50 floor is far too coarse to notice six
+                // leaving.  They fit today; the guard is for whoever edits
+                // them next.
+                match why {
+                    O::Busy => {
+                        self.show_error_lines(&[
+                            "That remote port is already",
+                            "in a call. Try again later.",
+                        ])
+                        .await?
                     }
-                    O::Error => ["That remote port reported an", "error and did not connect."],
-                };
-                self.show_error_lines(&lines).await?;
+                    O::NoAnswer | O::Answered => {
+                        self.show_error_lines(&[
+                            "The device on that remote port",
+                            "did not answer.",
+                        ])
+                        .await?
+                    }
+                    O::Error => {
+                        self.show_error_lines(&[
+                            "That remote port reported an",
+                            "error and did not connect.",
+                        ])
+                        .await?
+                    }
+                }
                 return Ok(());
             }
         };
