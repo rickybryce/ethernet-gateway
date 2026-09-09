@@ -1058,20 +1058,39 @@ fn test_a_crossbar_claim_cannot_wedge_the_serial_thread() {
     let mut unraced = Vec::new();
     for (i, line) in lines.iter().enumerate() {
         let t = line.trim_start();
-        if t.starts_with("//") || !t.contains("claim_remote_peer(") {
+        // **Every relay call awaited under `block_on`, not just the claim.**
+        // The first version matched `claim_remote_peer(` alone, which was the
+        // call the defect was found in -- and `dial_master_relay` was running
+        // `connect_master_relay` unraced the whole time, invisible to this.
+        // Its budget is the larger one, too: a Dial/Peer target adds the long
+        // hello wait on top of the connect timeout, so it was the worst site
+        // and the only one not checked.
+        if t.starts_with("//")
+            || !["claim_remote_peer(", "connect_master_relay(", "connect_master_register("]
+                .iter()
+                .any(|p| t.contains(p))
+        {
+            continue;
+        }
+        // **`block_on` is the hazard, not the call.**  `cpm_slave_announce` is
+        // an `async fn` already on the runtime: it awaits the same register
+        // call, has no port index, and stops on its own `stop` flag -- racing
+        // it against `wait_for_serial_abort` would be meaningless.  Widening
+        // the call list without this flagged it immediately, which is the
+        // check earning its keep in the direction of a false positive.
+        let from = i.saturating_sub(20);
+        let window = lines[from..i].join("\n");
+        if !window.contains("block_on(") {
             continue;
         }
         sites += 1;
-        // The `select!` arm and its abort branch sit within a few lines above.
-        let from = i.saturating_sub(12);
-        let window = lines[from..i].join("\n");
         if !window.contains("wait_for_serial_abort") {
             unraced.push(format!("serial.rs:{}", i + 1));
         }
     }
     assert!(
-        sites >= 2,
-        "the scan found only {sites} claim_remote_peer sites in serial.rs -- \
+        sites >= 4,
+        "the scan found only {sites} relay-call sites in serial.rs -- \
          it has stopped finding them, so it is checking nothing"
     );
     assert!(

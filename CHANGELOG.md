@@ -67,13 +67,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the wait it is actually taking, instead of reporting the master as
   unreachable.
 
-- **A master says when one slave's registration displaced another's.**  Ports
-  are registered under the address the master sees, so two gateways behind a
-  single NAT address -- or two instances on one host -- both claim port `A`, and
-  each registration silently evicted the other's.  Both slaves then reconnect
-  for ever, and nothing in the log named the collision as the cause.  The
-  eviction still happens (a re-registration has to be allowed to win), but it
-  is now logged with the address that caused it.
+- **A master says when a registration replaced one it was still holding.**
+  Ports are registered under the address the master sees, so two gateways
+  behind a single NAT address -- or two instances on one host -- both claim port
+  `A` and each registration silently evicted the other's, leaving both slaves
+  reconnecting for ever with nothing in the log to say why.  The replacement
+  still happens (a re-registration has to be allowed to win) and is now logged.
+
+  **The line reports the fact and not a cause**, because the master cannot tell
+  the two apart: the ordinary case is one slave reconnecting over its own entry
+  before the master has observed the old channel close, and that is correct
+  behaviour.  Read it as a collision only if you can see two slaves trading the
+  same port.
 
 ### Changed
 

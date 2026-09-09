@@ -829,9 +829,14 @@ async fn connect_relay_exec(
         Ok(result) => result,
         // A handshake/auth stall is a transport problem, not a credential
         // one — classify as Network so the slave retries briskly.
+        // `budget`, not `RELAY_CONNECT_TIMEOUT`: the two are equal only for the
+        // targets the master answers at accept.  A Dial/Peer attempt is allowed
+        // the longer hello wait as well, so naming the constant reported 15s
+        // after a stall of up to 50 -- a number that sends whoever reads the
+        // log looking for the wrong thing.
         Err(_) => Err(RelayConnectError::Network(format!(
             "timed out after {}s connecting to master {}:{}",
-            RELAY_CONNECT_TIMEOUT.as_secs(),
+            budget.as_secs(),
             host,
             port
         ))),

@@ -1716,8 +1716,26 @@ fn relay_outage_message(
 /// "Log the outage once" (§9 #14): true only when `msg` differs from the
 /// last-logged outage, so a persistent failure produces one line, not a
 /// flood every retry.  The caller updates `last` when this returns true.
+///
+/// **Give it the reason, not the rendered line.**  It compares whole strings,
+/// so a line carrying the running network backoff ("retrying in 4s") is a
+/// different string every retry and defeats the dedupe entirely -- one outage
+/// became six lines per loop per port, which is the flood this exists to stop.
+/// [`relay_outage_key`] is the stable half.
 fn should_log_outage(last: &Option<String>, msg: &str) -> bool {
     last.as_deref() != Some(msg)
+}
+
+/// The dedupe key for a connect failure: what went wrong, with nothing that
+/// changes between retries.  Pairs with [`relay_outage_message`], which is the
+/// half an operator reads and may carry the current backoff.
+fn relay_outage_key(err: &crate::relay::RelayConnectError) -> String {
+    use crate::relay::RelayConnectError as E;
+    match err {
+        E::Network(m) => format!("network:{m}"),
+        E::Auth(m) => format!("auth:{m}"),
+        E::Refused(m) => format!("refused:{m}"),
+    }
 }
 
 /// Slave-role console-mode loop (§9 #12).  Registers the port with the
@@ -1811,30 +1829,47 @@ fn console_slave_register_tick(
             attempt
         );
         let connected = handle.block_on(async {
-            // **The port's own mode, not a literal.** These ticks are
-            // per-mode functions and I labelled one of them wrong by hand --
-            // `modem_slave_announce_tick` went out as "kermit". Reading it from
-            // the config it was handed cannot be mislabelled, and follows the
-            // port if its mode changes.
-            crate::relay::connect_master_register(
-                &host,
-                mport,
-                &user,
-                &pass,
-                label,
-                &port_cfg.mode,
-                &port_cfg.backspace,
-            )
-            .await
+            // Raced against a restart: this is `block_on` on the blocking
+            // serial thread, so an unraced connect holds it for the whole
+            // budget and a Save-and-Restart waits that out.  Smaller here than
+            // on the dial path (a register target keeps the short hello wait,
+            // so ~15s rather than ~50) but the same defect, and the loop is
+            // about to re-check the flags anyway.
+            tokio::select! {
+                biased;
+                _ = wait_for_serial_abort(&shutdown, idx) => None,
+                // **The port's own mode, not a literal.** These ticks are
+                // per-mode functions and I labelled one of them wrong by hand
+                // -- `modem_slave_announce_tick` went out as "kermit". Reading
+                // it from the config it was handed cannot be mislabelled, and
+                // follows the port if its mode changes.
+                r = crate::relay::connect_master_register(
+                    &host,
+                    mport,
+                    &user,
+                    &pass,
+                    label,
+                    &port_cfg.mode,
+                    &port_cfg.backspace,
+                ) => Some(r),
+            }
         });
+        let Some(connected) = connected else {
+            drop(port);
+            continue; // restart/shutdown: the loop top acts on the flag
+        };
         let relay = match connected {
             Ok(r) => r,
             Err(e) => {
                 let delay = relay_reconnect_delay(&e, &mut net_backoff);
-                let msg = relay_outage_message(&e, &host, mport, delay);
-                if should_log_outage(&last_outage, &msg) {
-                    glog!("Serial console (Port {}): {}", label, msg);
-                    last_outage = Some(msg);
+                let key = relay_outage_key(&e);
+                if should_log_outage(&last_outage, &key) {
+                    glog!(
+                        "Serial console (Port {}): {}",
+                        label,
+                        relay_outage_message(&e, &host, mport, delay)
+                    );
+                    last_outage = Some(key);
                 }
                 drop(port);
                 slave_backoff(idx, &shutdown, delay);
@@ -2011,27 +2046,41 @@ fn kermit_slave_relay_tick(
             label, host, mport, attempt
         );
         let connected = handle.block_on(async {
-            crate::relay::connect_master_relay(
-                &host,
-                mport,
-                &user,
-                &pass,
-                &crate::relay::RelayTarget::Kermit,
-                label,
-            )
-            .await
+            // Raced against a restart, as the console tick above: `block_on`
+            // on the serial thread holds it for the whole connect budget
+            // otherwise.
+            tokio::select! {
+                biased;
+                _ = wait_for_serial_abort(&shutdown, idx) => None,
+                r = crate::relay::connect_master_relay(
+                    &host,
+                    mport,
+                    &user,
+                    &pass,
+                    &crate::relay::RelayTarget::Kermit,
+                    label,
+                ) => Some(r),
+            }
         });
+        let Some(connected) = connected else {
+            drop(port);
+            continue; // restart/shutdown: the loop top acts on the flag
+        };
         let relay = match connected {
             Ok(r) => r,
             Err(e) => {
                 let delay = relay_reconnect_delay(&e, &mut net_backoff);
-                let msg = e.to_string();
-                if should_log_outage(&last_outage, &msg) {
+                let key = relay_outage_key(&e);
+                if should_log_outage(&last_outage, &key) {
+                    // The class comes from the shared message, not from a
+                    // hand-rolled "unreachable" that was printed for an auth
+                    // rejection too; only the consequence is this loop's own.
                     glog!(
-                        "Serial Kermit server (Port {}): master {}:{} unreachable: {} — this port serves nothing until the link is up",
-                        label, host, mport, msg
+                        "Serial Kermit server (Port {}): {} — this port serves nothing until the link is up",
+                        label,
+                        relay_outage_message(&e, &host, mport, delay)
                     );
-                    last_outage = Some(msg);
+                    last_outage = Some(key);
                 }
                 drop(port);
                 slave_backoff(idx, &shutdown, delay);
@@ -2143,23 +2192,30 @@ fn modem_slave_announce_tick(
                 let p = cfg.port(id);
                 (p.mode.clone(), p.backspace.clone())
             };
-            crate::relay::connect_master_register(&host, mport, &user, &pass, label, &mode, &erase)
-                .await
+            // Raced against a restart, as the console tick above.
+            tokio::select! {
+                biased;
+                _ = wait_for_serial_abort(&shutdown, idx) => None,
+                r = crate::relay::connect_master_register(
+                    &host, mport, &user, &pass, label, &mode, &erase,
+                ) => Some(r),
+            }
         });
+        let Some(connected) = connected else {
+            continue; // restart/shutdown: the loop top acts on the flag
+        };
         let relay = match connected {
             Ok(r) => r,
             Err(e) => {
                 let delay = relay_reconnect_delay(&e, &mut net_backoff);
-                let msg = e.to_string();
-                if should_log_outage(&last_outage, &msg) {
+                let key = relay_outage_key(&e);
+                if should_log_outage(&last_outage, &key) {
                     glog!(
-                        "Serial modem (Port {}): registration with master {}:{} failed: {}",
+                        "Serial modem (Port {}): registration failed — {}",
                         label,
-                        host,
-                        mport,
-                        msg
+                        relay_outage_message(&e, &host, mport, delay)
                     );
-                    last_outage = Some(msg);
+                    last_outage = Some(key);
                 }
                 slave_backoff(idx, &shutdown, delay);
                 continue;
@@ -2555,10 +2611,13 @@ pub async fn cpm_slave_announce(stop: Arc<AtomicBool>) {
                 // Say WHY, once per distinct reason: repeating it every retry
                 // buries the log, but discarding it (as this used to) leaves an
                 // operator watching identical lines with nothing to act on.
-                let msg = relay_outage_message(&e, &host, mport, delay);
-                if should_log_outage(&last_err, &msg) {
-                    glog!("CP/M emulator: {}", msg);
-                    last_err = Some(msg);
+                let key = relay_outage_key(&e);
+                if should_log_outage(&last_err, &key) {
+                    glog!(
+                        "CP/M emulator: {}",
+                        relay_outage_message(&e, &host, mport, delay)
+                    );
+                    last_err = Some(key);
                 }
                 cpm_announce_backoff(&stop, delay).await;
             }
@@ -5489,10 +5548,28 @@ fn dial_master_relay(
     let pass = cfg.slave_master_password.clone();
     let port_label = state.port_id.label();
 
-    let connected = state.handle.block_on(async {
-        crate::relay::connect_master_relay(&host, port, &user, &pass, &target, port_label)
-            .await
+    // Raced against a restart, for the reason `handle_peer_dial` gives for
+    // `claim_remote_peer`: this runs `block_on` on the blocking serial thread,
+    // and `connect_relay_exec`'s budget for a Dial/Peer target is the connect
+    // timeout plus whatever the hello wait exceeds the default by -- 50 s once
+    // the crossbar's answer byte pushed `RELAY_HELLO_TIMEOUT_DIALING` out.  A
+    // far device that never picks up would otherwise hold the thread for all
+    // of it, and a Save-and-Restart in that window waits it out.
+    let sd = state.shutdown.clone();
+    let idx = state.port_id.index();
+    let connected = state.handle.block_on(async move {
+        tokio::select! {
+            biased;
+            _ = wait_for_serial_abort(&sd, idx) => None,
+            r = crate::relay::connect_master_relay(&host, port, &user, &pass, &target, port_label)
+                => Some(r),
+        }
     });
+    let Some(connected) = connected else {
+        // Cut short by the restart, not refused by the far end.
+        send_result(state, "NO CARRIER");
+        return;
+    };
     let relay = match connected {
         Ok(r) => r,
         Err(e) => {
