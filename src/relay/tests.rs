@@ -1055,6 +1055,7 @@ fn test_a_crossbar_claim_cannot_wedge_the_serial_thread() {
     let src = include_str!("../serial.rs");
     let lines: Vec<&str> = src.lines().collect();
     let mut sites = 0usize;
+    let mut matched = 0usize;
     let mut unraced = Vec::new();
     for (i, line) in lines.iter().enumerate() {
         let t = line.trim_start();
@@ -1078,7 +1079,33 @@ fn test_a_crossbar_claim_cannot_wedge_the_serial_thread() {
         // it against `wait_for_serial_abort` would be meaningless.  Widening
         // the call list without this flagged it immediately, which is the
         // check earning its keep in the direction of a false positive.
-        let from = i.saturating_sub(20);
+        //
+        // **Searched backwards to the enclosing `fn`, not through a fixed
+        // window.**  The first version looked back 20 lines and `continue`d
+        // when it found no `block_on(` -- so a site that drifted past 20 was
+        // silently reclassified as "not a block_on site" rather than reported,
+        // and the total-count floor could not see it because the *other* sites
+        // still made the number up.  Measured: five comment lines above the
+        // modem tick's call, with its race arm deleted, and this passed.  A
+        // lookback that can quietly stop applying is worse than no lookback,
+        // because it reports success either way.
+        matched += 1;
+        let mut from = i;
+        while from > 0 {
+            let l = lines[from - 1];
+            // Every top-level form, `pub async fn` included -- omitting it ran
+            // the search past `cpm_slave_announce` into a neighbour that does
+            // use `block_on`, which is how an `async fn` site got counted as a
+            // blocking one.
+            if l.starts_with("fn ")
+                || l.starts_with("pub fn ")
+                || l.starts_with("async fn ")
+                || l.starts_with("pub async fn ")
+            {
+                break;
+            }
+            from -= 1;
+        }
         let window = lines[from..i].join("\n");
         if !window.contains("block_on(") {
             continue;
@@ -1089,9 +1116,18 @@ fn test_a_crossbar_claim_cannot_wedge_the_serial_thread() {
         }
     }
     assert!(
-        sites >= 4,
-        "the scan found only {sites} relay-call sites in serial.rs -- \
-         it has stopped finding them, so it is checking nothing"
+        sites >= 6,
+        "the scan found only {sites} block_on relay-call sites in serial.rs \
+         (of {matched} relay calls) -- it has stopped finding them, so it is \
+         checking nothing"
+    );
+    // The two counts are pinned together: a site that stops looking like a
+    // `block_on` one has either been fixed by moving off the serial thread or
+    // has drifted out of reach of the scan, and those must not look alike.
+    assert_eq!(
+        matched, 7,
+        "expected 7 relay calls in serial.rs ({sites} of them under block_on); \
+         if a call site was added or removed, update this number deliberately"
     );
     assert!(
         unraced.is_empty(),

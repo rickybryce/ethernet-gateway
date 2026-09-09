@@ -1662,6 +1662,26 @@ fn relay_reconnect_delay(
     }
 }
 
+/// A backoff rendered as an operator reads it: `45s` under a minute, `6m`
+/// above, and never rounded up into a lie.
+///
+/// The first version printed the auth wait as `{}m` with a `.max(1)`, which
+/// turns a *wrong* sub-minute delay into a plausible "backing off 1m".  That
+/// was measured, not imagined: a build with the classification bug put back
+/// retried every second while the log said 1m, so the one line that could have
+/// exposed the defect concealed it instead.  The log is a witness or it is
+/// decoration.
+fn render_backoff(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs.is_multiple_of(60) {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{}m{}s", secs / 60, secs % 60)
+    }
+}
+
 /// The outage line for a failed slave->master connect: what went wrong, how
 /// long we are waiting, and — for the two classes an operator can act on —
 /// which setting to look at.
@@ -1688,27 +1708,27 @@ fn relay_outage_message(
     use crate::relay::RelayConnectError as E;
     match err {
         E::Network(m) => format!(
-            "master {}:{} unreachable: {} — retrying in {}s",
+            "master {}:{} unreachable: {} — retrying in {}",
             host,
             mport,
             m,
-            delay.as_secs().max(1)
+            render_backoff(delay)
         ),
         E::Auth(m) => format!(
-            "master {}:{} auth rejected ({}) — backing off {}m; \
+            "master {}:{} auth rejected ({}) — backing off {}; \
              check slave_master_username/password",
             host,
             mport,
             m,
-            (delay.as_secs() / 60).max(1)
+            render_backoff(delay)
         ),
         E::Refused(m) => format!(
-            "master {}:{} not accepting relays ({}) — backing off {}s; \
+            "master {}:{} not accepting relays ({}) — backing off {}; \
              is it gateway_role=master with master_accept_relays=true?",
             host,
             mport,
             m,
-            delay.as_secs()
+            render_backoff(delay)
         ),
     }
 }
@@ -9051,6 +9071,75 @@ mod tests {
         assert_eq!(d, RECONNECT_BACKOFF_MAX);
         // At the cap it is idempotent (no overflow on saturating_mul).
         assert_eq!(next_network_backoff(d), RECONNECT_BACKOFF_MAX);
+    }
+
+    /// **The dedupe key must not move when the backoff does.**
+    ///
+    /// This is the whole of "stop the dedupe defeating itself", and it had no
+    /// test: `should_log_outage`'s own cover feeds it string literals, so
+    /// re-inlining `relay_outage_message` as the key would restore the flood
+    /// (one outage became six lines per loop per port) with every test green.
+    #[test]
+    fn test_the_outage_key_is_stable_across_a_growing_backoff() {
+        use crate::relay::RelayConnectError as E;
+        let err = E::Network("connection refused".into());
+        let k1 = relay_outage_key(&err);
+        let k2 = relay_outage_key(&err);
+        assert_eq!(k1, k2, "the key must not depend on anything that retries");
+
+        // The rendered line *does* move with the delay -- that is the point of
+        // separating them -- so the two must not be interchangeable.
+        let m1 = relay_outage_message(&err, "10.0.0.1", 2222, Duration::from_secs(1));
+        let m2 = relay_outage_message(&err, "10.0.0.1", 2222, Duration::from_secs(30));
+        assert_ne!(m1, m2, "the operator's line should report the real wait");
+        assert_ne!(k1, m1, "the key must not be the rendered line");
+
+        // Different classes and different reasons stay distinguishable, or a
+        // second, unrelated failure would be swallowed as a duplicate.
+        assert_ne!(relay_outage_key(&E::Auth("x".into())), relay_outage_key(&E::Refused("x".into())));
+        assert_ne!(
+            relay_outage_key(&E::Network("refused".into())),
+            relay_outage_key(&E::Network("timed out".into()))
+        );
+    }
+
+    /// A backoff is printed as it is, not rounded into something plausible.
+    ///
+    /// The auth line used to render `(secs / 60).max(1)` as minutes, so the
+    /// build with the classification defect put back said "backing off 1m"
+    /// while retrying every second -- measured against a live master, which is
+    /// also how the defect was proved in the first place.  A log line that
+    /// smooths a wrong number into a believable one is worse than no line.
+    #[test]
+    fn test_a_backoff_is_rendered_as_it_is() {
+        assert_eq!(render_backoff(Duration::from_secs(1)), "1s");
+        assert_eq!(render_backoff(Duration::from_secs(30)), "30s");
+        assert_eq!(render_backoff(Duration::from_secs(59)), "59s");
+        assert_eq!(render_backoff(Duration::from_secs(60)), "1m");
+        assert_eq!(render_backoff(RECONNECT_BACKOFF_AUTH), "6m");
+        assert_eq!(render_backoff(RECONNECT_BACKOFF_REFUSED), "1m");
+        // The case that mattered: a sub-minute wait must never read as "1m".
+        assert_ne!(render_backoff(Duration::from_secs(1)), "1m");
+        // And a ragged one keeps both halves rather than truncating.
+        assert_eq!(render_backoff(Duration::from_secs(90)), "1m30s");
+    }
+
+    /// The auth line names the setting and the real wait, for every loop.
+    #[test]
+    fn test_the_auth_outage_line_names_the_setting_and_the_wait() {
+        use crate::relay::RelayConnectError as E;
+        let msg = relay_outage_message(
+            &E::Auth("rejected".into()),
+            "10.0.0.1",
+            2222,
+            RECONNECT_BACKOFF_AUTH,
+        );
+        assert!(msg.contains("auth rejected"), "{msg}");
+        assert!(msg.contains("slave_master_username/password"), "{msg}");
+        assert!(msg.contains("6m"), "{msg}");
+        // It must not call a master that answered "unreachable" -- that was
+        // the wording three of the four loops shipped.
+        assert!(!msg.contains("unreachable"), "{msg}");
     }
 
     #[test]

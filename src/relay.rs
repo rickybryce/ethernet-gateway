@@ -804,6 +804,11 @@ pub fn parse_register_args(rest: &str) -> (String, RemotePortFacts) {
 }
 
 /// Shared connect+auth+channel+exec, bounded by `RELAY_CONNECT_TIMEOUT`
+/// plus whatever the target's hello wait exceeds the default by -- 15s for
+/// the targets a master answers at accept, 50s for a Dial or Peer, which
+/// waits on a call being placed.  Named here because the summary said the
+/// constant alone while the body already said otherwise, which is the same
+/// wrong number this function used to print in its timeout message
 /// so a wedged master can't freeze the serial thread.
 async fn connect_relay_exec(
     host: &str,

@@ -67,6 +67,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the wait it is actually taking, instead of reporting the master as
   unreachable.
 
+- **A slave whose master is down no longer fills the log with one line per
+  retry.**  The reconnect loops log an outage once and stay quiet until the
+  reason changes.  A line carrying the growing retry delay defeated that,
+  because the delay is part of what was being compared -- so a single outage
+  produced a fresh line at 1s, 2s, 4s, 8s, 16s and 30s, on every relay loop of
+  every port.  The line still reports the real wait; only the comparison
+  changed.
+
+- **Saving settings no longer waits out an in-flight relay connect.**  A
+  Save-and-Restart, or a shutdown, could block for as long as the connect it
+  interrupted -- up to 50 seconds for a dial that was waiting on a device at
+  the far end to pick up, and about 15 for a port registering with its master.
+  All four now give up as soon as the restart is asked for.
+
+- **The Kermit and modem relay loops report a rejected login as one.**  Both
+  said the master was "unreachable" whatever had gone wrong, so a wrong
+  `slave_master_password` named no setting and no wait.  All four loops now
+  give the same account of a failure, and a connect that times out reports the
+  time it actually spent rather than a fixed 15 seconds.
+
 - **A master says when a registration replaced one it was still holding.**
   Ports are registered under the address the master sees, so two gateways
   behind a single NAT address -- or two instances on one host -- both claim port
