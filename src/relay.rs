@@ -586,11 +586,12 @@ pub const RELAY_PROTOCOL_VERSION: u8 = 2;
 /// [`answer_and_bridge`]), so its absence means exactly what the slave needs:
 /// no call, answer `NO CARRIER`.
 ///
-/// The bytes are unchanged, so this is not a framing change and
-/// [`RELAY_PROTOCOL_VERSION`] does not move. The one skew that matters is an
-/// **old slave against a new master** on a dial that succeeds slowly: the old
-/// slave gives up at its fixed 5 s. A dial that fails, or one that succeeds
-/// promptly, behaves the same or better on both.
+/// **That change moved no version**, because it changed only *when* these four
+/// bytes are written and not what is on the wire; the skew it could cause was
+/// an old slave against a new master on a dial that succeeds slowly, where the
+/// old slave gives up at its fixed 5 s.  ([`RELAY_PROTOCOL_VERSION`] has since
+/// moved to 2, for the separate reason recorded there -- the slave's answer
+/// byte.  These bytes are still the same four.)
 pub const RELAY_HELLO: [u8; 4] = [b'E', b'G', b'R', RELAY_PROTOCOL_VERSION];
 
 /// How long the slave waits for the master's [`RELAY_HELLO`] when the master
@@ -1035,10 +1036,12 @@ where
 pub const RELAY_ACTIVATE_BYTE: u8 = 0x01;
 
 /// Slave→master **answer byte**: the one byte a slave writes back on a
-/// registration channel after [`RELAY_ACTIVATE_BYTE`], saying whether its local
-/// endpoint actually picked up.  [`RELAY_ANSWERED_BYTE`] means the bridge
-/// follows immediately; [`RELAY_NO_ANSWER_BYTE`] means it did not answer and
-/// the channel is closing.
+/// registration channel after [`RELAY_ACTIVATE_BYTE`], saying what became of
+/// the call.  [`RELAY_ANSWERED_BYTE`] means the bridge follows immediately;
+/// [`RELAY_NO_ANSWER_BYTE`], [`RELAY_BUSY_BYTE`] and [`RELAY_ERROR_BYTE`] each
+/// mean no call, and the channel is closing.  See
+/// [`outcome_from_answer_byte`] for why the failures are told apart rather
+/// than being one "no".
 ///
 /// **This exists because claiming is not answering.**  Activating a
 /// registration channel is a map removal and one byte; the far slave then
@@ -1271,13 +1274,14 @@ pub fn parse_remote_peer_addr(addr: &str) -> Option<(IpAddr, String)> {
 
 /// What claiming a registered remote port came to.
 ///
-/// **Three outcomes, not two, because "claimed" and "answered" are different
-/// facts** and collapsing them is the defect this type exists to prevent: a
-/// caller that cannot tell `NoAnswer` from `NotRegistered` has to describe one
-/// as the other, and describing an unanswered ring as a connection is what put
-/// `CONNECT` in front of `NO CARRIER`.  They also want different words on
-/// screen -- "nothing is registered there" is the operator's problem to fix,
-/// "it did not pick up" is the caller's to retry.
+/// **`Answered` and `Failed` are different facts, and so are `Failed` and
+/// `NotRegistered`.**  Collapsing the first pair is the defect this type exists
+/// to prevent -- describing a claimed channel as a connection is what put
+/// `CONNECT` in front of `NO CARRIER`.  Collapsing the second is milder but
+/// still wrong: they want different words, since "nothing is registered there"
+/// is the operator's problem to fix and "it did not pick up" is the caller's to
+/// retry.  `Failed` then carries *why*, so the caller can say `BUSY` where a
+/// local dial would.
 #[derive(Debug)]
 pub enum PeerClaim {
     /// The far endpoint picked up.  The stream is the live bridge.

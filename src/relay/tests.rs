@@ -900,6 +900,52 @@ fn test_a_slave_reports_the_outcome_it_got() {
     );
 }
 
+/// **A claim on the serial thread is raced against a restart.**
+///
+/// `claim_remote_peer` used to return the moment the activate byte was written.
+/// Now that it waits for the slave's answer it can sit for
+/// [`super::RELAY_ANSWER_WAIT`] -- and the two crossbar call sites run it under
+/// `block_on` on the *blocking serial thread*, so an unraced wait pins that
+/// thread for the whole 35 s and delays a config restart by it.  That was a
+/// real regression introduced with the answer byte and caught by comparing the
+/// crossbar against `connect_local_peer`, which has always raced its ring
+/// against `wait_for_serial_abort` and says so in a comment.
+///
+/// The rule is invisible to the type system -- a missing `select!` compiles and
+/// behaves perfectly except during a restart, which no unit test here reaches --
+/// so it is checked in the source, like the outcome rule above.
+#[test]
+fn test_a_crossbar_claim_cannot_wedge_the_serial_thread() {
+    let src = include_str!("../serial.rs");
+    let lines: Vec<&str> = src.lines().collect();
+    let mut sites = 0usize;
+    let mut unraced = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        let t = line.trim_start();
+        if t.starts_with("//") || !t.contains("claim_remote_peer(") {
+            continue;
+        }
+        sites += 1;
+        // The `select!` arm and its abort branch sit within a few lines above.
+        let from = i.saturating_sub(12);
+        let window = lines[from..i].join("\n");
+        if !window.contains("wait_for_serial_abort") {
+            unraced.push(format!("serial.rs:{}", i + 1));
+        }
+    }
+    assert!(
+        sites >= 2,
+        "the scan found only {sites} claim_remote_peer sites in serial.rs -- \
+         it has stopped finding them, so it is checking nothing"
+    );
+    assert!(
+        unraced.is_empty(),
+        "a crossbar claim runs on the blocking serial thread and must be raced \
+         against wait_for_serial_abort, or a restart waits out the answer \
+         timeout: {unraced:?}"
+    );
+}
+
 /// An answer byte from a newer peer degrades to "no answer" rather than being
 /// bridged.
 ///

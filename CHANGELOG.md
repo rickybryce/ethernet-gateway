@@ -58,8 +58,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is driven (mode, framing and the Hayes AT switches) is on the left; what has
   been stored into it (the S-registers, the four phone-number slots and the two
   dial targets) is on the right.  Nothing moved between screens and no setting
-  changed: the panel is about half as tall and its Save button is reachable
-  without a taller window.
+  changed: the panel loses about a third of its height (measured on the real
+  window: roughly 640px to 390px) and its Save button is reachable without a
+  taller window.
 
 - **Release artifacts are signed into one Sigstore bundle each,
   `<name>.sigstore.json`, replacing the `.sig` + `.pem` pair.**  The signature,

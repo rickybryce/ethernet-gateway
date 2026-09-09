@@ -489,17 +489,30 @@ fn handle_cpm_peer_dial(state: &mut ModemState, host: &str) {
                 &cfg,
             );
         } else if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-            match state.handle.block_on(crate::relay::claim_remote_peer(ip, "CPM")) {
+            // Raced against a restart for the same reason as the peer crossbar
+            // below -- see the note there.
+            let sd = state.shutdown.clone();
+            let idx = state.port_id.index();
+            let claim = state.handle.block_on(async move {
+                tokio::select! {
+                    biased;
+                    _ = wait_for_serial_abort(&sd, idx) => None,
+                    c = crate::relay::claim_remote_peer(ip, "CPM") => Some(c),
+                }
+            });
+            let Some(claim) = claim else {
+                send_result(state, "NO CARRIER");
+                return;
+            };
+            match claim {
                 crate::relay::PeerClaim::Answered(stream) => bridge_duplex_online(state, stream),
-                // Separated from "not registered" because they are different
-                // facts and the log is the only place an operator can tell
-                // them apart: one is a slave that never announced, the other a
-                // CP/M endpoint that is there and did not pick up.  The modem
-                // result is `NO CARRIER` either way -- that much a caller
-                // cannot act on differently.
-                // The slave's own outcome, answered exactly as a local call in
-                // the same state would be -- `BUSY` for an endpoint already in
-                // a call, `NO ANSWER` for one that rang and was ignored.
+                // Told apart from "not registered", and no longer only in the
+                // log: one is a slave that never announced, the other a CP/M
+                // endpoint that is there and did not take the call, and the
+                // caller now hears which.  The slave's own outcome, answered
+                // exactly as a local call in the same state would be --
+                // `BUSY` for an endpoint already in a call, `NO ANSWER` for
+                // one that rang and was ignored.
                 crate::relay::PeerClaim::Failed(why) => {
                     glog!(
                         "Serial modem (Port {}): remote CP/M endpoint CPM@{}: {:?}",
@@ -5196,7 +5209,29 @@ fn handle_peer_dial(state: &mut ModemState, addr: PeerAddress) {
         // master-local device dialing a slave's port).  On a standalone
         // gateway nothing is registered, so this is NO CARRIER.
         let label = addr.port.label().to_string();
-        match state.handle.block_on(crate::relay::claim_remote_peer(ip, &label)) {
+        // **Raced against a shutdown/restart, exactly as the local dial is.**
+        // Claiming used to return the instant the activate byte was written;
+        // since the master waits for the slave's answer it can now sit here for
+        // `RELAY_ANSWER_WAIT`, and this runs on the blocking serial thread. An
+        // unraced wait would pin that thread for the whole 35 s and delay a
+        // config restart by it -- the same trap `connect_local_peer` documents
+        // for `request_peer_call`, which is where this shape is copied from.
+        let sd = state.shutdown.clone();
+        let idx = state.port_id.index();
+        let claim_label = label.clone();
+        let claim = state.handle.block_on(async move {
+            tokio::select! {
+                biased;
+                _ = wait_for_serial_abort(&sd, idx) => None,
+                c = crate::relay::claim_remote_peer(ip, &claim_label) => Some(c),
+            }
+        });
+        let Some(claim) = claim else {
+            // The dial was cut short by the restart, not refused by the far end.
+            send_result(state, "NO CARRIER");
+            return;
+        };
+        match claim {
             crate::relay::PeerClaim::Answered(stream) => bridge_duplex_online(state, stream),
             crate::relay::PeerClaim::Failed(why) => {
                 glog!(
