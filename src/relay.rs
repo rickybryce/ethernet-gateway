@@ -1221,8 +1221,31 @@ pub fn register_remote_port(
 ) -> u64 {
     let generation = REMOTE_PORT_GEN.fetch_add(1, Ordering::Relaxed);
     let mut g = REMOTE_PORTS.lock().unwrap_or_else(|e| e.into_inner());
-    g.get_or_insert_with(HashMap::new)
-        .insert((slave_ip, label), (stream, generation, facts));
+    let evicted = g
+        .get_or_insert_with(HashMap::new)
+        .insert((slave_ip, label.clone()), (stream, generation, facts));
+    // **Say when a registration displaced a live one.**  The key is
+    // `(peer IP, label)`, which two gateways behind one NAT address -- or two
+    // instances on one host -- share.  Both register "A"; the second evicts the
+    // first, whose slave sees EOF, calls it a dropped link and re-registers,
+    // evicting the second.  A permanent flap, and until this line nothing
+    // anywhere named the collision as its cause: the generation guard
+    // (`remove_remote_port_gen`) is for the *same* slave re-registering and
+    // correctly does not fire here, so the two look identical in the log.
+    //
+    // Logged, not refused.  A re-register after a teardown we have not yet
+    // observed is the ordinary case and must still win, so this cannot decide
+    // which claimant is legitimate -- only a stable per-slave instance id on
+    // the wire could, and that is a grammar change.  One line turns a
+    // mystifying flap into a diagnosis in the meantime.
+    if evicted.is_some() {
+        glog!(
+            "Relay: {} re-registered port {} — the previous registration for \
+             that address was displaced (two slaves behind one address?)",
+            slave_ip,
+            label
+        );
+    }
     generation
 }
 
