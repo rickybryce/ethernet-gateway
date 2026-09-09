@@ -111,7 +111,10 @@ fn test_relay_hello_bytes() {
     use super::{RELAY_HELLO, RELAY_PROTOCOL_VERSION};
     assert_eq!(&RELAY_HELLO[..3], b"EGR");
     assert_eq!(RELAY_HELLO[3], RELAY_PROTOCOL_VERSION);
-    assert_eq!(RELAY_PROTOCOL_VERSION, 1, "bump deliberately on a wire change");
+    // v1 -> v2 when the slave's answer byte was added (`RELAY_ANSWERED_BYTE`):
+    // a v1 slave never sends it and a v1 master never reads it, so the pair
+    // must upgrade together and the version check is what says so out loud.
+    assert_eq!(RELAY_PROTOCOL_VERSION, 2, "bump deliberately on a wire change");
 }
 
 /// A valid hello (what the master writes on accept) is accepted.
@@ -650,7 +653,8 @@ fn test_parse_remote_peer_addr() {
 }
 
 /// Phase 2b: claiming a registered remote port removes it, writes the
-/// activate byte the slave waits for, and hands back the master's stream.
+/// activate byte the slave waits for, and — since protocol v2 — hands back a
+/// stream only once the slave says its endpoint answered.
 #[tokio::test]
 async fn test_claim_remote_peer_activates() {
     use std::net::IpAddr;
@@ -661,13 +665,141 @@ async fn test_claim_remote_peer_activates() {
     let facts = RemotePortFacts { mode: Some("console".into()), erase: None };
     let _gen = register_remote_port(ip, "A".to_string(), facts, master_end);
 
-    let claimed = claim_remote_peer(ip, "A").await;
-    assert!(claimed.is_some(), "a registered port is claimable");
-    let mut buf = [0u8; 1];
-    device_end.read_exact(&mut buf).await.unwrap();
-    assert_eq!(buf[0], RELAY_ACTIVATE_BYTE, "slave receives the activate byte");
-    // The claim removed it — a second claim finds nothing.
-    assert!(claim_remote_peer(ip, "A").await.is_none());
+    // Stand in for the slave: read the activate byte, say the device picked up.
+    let slave = tokio::spawn(async move {
+        let mut buf = [0u8; 1];
+        device_end.read_exact(&mut buf).await.unwrap();
+        assert_eq!(buf[0], RELAY_ACTIVATE_BYTE, "slave receives the activate byte");
+        super::send_peer_answer(&mut device_end, true).await;
+        device_end
+    });
+
+    match claim_remote_peer(ip, "A").await {
+        super::PeerClaim::Answered(_) => {}
+        other => panic!("a registered port that answers is claimable, got {other:?}"),
+    }
+    let _device_end = slave.await.unwrap();
+
+    // The claim removed it — a second claim finds nothing at all, which is a
+    // different answer from "it did not pick up".
+    assert!(matches!(
+        claim_remote_peer(ip, "A").await,
+        super::PeerClaim::NotRegistered
+    ));
+}
+
+/// **A claim is not an answer, and the master must be able to tell.**
+///
+/// This is the crossbar defect in one test: claiming a slave's registration
+/// channel is a map removal and one byte, and the slave rings its *own* device
+/// afterwards.  Before protocol v2 the slave said nothing when that ring went
+/// unanswered, so the master reported a connection and the caller heard
+/// `CONNECT` followed by `NO CARRIER` (measured 2026-08-21).  A `NoAnswer`
+/// here is what lets the caller be told `NO CARRIER` and nothing else.
+#[tokio::test]
+async fn test_a_ring_that_is_not_answered_is_not_a_connection() {
+    use std::net::IpAddr;
+    let ip: IpAddr = "198.51.100.8".parse().unwrap();
+    let (mut device_end, master_end) = tokio::io::duplex(64);
+    let facts = RemotePortFacts { mode: Some("modem".into()), erase: None };
+    let _gen = register_remote_port(ip, "A".to_string(), facts, master_end);
+
+    let slave = tokio::spawn(async move {
+        let mut buf = [0u8; 1];
+        device_end.read_exact(&mut buf).await.unwrap();
+        // The device never picked up.
+        super::send_peer_answer(&mut device_end, false).await;
+        device_end
+    });
+
+    assert!(
+        matches!(claim_remote_peer(ip, "A").await, super::PeerClaim::NoAnswer),
+        "an unanswered ring must not be reported as a connection"
+    );
+    let _ = slave.await.unwrap();
+}
+
+/// A slave that says nothing at all is an unanswered call, not a connection.
+///
+/// The paused clock is the point: the real wait is
+/// [`super::RELAY_ANSWER_WAIT`] (35 s), and a test that actually slept for it
+/// would be deleted the first time someone was in a hurry.  A slave can go
+/// silent by crashing mid-ring, and the old code's failure mode -- bridge
+/// anyway -- is exactly what must not happen.
+#[tokio::test(start_paused = true)]
+async fn test_a_silent_slave_is_an_unanswered_call() {
+    use std::net::IpAddr;
+    let ip: IpAddr = "198.51.100.9".parse().unwrap();
+    let (device_end, master_end) = tokio::io::duplex(64);
+    let facts = RemotePortFacts { mode: Some("modem".into()), erase: None };
+    let _gen = register_remote_port(ip, "A".to_string(), facts, master_end);
+
+    // Hold the far end open and never answer: an EOF would be a different
+    // path (read_exact fails immediately), and it is the *silence* that the
+    // timeout exists for.
+    let held = device_end;
+    assert!(
+        matches!(claim_remote_peer(ip, "A").await, super::PeerClaim::NoAnswer),
+        "silence past the answer wait is not a connection"
+    );
+    drop(held);
+}
+
+/// **The answer byte is consumed, so the session starts with the session.**
+///
+/// The framing hazard of adding a byte is that a claimer which does not read
+/// it hands that byte to whoever is on the other side -- a `01` in front of a
+/// terminal session, or in front of a file transfer.  Every master-side claim
+/// goes through `claim_remote_peer` for this reason, and this pins that what
+/// comes out of the returned stream is the device's own first byte.
+#[tokio::test]
+async fn test_the_answer_byte_is_not_left_in_the_bridged_stream() {
+    use std::net::IpAddr;
+    use tokio::io::AsyncWriteExt;
+    let ip: IpAddr = "198.51.100.10".parse().unwrap();
+    let (mut device_end, master_end) = tokio::io::duplex(64);
+    let facts = RemotePortFacts { mode: Some("console".into()), erase: None };
+    let _gen = register_remote_port(ip, "A".to_string(), facts, master_end);
+
+    let slave = tokio::spawn(async move {
+        let mut buf = [0u8; 1];
+        device_end.read_exact(&mut buf).await.unwrap();
+        super::send_peer_answer(&mut device_end, true).await;
+        // The device's own data, immediately behind the answer byte.
+        device_end.write_all(b"login: ").await.unwrap();
+        device_end.flush().await.unwrap();
+        device_end
+    });
+
+    let super::PeerClaim::Answered(mut bridged) = claim_remote_peer(ip, "A").await else {
+        panic!("the slave answered; the claim should have connected");
+    };
+    let mut first = [0u8; 7];
+    bridged.read_exact(&mut first).await.unwrap();
+    assert_eq!(
+        &first, b"login: ",
+        "the bridged stream must start at the device's data, not at the answer byte"
+    );
+    let _ = slave.await.unwrap();
+}
+
+/// The two answer values are distinct and are what the master matches on.
+/// Pinned because they are wire constants: changing either is a protocol
+/// change, and a silent swap would turn every answered call into a dropped one.
+#[tokio::test]
+async fn test_send_peer_answer_writes_the_wire_values() {
+    let (mut a, mut b) = tokio::io::duplex(8);
+    assert!(super::send_peer_answer(&mut a, true).await);
+    assert!(super::send_peer_answer(&mut a, false).await);
+    let mut buf = [0u8; 2];
+    b.read_exact(&mut buf).await.unwrap();
+    assert_eq!(buf[0], super::RELAY_ANSWERED_BYTE);
+    assert_eq!(buf[1], super::RELAY_NO_ANSWER_BYTE);
+    assert_ne!(
+        super::RELAY_ANSWERED_BYTE,
+        super::RELAY_NO_ANSWER_BYTE,
+        "yes and no must not be the same byte"
+    );
 }
 
 /// Slave link-state (§9 #10) round-trips through the per-port atomic and

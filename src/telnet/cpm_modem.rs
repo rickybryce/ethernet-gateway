@@ -480,13 +480,19 @@ impl CpmModem {
                         }
                     } else {
                         match h.parse::<std::net::IpAddr>() {
+                            // `CONNECT` is only written for `Answered`: the
+                            // guest's software treats it as carrier, so it must
+                            // not stand for a channel that was merely claimed.
                             Ok(ip) => match crate::relay::claim_remote_peer(ip, label).await {
-                                Some(dup) => {
+                                crate::relay::PeerClaim::Answered(dup) => {
                                     self.conn = Some(Box::new(dup));
                                     self.mode = Mode::Online;
                                     self.result(out, "CONNECT");
                                 }
-                                None => self.result(out, "NO CARRIER"),
+                                crate::relay::PeerClaim::NoAnswer
+                                | crate::relay::PeerClaim::NotRegistered => {
+                                    self.result(out, "NO CARRIER")
+                                }
                             },
                             Err(_) => self.result(out, "NO CARRIER"),
                         }

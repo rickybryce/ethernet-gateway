@@ -2969,8 +2969,6 @@ impl TelnetSession {
         ip: IpAddr,
         label: String,
     ) -> Result<(), std::io::Error> {
-        use tokio::io::AsyncWriteExt;
-
         let esc_label = match self.terminal_type {
             TerminalType::Petscii => "<-",
             _ => "ESC",
@@ -3032,31 +3030,35 @@ impl TelnetSession {
             return Ok(());
         }
 
-        // Claim the registration channel (removes it from the registry so
-        // no other master user can grab the same port).
-        let Some(mut stream) = crate::relay::remove_remote_port(ip, &label) else {
-            self.show_error_lines(&[
-                "That remote port is no longer",
-                "available (slave disconnected).",
-            ])
-            .await?;
-            return Ok(());
+        // Claim the registration channel (removing it from the registry so no
+        // other master user can grab the same port), tell the slave a user
+        // attached, and wait for it to say its port is bridging.
+        //
+        // **Through `claim_remote_peer` rather than open-coded here**, which it
+        // used to be: since v2 the slave answers the activate byte with one of
+        // its own, and a claimer that did not read it would hand the operator
+        // that byte as the first character of the session.  The two copies of
+        // claim+activate were the same rule written twice, and this is the
+        // change that would have had to be made in both.
+        let stream = match crate::relay::claim_remote_peer(ip, &label).await {
+            crate::relay::PeerClaim::Answered(s) => s,
+            crate::relay::PeerClaim::NotRegistered => {
+                self.show_error_lines(&[
+                    "That remote port is no longer",
+                    "available (slave disconnected).",
+                ])
+                .await?;
+                return Ok(());
+            }
+            crate::relay::PeerClaim::NoAnswer => {
+                self.show_error_lines(&[
+                    "Remote port did not start its",
+                    "bridge (slave went away).",
+                ])
+                .await?;
+                return Ok(());
+            }
         };
-        // Signal the slave that a user attached so it starts bridging its
-        // UART (the byte is consumed by the slave, never reaches the user).
-        if stream
-            .write_all(&[crate::relay::RELAY_ACTIVATE_BYTE])
-            .await
-            .is_err()
-            || stream.flush().await.is_err()
-        {
-            self.show_error_lines(&[
-                "Remote port went away before",
-                "the bridge could start.",
-            ])
-            .await?;
-            return Ok(());
-        }
 
         self.send_line(&format!("  {}", self.green("Connected."))).await?;
         self.send_line("").await?;

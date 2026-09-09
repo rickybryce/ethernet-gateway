@@ -333,28 +333,27 @@ where
     // claim its registration channel, activate it, and bridge the two
     // relay legs (device ↔ slave ↔ master ↔ other-slave port).
     if let Some((ip, label)) = parse_remote_peer_addr(&addr) {
+        // The hello now waits for the far device here too, which is what
+        // `PeerClaim` is for: claiming the slave's registration channel is a
+        // map removal and one activate byte, and the slave rings its *own*
+        // device afterwards.  Until the answer byte existed this path answered
+        // `CONNECT` on the claim and `NO CARRIER` moments later -- the one
+        // route the master cannot observe for itself, and so the last one left
+        // over from the deferred-hello work.
         match claim_remote_peer(ip, &label).await {
-            Some(mut remote) => {
-                // **The one place the hello still runs ahead of the answer.**
-                // Everywhere else it means "the far end picked up"; here it can
-                // only mean "the far slave's registration channel was claimed",
-                // because claiming is a map removal and one activate byte.
-                // That slave then rings its *own* device and bridges only if it
-                // answers -- and on "ring not answered" it drops the channel
-                // without telling us, so the caller sees CONNECT then NO
-                // CARRIER, which is exactly the defect this design removed
-                // everywhere else.
-                //
-                // Left as it is deliberately: closing it needs the far slave to
-                // send back an answered/not-answered signal, and a new byte on
-                // this wire is a framing change -- it would move
-                // RELAY_PROTOCOL_VERSION and force both ends of every deployed
-                // pair to upgrade together, which the version check enforces by
-                // refusing skew outright. Recorded rather than half-fixed.
+            PeerClaim::Answered(mut remote) => {
                 glog!("Relay: peer-dial crossbar to {}@{}", label, ip);
                 answer_and_bridge(&mut relay, &mut remote).await;
             }
-            None => glog!("Relay: peer-dial target {}@{} not registered", label, ip),
+            // No hello: the slave turns its absence into `NO CARRIER`, which
+            // is what the caller's modem should hear for a device that did not
+            // pick up.
+            PeerClaim::NoAnswer => {
+                glog!("Relay: peer-dial to {}@{} not answered", label, ip)
+            }
+            PeerClaim::NotRegistered => {
+                glog!("Relay: peer-dial target {}@{} not registered", label, ip)
+            }
         }
         let _ = relay.shutdown().await;
         return;
@@ -540,7 +539,19 @@ const RELAY_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 /// Relay wire-protocol version.  Bump on any incompatible change to the
 /// master↔slave relay framing so a version-skewed pair fails cleanly with a
 /// clear message instead of desyncing (§9).
-pub const RELAY_PROTOCOL_VERSION: u8 = 1;
+///
+/// **v2 added the slave's answer byte** ([`RELAY_ANSWERED_BYTE`]), which is a
+/// real framing change in both directions: a v1 slave never sends it, so a v2
+/// master would wait out its answer timeout on every call; and a v2 slave
+/// sends it to a v1 master that is not reading it, putting a stray `01` at the
+/// head of the device's data.  Either way the pair must upgrade together,
+/// which is exactly what the version check turns into one clear message
+/// instead of a silent malfunction.
+///
+/// Taken deliberately **before 1.0.0 final**: the cost of this break is that
+/// every deployed master/slave pair upgrades together, and that cost only
+/// grows once there are releases people are holding at.
+pub const RELAY_PROTOCOL_VERSION: u8 = 2;
 
 /// Master→slave **relay hello**: the master writes these bytes as the very
 /// first data on an accepted relay/registration channel, ahead of any
@@ -1020,6 +1031,69 @@ where
 /// in-band escaping of the subsequent raw byte stream is needed.
 pub const RELAY_ACTIVATE_BYTE: u8 = 0x01;
 
+/// Slave→master **answer byte**: the one byte a slave writes back on a
+/// registration channel after [`RELAY_ACTIVATE_BYTE`], saying whether its local
+/// endpoint actually picked up.  [`RELAY_ANSWERED_BYTE`] means the bridge
+/// follows immediately; [`RELAY_NO_ANSWER_BYTE`] means it did not answer and
+/// the channel is closing.
+///
+/// **This exists because claiming is not answering.**  Activating a
+/// registration channel is a map removal and one byte; the far slave then
+/// rings its *own* device and bridges only if that device picks up.  Until v2
+/// it told the master nothing when it did not, so a crossbar peer-dial to an
+/// unanswered device gave the caller `CONNECT` and then `NO CARRIER` -- the
+/// same defect the deferred hello removed from every path the master can
+/// observe for itself, surviving on the one path it cannot (measured
+/// 2026-08-21, recorded then rather than half-fixed because closing it needs
+/// this byte, and this byte needs a version bump).
+///
+/// **Every activated channel sends exactly one**, including a console port,
+/// which in practice always answers: its UART is already open by the time it
+/// registers, so nothing is left to fail between the activate byte and the
+/// bridge.  It sends the byte anyway, because a rule with an exception is a
+/// rule the reader has to hold two versions of -- and the master would
+/// otherwise have to know which *kind* of port it had claimed before it knew
+/// how to read the stream, which is a fact the registry does not always
+/// carry (`RemotePort::mode` is an `Option`).
+///
+/// It is positional, like the activate byte it answers: one byte, before any
+/// bridged data, so nothing downstream needs escaping.
+pub const RELAY_ANSWERED_BYTE: u8 = 0x01;
+
+/// The far endpoint did not pick up — see [`RELAY_ANSWERED_BYTE`].
+pub const RELAY_NO_ANSWER_BYTE: u8 = 0x02;
+
+/// Slave→master: report whether the local endpoint answered, as the one byte
+/// the master is waiting for after its activate byte.
+///
+/// Returns whether the byte reached the wire.  A failure here is not worth
+/// acting on -- it means the channel is already gone, which the caller is
+/// about to discover anyway -- but it is worth *not* pretending succeeded, so
+/// the result is returned rather than discarded inside.
+///
+/// Generic over the stream so the three slave paths (console, modem and the
+/// CP/M endpoint) share one statement of the framing.  They had three copies
+/// of the ring-and-bridge shape and none of them told the master anything,
+/// which is precisely how the same omission ended up in all three.
+pub async fn send_peer_answer<S>(stream: &mut S, answered: bool) -> bool
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt;
+    let byte = if answered { RELAY_ANSWERED_BYTE } else { RELAY_NO_ANSWER_BYTE };
+    stream.write_all(&[byte]).await.is_ok() && stream.flush().await.is_ok()
+}
+
+/// How long a master waits for the slave's answer byte.
+///
+/// It has to outlast the slave's own ring, which runs for
+/// [`RELAY_PEER_ANSWER_WAIT`], plus a round trip -- the same shape and the same
+/// reason as [`RELAY_HELLO_TIMEOUT_DIALING`] one layer out.  Too short does not
+/// merely mis-report: the master would give up and tear the channel down while
+/// the slave was still ringing a device that then answers into nothing.
+pub const RELAY_ANSWER_WAIT: std::time::Duration =
+    RELAY_PEER_ANSWER_WAIT.saturating_add(std::time::Duration::from_secs(5));
+
 /// A registered remote console port: the master's end of the idle SSH
 /// registration channel, paired with the generation stamped when it was
 /// registered (see [`REMOTE_PORTS`] for why the generation matters).
@@ -1143,18 +1217,59 @@ pub fn parse_remote_peer_addr(addr: &str) -> Option<(IpAddr, String)> {
     Some((ip, label))
 }
 
-/// Claim a registered remote port for a peer-dial and signal the slave to
-/// start bridging (`RELAY_ACTIVATE_BYTE`), returning the master's channel
-/// stream to pump.  `None` if no such port is registered or it went away
-/// before the activate byte landed.  Shared by the peer-dial crossbar and
-/// mirrors the Serial Gateway picker's claim+activate.
-pub async fn claim_remote_peer(ip: IpAddr, label: &str) -> Option<tokio::io::DuplexStream> {
-    use tokio::io::AsyncWriteExt;
-    let mut stream = remove_remote_port(ip, label)?;
+/// What claiming a registered remote port came to.
+///
+/// **Three outcomes, not two, because "claimed" and "answered" are different
+/// facts** and collapsing them is the defect this type exists to prevent: a
+/// caller that cannot tell `NoAnswer` from `NotRegistered` has to describe one
+/// as the other, and describing an unanswered ring as a connection is what put
+/// `CONNECT` in front of `NO CARRIER`.  They also want different words on
+/// screen -- "nothing is registered there" is the operator's problem to fix,
+/// "it did not pick up" is the caller's to retry.
+#[derive(Debug)]
+pub enum PeerClaim {
+    /// The far endpoint picked up.  The stream is the live bridge.
+    Answered(tokio::io::DuplexStream),
+    /// Registered and activated, but the far endpoint never answered (or the
+    /// slave went away while ringing).
+    NoAnswer,
+    /// Nothing is registered under that address and label.
+    NotRegistered,
+}
+
+/// Claim a registered remote port, signal the slave to start bridging
+/// (`RELAY_ACTIVATE_BYTE`), and **wait for the slave to say whether its local
+/// endpoint answered** ([`RELAY_ANSWERED_BYTE`]).
+///
+/// The wait is the whole point: activating is a map removal and one byte, so
+/// before v2 this returned a "connected" stream for a device that was still
+/// ringing and might never pick up.  Every master-side claim goes through here
+/// -- the peer-dial crossbar, a local modem's `ATD`, the CP/M endpoint and the
+/// Serial Gateway picker -- because the answer byte is now part of the framing
+/// and a claimer that did not consume it would hand its user a stray `01` as
+/// the first byte of the session.
+pub async fn claim_remote_peer(ip: IpAddr, label: &str) -> PeerClaim {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let Some(mut stream) = remove_remote_port(ip, label) else {
+        return PeerClaim::NotRegistered;
+    };
     if stream.write_all(&[RELAY_ACTIVATE_BYTE]).await.is_err() || stream.flush().await.is_err() {
-        return None;
+        // The channel died between the registry read and the activate byte.
+        // The port *was* registered, so this is not `NotRegistered`; from the
+        // caller's side it is indistinguishable from a device that never
+        // picked up, and that is the safer of the two to report.
+        return PeerClaim::NoAnswer;
     }
-    Some(stream)
+    let mut answer = [0u8; 1];
+    match tokio::time::timeout(RELAY_ANSWER_WAIT, stream.read_exact(&mut answer)).await {
+        Ok(Ok(_)) if answer[0] == RELAY_ANSWERED_BYTE => PeerClaim::Answered(stream),
+        // An explicit no-answer, an EOF (slave dropped the channel), or a
+        // timeout all mean the same thing to the caller: no call.  A byte that
+        // is neither answer value is treated the same way rather than being
+        // bridged -- an unknown control byte is not data, and guessing would
+        // put it in front of the user's session.
+        _ => PeerClaim::NoAnswer,
+    }
 }
 
 /// List the currently-registered remote console ports, sorted stably so

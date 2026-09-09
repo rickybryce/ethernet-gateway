@@ -467,8 +467,22 @@ fn handle_cpm_peer_dial(state: &mut ModemState, host: &str) {
             );
         } else if let Ok(ip) = host.parse::<std::net::IpAddr>() {
             match state.handle.block_on(crate::relay::claim_remote_peer(ip, "CPM")) {
-                Some(stream) => bridge_duplex_online(state, stream),
-                None => {
+                crate::relay::PeerClaim::Answered(stream) => bridge_duplex_online(state, stream),
+                // Separated from "not registered" because they are different
+                // facts and the log is the only place an operator can tell
+                // them apart: one is a slave that never announced, the other a
+                // CP/M endpoint that is there and did not pick up.  The modem
+                // result is `NO CARRIER` either way -- that much a caller
+                // cannot act on differently.
+                crate::relay::PeerClaim::NoAnswer => {
+                    glog!(
+                        "Serial modem (Port {}): remote CP/M endpoint CPM@{} did not answer",
+                        state.port_id.label(),
+                        host
+                    );
+                    send_result(state, "NO CARRIER");
+                }
+                crate::relay::PeerClaim::NotRegistered => {
                     glog!(
                         "Serial modem (Port {}): remote CP/M endpoint CPM@{} not registered here",
                         state.port_id.label(),
@@ -1801,6 +1815,14 @@ fn console_slave_register_tick(
             ActivateOutcome::Activated => {
                 glog!("Serial console (Port {}): master attached; bridging", label);
                 crate::relay::set_slave_link(idx, crate::relay::SlaveLinkState::Bridging);
+                // Answer the master's activate byte before any UART data.  A
+                // console port has nothing left that can fail to answer -- its
+                // wire was opened before it registered -- so this is always
+                // `true`, but it is still sent: the master reads one answer
+                // byte on every activated channel, and it cannot tell a
+                // console registration from a modem one at this point.
+                let mut stream = stream;
+                handle.block_on(crate::relay::send_peer_answer(&mut stream, true));
                 run_console_bridge(id, port, stream, handle.clone(), shutdown.clone(), "Serial console");
                 glog!(
                     "Serial console (Port {}): bridge closed; re-registering",
@@ -2104,14 +2126,27 @@ fn modem_slave_announce_tick(
                         _ = async {
                             match request_peer_call(id, crate::relay::RELAY_PEER_ANSWER_WAIT).await {
                                 Ok(mut caller) => {
+                                    // Tell the master the device picked up
+                                    // BEFORE bridging: the master is holding
+                                    // its caller's `CONNECT` until this byte,
+                                    // and anything written after it is the
+                                    // device's own data.
+                                    crate::relay::send_peer_answer(&mut stream, true).await;
                                     let _ = tokio::io::copy_bidirectional(&mut stream, &mut caller).await;
                                 }
                                 Err(o) => {
+                                    // **The reason the answer byte exists.**
+                                    // This used to drop the channel silently,
+                                    // and the master -- which cannot see this
+                                    // ring -- had already answered `CONNECT`,
+                                    // so the caller got carrier and then lost
+                                    // it for a device that never picked up.
                                     glog!(
                                         "Serial modem (Port {}): ring not answered: {:?}",
                                         id.label(),
                                         o
                                     );
+                                    crate::relay::send_peer_answer(&mut stream, false).await;
                                 }
                             }
                         } => {}
@@ -2397,12 +2432,16 @@ pub async fn cpm_slave_announce(stop: Arc<AtomicBool>) {
                             _ = async {
                                 match request_cpm_call(crate::relay::RELAY_PEER_ANSWER_WAIT).await {
                                     Ok(mut caller) => {
+                                        crate::relay::send_peer_answer(&mut stream, true).await;
                                         let _ = tokio::io::copy_bidirectional(&mut stream, &mut caller).await;
                                     }
-                                    Err(o) => glog!(
-                                        "CP/M emulator: remote peer-dial ring not answered: {:?}",
-                                        o
-                                    ),
+                                    Err(o) => {
+                                        glog!(
+                                            "CP/M emulator: remote peer-dial ring not answered: {:?}",
+                                            o
+                                        );
+                                        crate::relay::send_peer_answer(&mut stream, false).await;
+                                    }
                                 }
                             } => {}
                         }
@@ -5133,8 +5172,17 @@ fn handle_peer_dial(state: &mut ModemState, addr: PeerAddress) {
         // gateway nothing is registered, so this is NO CARRIER.
         let label = addr.port.label().to_string();
         match state.handle.block_on(crate::relay::claim_remote_peer(ip, &label)) {
-            Some(stream) => bridge_duplex_online(state, stream),
-            None => {
+            crate::relay::PeerClaim::Answered(stream) => bridge_duplex_online(state, stream),
+            crate::relay::PeerClaim::NoAnswer => {
+                glog!(
+                    "Serial modem (Port {}): remote peer {}@{} did not answer",
+                    state.port_id.label(),
+                    label,
+                    addr.host
+                );
+                send_result(state, "NO CARRIER");
+            }
+            crate::relay::PeerClaim::NotRegistered => {
                 glog!(
                     "Serial modem (Port {}): remote peer {}@{} not registered here",
                     state.port_id.label(),

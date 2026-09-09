@@ -7,7 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A peer-dial across the master crossbar no longer answers `CONNECT` for a
+  device that never picked up.**  Dialling a port on one slave from a device on
+  another (`ATD B@<slave-ip>` through a master) reported carrier the moment the
+  master claimed the far slave's registration channel -- but claiming a channel
+  is a map removal and one byte, and the far slave rings its *own* device
+  afterwards.  If that device did not answer, the slave dropped the channel
+  without saying so, and the caller heard `CONNECT` and then `NO CARRIER`.
+  Vintage terminal software and BBS scripts act on `CONNECT`, so this was a
+  false carrier, not a cosmetic one.
+
+  This was the last route still doing it.  0.9.6 withheld the `CONNECT` until
+  the far end answered on every path the master can observe for itself; the
+  crossbar is the one path it cannot, because the ring happens on the other
+  gateway.  A slave now answers the master's activate byte with one of its own
+  saying whether its endpoint picked up, and the master holds the caller's
+  `CONNECT` until it arrives.  An unanswered ring is `NO CARRIER` and nothing
+  else, which is what the manual has always said it would be.
+
+  The same claim-is-not-an-answer path served the CP/M endpoint, a local
+  modem's `ATD`, and the telnet Serial Gateway's remote-port picker; all four
+  now go through one function, which is also what guarantees the new byte is
+  consumed rather than delivered to whoever is on the other end.
+
 ### Changed
+
+- **The master/slave relay protocol is now v2, and both ends must be on it.**
+  The slave's answer byte above is a framing change in both directions -- a v1
+  slave never sends it, a v1 master never reads it -- so a mixed pair is
+  refused outright with "relay protocol version mismatch: upgrade the older
+  gateway" rather than being allowed to desync.  **Upgrade a master and its
+  slaves together.**  Taken now, before 1.0.0 final, because the cost of this
+  break only grows once there are releases people are holding at.
+
 
 - **The Serial Port "More" panel is laid out in two columns**, on the desktop
   editor and the web UI alike -- the last of the long popups still running off
