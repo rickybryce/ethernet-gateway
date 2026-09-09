@@ -32,6 +32,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now go through one function, which is also what guarantees the new byte is
   consumed rather than delivered to whoever is on the other end.
 
+- **A peer-dial across the crossbar now answers `BUSY` and `NO ANSWER` like a
+  local one.**  Dialling a port on *this* gateway already distinguishes a port
+  that is in another call from one that rang unheard -- modem result codes 7
+  and 8 at `X3` and above.  Reached through a slave, every failure collapsed to
+  `NO CARRIER`, so the same `ATD B@<ip>` answered differently depending only on
+  which box the port was plugged into.  The slave's own outcome now travels
+  with the answer above, and the four call sites that turn an outcome into a
+  result code became one.
+
 ### Changed
 
 - **The master/slave relay protocol is now v2, and both ends must be on it.**

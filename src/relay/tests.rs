@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use crate::serial::PeerCallOutcome;
 use super::{
     claim_remote_peer, parse_relay_command, parse_remote_peer_addr, register_remote_port,
     run_master_relay_dial, run_master_relay_session, split_dial_host_port, ParsedRelay,
@@ -670,7 +671,7 @@ async fn test_claim_remote_peer_activates() {
         let mut buf = [0u8; 1];
         device_end.read_exact(&mut buf).await.unwrap();
         assert_eq!(buf[0], RELAY_ACTIVATE_BYTE, "slave receives the activate byte");
-        super::send_peer_answer(&mut device_end, true).await;
+        super::send_peer_answer(&mut device_end, Ok(())).await;
         device_end
     });
 
@@ -708,12 +709,15 @@ async fn test_a_ring_that_is_not_answered_is_not_a_connection() {
         let mut buf = [0u8; 1];
         device_end.read_exact(&mut buf).await.unwrap();
         // The device never picked up.
-        super::send_peer_answer(&mut device_end, false).await;
+        super::send_peer_answer(&mut device_end, Err(PeerCallOutcome::NoAnswer)).await;
         device_end
     });
 
     assert!(
-        matches!(claim_remote_peer(ip, "A").await, super::PeerClaim::NoAnswer),
+        matches!(
+            claim_remote_peer(ip, "A").await,
+            super::PeerClaim::Failed(PeerCallOutcome::NoAnswer)
+        ),
         "an unanswered ring must not be reported as a connection"
     );
     let _ = slave.await.unwrap();
@@ -739,7 +743,10 @@ async fn test_a_silent_slave_is_an_unanswered_call() {
     // timeout exists for.
     let held = device_end;
     assert!(
-        matches!(claim_remote_peer(ip, "A").await, super::PeerClaim::NoAnswer),
+        matches!(
+            claim_remote_peer(ip, "A").await,
+            super::PeerClaim::Failed(PeerCallOutcome::NoAnswer)
+        ),
         "silence past the answer wait is not a connection"
     );
     drop(held);
@@ -764,7 +771,7 @@ async fn test_the_answer_byte_is_not_left_in_the_bridged_stream() {
     let slave = tokio::spawn(async move {
         let mut buf = [0u8; 1];
         device_end.read_exact(&mut buf).await.unwrap();
-        super::send_peer_answer(&mut device_end, true).await;
+        super::send_peer_answer(&mut device_end, Ok(())).await;
         // The device's own data, immediately behind the answer byte.
         device_end.write_all(b"login: ").await.unwrap();
         device_end.flush().await.unwrap();
@@ -783,23 +790,133 @@ async fn test_the_answer_byte_is_not_left_in_the_bridged_stream() {
     let _ = slave.await.unwrap();
 }
 
-/// The two answer values are distinct and are what the master matches on.
-/// Pinned because they are wire constants: changing either is a protocol
-/// change, and a silent swap would turn every answered call into a dropped one.
+/// Every outcome survives the wire unchanged, and the four values are distinct.
+///
+/// Pinned because they are wire constants: a silent swap would turn answered
+/// calls into dropped ones, and a collision would make two different outcomes
+/// indistinguishable -- the very thing carrying the outcome exists to fix.
 #[tokio::test]
-async fn test_send_peer_answer_writes_the_wire_values() {
-    let (mut a, mut b) = tokio::io::duplex(8);
-    assert!(super::send_peer_answer(&mut a, true).await);
-    assert!(super::send_peer_answer(&mut a, false).await);
-    let mut buf = [0u8; 2];
-    b.read_exact(&mut buf).await.unwrap();
-    assert_eq!(buf[0], super::RELAY_ANSWERED_BYTE);
-    assert_eq!(buf[1], super::RELAY_NO_ANSWER_BYTE);
-    assert_ne!(
-        super::RELAY_ANSWERED_BYTE,
-        super::RELAY_NO_ANSWER_BYTE,
-        "yes and no must not be the same byte"
+async fn test_every_outcome_round_trips_over_the_wire() {
+    let cases: [(Result<(), PeerCallOutcome>, u8); 4] = [
+        (Ok(()), super::RELAY_ANSWERED_BYTE),
+        (Err(PeerCallOutcome::NoAnswer), super::RELAY_NO_ANSWER_BYTE),
+        (Err(PeerCallOutcome::Busy), super::RELAY_BUSY_BYTE),
+        (Err(PeerCallOutcome::Error), super::RELAY_ERROR_BYTE),
+    ];
+    for (outcome, wire) in cases {
+        let (mut a, mut b) = tokio::io::duplex(8);
+        assert!(super::send_peer_answer(&mut a, outcome).await);
+        let mut buf = [0u8; 1];
+        b.read_exact(&mut buf).await.unwrap();
+        assert_eq!(buf[0], wire, "{outcome:?} must go out as {wire:#04x}");
+        assert_eq!(
+            super::outcome_from_answer_byte(buf[0]),
+            outcome,
+            "{outcome:?} must come back as itself"
+        );
+    }
+    let mut seen: Vec<u8> = cases.iter().map(|(_, w)| *w).collect();
+    seen.sort_unstable();
+    seen.dedup();
+    assert_eq!(seen.len(), 4, "the four outcomes need four distinct bytes");
+}
+
+/// **A busy port on a slave reads as busy, not as silence.**
+///
+/// This is the asymmetry the outcome byte exists to close: dialling a port on
+/// *this* gateway that is already in a call answers `BUSY` (result code 7 at
+/// `X3`+), and before the outcome travelled, the same port reached across the
+/// crossbar answered `NO CARRIER`.  Same command, same situation, different
+/// answer depending only on which box the port was plugged into.
+#[tokio::test]
+async fn test_a_busy_port_on_a_slave_is_reported_as_busy() {
+    use std::net::IpAddr;
+    let ip: IpAddr = "198.51.100.11".parse().unwrap();
+    let (mut device_end, master_end) = tokio::io::duplex(64);
+    let facts = RemotePortFacts { mode: Some("modem".into()), erase: None };
+    let _gen = register_remote_port(ip, "A".to_string(), facts, master_end);
+
+    let slave = tokio::spawn(async move {
+        let mut buf = [0u8; 1];
+        device_end.read_exact(&mut buf).await.unwrap();
+        super::send_peer_answer(&mut device_end, Err(PeerCallOutcome::Busy)).await;
+        device_end
+    });
+
+    match claim_remote_peer(ip, "A").await {
+        super::PeerClaim::Failed(PeerCallOutcome::Busy) => {}
+        other => panic!("a busy slave port must report Busy, got {other:?}"),
+    }
+    let _ = slave.await.unwrap();
+}
+
+/// **A slave reports what happened, never a fixed answer.**
+///
+/// The tests above drive the wire from a stub slave, so they prove the byte
+/// carries an outcome and that the master decodes it -- and they pass just as
+/// well if the *real* slave stops passing its own result through and always
+/// says "no answer".  That was measured, not guessed: replacing `Err(o)` with
+/// `Err(PeerCallOutcome::NoAnswer)` at the two ring sites left every one of
+/// them green, which is the "a test that cannot go red" problem in one
+/// mutation.
+///
+/// The production path cannot be reached from a unit test -- it lives inside
+/// the blocking serial thread, behind a real UART and a global port registry --
+/// so this scans the source instead, as the rest of this project does for rules
+/// the type system cannot hold.  The rule is narrow and checkable: a failure
+/// reported to the master must be a *variable*, because a named variant is by
+/// definition not the outcome that occurred.
+///
+/// `Ok(())` is exempt: "the device answered" is the one outcome that is the
+/// same fact every time.
+#[test]
+fn test_a_slave_reports_the_outcome_it_got() {
+    let src = include_str!("../serial.rs");
+    let mut failures = Vec::new();
+    let mut calls = 0usize;
+    for (i, line) in src.lines().enumerate() {
+        let t = line.trim_start();
+        if t.starts_with("//") || !t.contains("send_peer_answer(") {
+            continue;
+        }
+        calls += 1;
+        let arg = t
+            .rsplit_once("&mut stream, ")
+            .map(|(_, a)| a)
+            .unwrap_or("")
+            .trim_end_matches([')', ';', ' ']);
+        if arg != "Ok(())" && arg.contains("PeerCallOutcome::") {
+            failures.push(format!("serial.rs:{} passes a fixed {arg}", i + 1));
+        }
+    }
+    assert!(
+        calls >= 3,
+        "the scan found only {calls} send_peer_answer call sites -- it has \
+         stopped finding them, so it is checking nothing"
     );
+    assert!(
+        failures.is_empty(),
+        "a slave must send the outcome it actually got, not a constant: {failures:?}"
+    );
+}
+
+/// An answer byte from a newer peer degrades to "no answer" rather than being
+/// bridged.
+///
+/// This is what keeps the *vocabulary* off the version byte: v2 introduced the
+/// presence of the answer byte, and a value added later is simply not one of
+/// ours.  Passing an unknown control byte through would put it at the head of
+/// the user's session; treating it as a connection would be the original defect
+/// again.
+#[test]
+fn test_an_unknown_answer_byte_is_not_a_connection() {
+    for b in [0x00u8, 0x05, 0x7f, 0xff] {
+        assert_eq!(
+            super::outcome_from_answer_byte(b),
+            Err(PeerCallOutcome::NoAnswer),
+            "{b:#04x} is not an outcome this build knows"
+        );
+    }
 }
 
 /// Slave link-state (§9 #10) round-trips through the per-port atomic and

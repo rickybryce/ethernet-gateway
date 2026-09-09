@@ -489,7 +489,11 @@ impl CpmModem {
                                     self.mode = Mode::Online;
                                     self.result(out, "CONNECT");
                                 }
-                                crate::relay::PeerClaim::NoAnswer
+                                // The guest's AT layer speaks only CONNECT
+                                // and NO CARRIER here, so the outcome is not
+                                // narrowed further -- unlike the serial modem,
+                                // which has BUSY and NO ANSWER to offer.
+                                crate::relay::PeerClaim::Failed(_)
                                 | crate::relay::PeerClaim::NotRegistered => {
                                     self.result(out, "NO CARRIER")
                                 }
@@ -984,9 +988,16 @@ mod tests {
         // reported from a real session, where a correct `ATDT host:port` was
         // refused while the identical first command had been accepted.
         let mut m = CpmModem::new(true);
-        // First command: a dial to a name that cannot resolve (RFC 2606
-        // `.invalid`) fails, leaving us in command mode.
-        let out = m.service(b"ATDT nowhere.invalid\r\0".to_vec(), 65536, false).await;
+        // First command: a dial that fails, leaving us in command mode.  The
+        // target is a **closed loopback port**, not an unresolvable name.  A
+        // `.invalid` host (RFC 2606) looks hermetic and is not: a resolver with
+        // a `search` domain whose zone has a wildcard record appends it, so
+        // `nowhere.invalid` resolved to a real parking address and this test
+        // dialled a stranger's server and waited out the OS connect timeout --
+        // measured at 134 s, 83% of the whole suite's runtime, and it passed on
+        // the timeout rather than on the resolution failure the comment claimed.
+        // Loopback port 1 is refused immediately and needs no resolver at all.
+        let out = m.service(b"ATDT 127.0.0.1:1\r\0".to_vec(), 65536, false).await;
         let first = String::from_utf8_lossy(&out).to_string();
         assert!(first.contains("NO CARRIER"), "first command: {first}");
         // Second command must be parsed, not refused because of the NUL.
@@ -1001,6 +1012,19 @@ mod tests {
         let out = m.service(b"AT\r\0".to_vec(), 65536, false).await;
         let third = String::from_utf8_lossy(&out).to_string();
         assert!(third.contains("OK") && !third.contains("ERROR"), "third: {third}");
+        // A *bare* Return from the same client must stay silent, the way a real
+        // modem answers an empty line.  This is the case the NUL arm above
+        // uniquely carries: `skip_to_at` rescues a NUL that *prefixes* a real
+        // command, so with only the asserts above this test passes even with
+        // the NUL arm deleted.  A line holding nothing but the NUL has no "AT"
+        // for the debris-skipper to find, so it reaches `strip_prefix` and
+        // comes back ERROR -- an empty Return answering with an error.
+        let out = m.service(b"\r\0\r\0".to_vec(), 65536, false).await;
+        let blank = String::from_utf8_lossy(&out).to_string();
+        assert!(
+            !blank.contains("ERROR"),
+            "a bare CR NUL Return must stay silent, not answer ERROR: {blank:?}"
+        );
     }
 
     /// Reported from a real EGT8080 session: backspacing a typo at the AT prompt

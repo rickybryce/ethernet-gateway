@@ -226,6 +226,29 @@ pub enum PeerCallOutcome {
     Error,
 }
 
+/// Answer the caller with the modem result code a peer-dial outcome deserves.
+///
+/// **One mapping, because there are four callers and they must not disagree.**
+/// Two are local peer-dials (a modem-mode port, and the CP/M endpoint) and two
+/// reach a port on a slave through the master crossbar; the whole point of
+/// carrying [`PeerCallOutcome`] over the relay is that `ATD B@<ip>` answers the
+/// same thing whether the port is on this gateway or another one, and two
+/// copies of this match is exactly how that would quietly stop being true.
+///
+/// `NO ANSWER` and `BUSY` are X3+ extended codes; `send_result` maps them to
+/// the right numeric/verbose form and folds them to `NO CARRIER` at low `X`, so
+/// this says what happened and lets that decide what the caller can hear.
+fn send_peer_outcome_result(state: &mut ModemState, outcome: PeerCallOutcome) {
+    match outcome {
+        PeerCallOutcome::Busy => send_result(state, "BUSY"),
+        PeerCallOutcome::NoAnswer => send_result(state, "NO ANSWER"),
+        // `Answered` cannot reach here -- an answered call is bridged, not
+        // reported -- and an errored port is a failed call with nothing more
+        // specific to say about it.
+        PeerCallOutcome::Error | PeerCallOutcome::Answered => send_result(state, "NO CARRIER"),
+    };
+}
+
 /// Place a peer-dial call to a local **modem-mode** target and wait for it
 /// to ring and answer per its own AT rules.  On success returns the caller
 /// end of a duplex whose far end the target is pumping its UART against;
@@ -474,13 +497,17 @@ fn handle_cpm_peer_dial(state: &mut ModemState, host: &str) {
                 // CP/M endpoint that is there and did not pick up.  The modem
                 // result is `NO CARRIER` either way -- that much a caller
                 // cannot act on differently.
-                crate::relay::PeerClaim::NoAnswer => {
+                // The slave's own outcome, answered exactly as a local call in
+                // the same state would be -- `BUSY` for an endpoint already in
+                // a call, `NO ANSWER` for one that rang and was ignored.
+                crate::relay::PeerClaim::Failed(why) => {
                     glog!(
-                        "Serial modem (Port {}): remote CP/M endpoint CPM@{} did not answer",
+                        "Serial modem (Port {}): remote CP/M endpoint CPM@{}: {:?}",
                         state.port_id.label(),
-                        host
+                        host,
+                        why
                     );
-                    send_result(state, "NO CARRIER");
+                    send_peer_outcome_result(state, why);
                 }
                 crate::relay::PeerClaim::NotRegistered => {
                     glog!(
@@ -512,15 +539,7 @@ fn handle_cpm_peer_dial(state: &mut ModemState, host: &str) {
             send_result(state, "NO CARRIER");
         }
         Some(Ok(caller_end)) => bridge_duplex_online(state, caller_end),
-        Some(Err(PeerCallOutcome::Busy)) => {
-            send_result(state, "BUSY");
-        }
-        Some(Err(PeerCallOutcome::NoAnswer)) => {
-            send_result(state, "NO ANSWER");
-        }
-        Some(Err(_)) => {
-            send_result(state, "NO CARRIER");
-        }
+        Some(Err(o)) => send_peer_outcome_result(state, o),
     }
 }
 
@@ -1822,7 +1841,7 @@ fn console_slave_register_tick(
                 // byte on every activated channel, and it cannot tell a
                 // console registration from a modem one at this point.
                 let mut stream = stream;
-                handle.block_on(crate::relay::send_peer_answer(&mut stream, true));
+                handle.block_on(crate::relay::send_peer_answer(&mut stream, Ok(())));
                 run_console_bridge(id, port, stream, handle.clone(), shutdown.clone(), "Serial console");
                 glog!(
                     "Serial console (Port {}): bridge closed; re-registering",
@@ -2131,7 +2150,7 @@ fn modem_slave_announce_tick(
                                     // its caller's `CONNECT` until this byte,
                                     // and anything written after it is the
                                     // device's own data.
-                                    crate::relay::send_peer_answer(&mut stream, true).await;
+                                    crate::relay::send_peer_answer(&mut stream, Ok(())).await;
                                     let _ = tokio::io::copy_bidirectional(&mut stream, &mut caller).await;
                                 }
                                 Err(o) => {
@@ -2141,12 +2160,18 @@ fn modem_slave_announce_tick(
                                     // ring -- had already answered `CONNECT`,
                                     // so the caller got carrier and then lost
                                     // it for a device that never picked up.
+                                    //
+                                    // **`Err(o)`, never a fixed value.** The
+                                    // outcome itself travels, so a crossbar
+                                    // caller hears the same `BUSY` / `NO
+                                    // ANSWER` a caller on this gateway would
+                                    // for the same port in the same state.
                                     glog!(
                                         "Serial modem (Port {}): ring not answered: {:?}",
                                         id.label(),
                                         o
                                     );
-                                    crate::relay::send_peer_answer(&mut stream, false).await;
+                                    crate::relay::send_peer_answer(&mut stream, Err(o)).await;
                                 }
                             }
                         } => {}
@@ -2432,7 +2457,7 @@ pub async fn cpm_slave_announce(stop: Arc<AtomicBool>) {
                             _ = async {
                                 match request_cpm_call(crate::relay::RELAY_PEER_ANSWER_WAIT).await {
                                     Ok(mut caller) => {
-                                        crate::relay::send_peer_answer(&mut stream, true).await;
+                                        crate::relay::send_peer_answer(&mut stream, Ok(())).await;
                                         let _ = tokio::io::copy_bidirectional(&mut stream, &mut caller).await;
                                     }
                                     Err(o) => {
@@ -2440,7 +2465,7 @@ pub async fn cpm_slave_announce(stop: Arc<AtomicBool>) {
                                             "CP/M emulator: remote peer-dial ring not answered: {:?}",
                                             o
                                         );
-                                        crate::relay::send_peer_answer(&mut stream, false).await;
+                                        crate::relay::send_peer_answer(&mut stream, Err(o)).await;
                                     }
                                 }
                             } => {}
@@ -5173,14 +5198,15 @@ fn handle_peer_dial(state: &mut ModemState, addr: PeerAddress) {
         let label = addr.port.label().to_string();
         match state.handle.block_on(crate::relay::claim_remote_peer(ip, &label)) {
             crate::relay::PeerClaim::Answered(stream) => bridge_duplex_online(state, stream),
-            crate::relay::PeerClaim::NoAnswer => {
+            crate::relay::PeerClaim::Failed(why) => {
                 glog!(
-                    "Serial modem (Port {}): remote peer {}@{} did not answer",
+                    "Serial modem (Port {}): remote peer {}@{}: {:?}",
                     state.port_id.label(),
                     label,
-                    addr.host
+                    addr.host,
+                    why
                 );
-                send_result(state, "NO CARRIER");
+                send_peer_outcome_result(state, why);
             }
             crate::relay::PeerClaim::NotRegistered => {
                 glog!(
@@ -5278,17 +5304,7 @@ fn bridge_local_modem_peer(state: &mut ModemState, target: SerialPortId) {
             send_result(state, "NO CARRIER");
         }
         Some(Ok(caller_end)) => bridge_duplex_online(state, caller_end),
-        Some(Err(PeerCallOutcome::Busy)) => {
-            send_result(state, "BUSY");
-        }
-        // NO ANSWER is an X3+ extended code; send_result maps it to the
-        // right numeric/verbose form and it degrades to NO CARRIER at low X.
-        Some(Err(PeerCallOutcome::NoAnswer)) => {
-            send_result(state, "NO ANSWER");
-        }
-        Some(Err(_)) => {
-            send_result(state, "NO CARRIER");
-        }
+        Some(Err(o)) => send_peer_outcome_result(state, o),
     }
 }
 

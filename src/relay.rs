@@ -347,9 +347,12 @@ where
             }
             // No hello: the slave turns its absence into `NO CARRIER`, which
             // is what the caller's modem should hear for a device that did not
-            // pick up.
-            PeerClaim::NoAnswer => {
-                glog!("Relay: peer-dial to {}@{} not answered", label, ip)
+            // pick up.  The outcome is logged rather than signalled onward --
+            // this leg carries a relayed *session*, and its only vocabulary
+            // for "no call" is the absence of the hello.  The caller's own
+            // gateway is where `BUSY` and `NO ANSWER` are spoken.
+            PeerClaim::Failed(why) => {
+                glog!("Relay: peer-dial to {}@{} did not connect: {:?}", label, ip, why)
             }
             PeerClaim::NotRegistered => {
                 glog!("Relay: peer-dial target {}@{} not registered", label, ip)
@@ -1060,8 +1063,54 @@ pub const RELAY_ACTIVATE_BYTE: u8 = 0x01;
 /// bridged data, so nothing downstream needs escaping.
 pub const RELAY_ANSWERED_BYTE: u8 = 0x01;
 
-/// The far endpoint did not pick up — see [`RELAY_ANSWERED_BYTE`].
+/// Rang, nobody picked up — [`crate::serial::PeerCallOutcome::NoAnswer`].
 pub const RELAY_NO_ANSWER_BYTE: u8 = 0x02;
+
+/// Never started ringing: the port is in another call, or not idle at its
+/// prompt — [`crate::serial::PeerCallOutcome::Busy`].
+pub const RELAY_BUSY_BYTE: u8 = 0x03;
+
+/// The port errored or its thread went away —
+/// [`crate::serial::PeerCallOutcome::Error`].
+pub const RELAY_ERROR_BYTE: u8 = 0x04;
+
+/// **Why the answer is an outcome and not a yes/no.**
+///
+/// A peer-dial to a port on *this* gateway already distinguishes these: a busy
+/// target answers `BUSY` and an unanswered ring answers `NO ANSWER`, which are
+/// documented modem result codes 7 and 8 at `X3` and above.  A boolean here
+/// would have collapsed all of them to `NO CARRIER`, so the same `ATD B@<ip>`
+/// would answer one thing when the port is on this gateway and another when it
+/// is on a slave -- a difference the caller has no way to account for and no
+/// reason to expect.  The slave already computes the outcome; this carries it
+/// the rest of the way.
+///
+/// Decoding is total: any byte that is not one of these is an
+/// [`crate::serial::PeerCallOutcome::NoAnswer`], which is also what a v2 peer
+/// sending a value added later would degrade to.  That keeps a future addition
+/// here off the version byte -- it is the *presence* of the answer byte that
+/// v2 introduced, not its vocabulary.
+fn outcome_from_answer_byte(b: u8) -> Result<(), crate::serial::PeerCallOutcome> {
+    use crate::serial::PeerCallOutcome as O;
+    match b {
+        RELAY_ANSWERED_BYTE => Ok(()),
+        RELAY_BUSY_BYTE => Err(O::Busy),
+        RELAY_ERROR_BYTE => Err(O::Error),
+        // RELAY_NO_ANSWER_BYTE and anything unrecognised.
+        _ => Err(O::NoAnswer),
+    }
+}
+
+/// The wire byte for an outcome — the inverse of [`outcome_from_answer_byte`].
+fn answer_byte_for_outcome(outcome: Result<(), crate::serial::PeerCallOutcome>) -> u8 {
+    use crate::serial::PeerCallOutcome as O;
+    match outcome {
+        Ok(()) => RELAY_ANSWERED_BYTE,
+        Err(O::Busy) => RELAY_BUSY_BYTE,
+        Err(O::Error) => RELAY_ERROR_BYTE,
+        Err(O::NoAnswer) | Err(O::Answered) => RELAY_NO_ANSWER_BYTE,
+    }
+}
 
 /// Slave→master: report whether the local endpoint answered, as the one byte
 /// the master is waiting for after its activate byte.
@@ -1075,12 +1124,15 @@ pub const RELAY_NO_ANSWER_BYTE: u8 = 0x02;
 /// CP/M endpoint) share one statement of the framing.  They had three copies
 /// of the ring-and-bridge shape and none of them told the master anything,
 /// which is precisely how the same omission ended up in all three.
-pub async fn send_peer_answer<S>(stream: &mut S, answered: bool) -> bool
+pub async fn send_peer_answer<S>(
+    stream: &mut S,
+    outcome: Result<(), crate::serial::PeerCallOutcome>,
+) -> bool
 where
     S: tokio::io::AsyncWrite + Unpin,
 {
     use tokio::io::AsyncWriteExt;
-    let byte = if answered { RELAY_ANSWERED_BYTE } else { RELAY_NO_ANSWER_BYTE };
+    let byte = answer_byte_for_outcome(outcome);
     stream.write_all(&[byte]).await.is_ok() && stream.flush().await.is_ok()
 }
 
@@ -1230,9 +1282,14 @@ pub fn parse_remote_peer_addr(addr: &str) -> Option<(IpAddr, String)> {
 pub enum PeerClaim {
     /// The far endpoint picked up.  The stream is the live bridge.
     Answered(tokio::io::DuplexStream),
-    /// Registered and activated, but the far endpoint never answered (or the
-    /// slave went away while ringing).
-    NoAnswer,
+    /// Registered and activated, but the call did not complete.
+    ///
+    /// Carries the slave's own [`crate::serial::PeerCallOutcome`] so a crossbar
+    /// call site can answer the caller exactly as the local one does -- `BUSY`
+    /// for a port already in a call, `NO ANSWER` for a ring nobody picked up.
+    /// [`crate::serial::PeerCallOutcome::Answered`] never appears here; that
+    /// case is [`PeerClaim::Answered`], which carries the stream instead.
+    Failed(crate::serial::PeerCallOutcome),
     /// Nothing is registered under that address and label.
     NotRegistered,
 }
@@ -1255,20 +1312,24 @@ pub async fn claim_remote_peer(ip: IpAddr, label: &str) -> PeerClaim {
     };
     if stream.write_all(&[RELAY_ACTIVATE_BYTE]).await.is_err() || stream.flush().await.is_err() {
         // The channel died between the registry read and the activate byte.
-        // The port *was* registered, so this is not `NotRegistered`; from the
-        // caller's side it is indistinguishable from a device that never
-        // picked up, and that is the safer of the two to report.
-        return PeerClaim::NoAnswer;
+        // The port *was* registered, so this is not `NotRegistered`; the slave
+        // going away mid-claim is its port erroring as far as the caller can
+        // tell.
+        return PeerClaim::Failed(crate::serial::PeerCallOutcome::Error);
     }
     let mut answer = [0u8; 1];
     match tokio::time::timeout(RELAY_ANSWER_WAIT, stream.read_exact(&mut answer)).await {
-        Ok(Ok(_)) if answer[0] == RELAY_ANSWERED_BYTE => PeerClaim::Answered(stream),
-        // An explicit no-answer, an EOF (slave dropped the channel), or a
-        // timeout all mean the same thing to the caller: no call.  A byte that
-        // is neither answer value is treated the same way rather than being
-        // bridged -- an unknown control byte is not data, and guessing would
-        // put it in front of the user's session.
-        _ => PeerClaim::NoAnswer,
+        Ok(Ok(_)) => match outcome_from_answer_byte(answer[0]) {
+            Ok(()) => PeerClaim::Answered(stream),
+            // Not bridged: an answer byte that is not `ANSWERED` is a refusal,
+            // and an unrecognised one is treated as a refusal too rather than
+            // being passed on -- an unknown control byte is not data, and
+            // guessing would put it in front of the user's session.
+            Err(why) => PeerClaim::Failed(why),
+        },
+        // EOF (the slave dropped the channel) or silence past the wait.  Both
+        // are "no call", and neither is a busy signal we can honestly claim.
+        _ => PeerClaim::Failed(crate::serial::PeerCallOutcome::NoAnswer),
     }
 }
 

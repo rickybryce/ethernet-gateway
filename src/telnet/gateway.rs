@@ -3050,7 +3050,11 @@ impl TelnetSession {
                 .await?;
                 return Ok(());
             }
-            crate::relay::PeerClaim::NoAnswer => {
+            // A console port has nothing to be busy with -- the picker only
+            // lists console registrations, and one answers as soon as it is
+            // activated -- so the outcome is shown rather than translated into
+            // a modem code that has no meaning on this screen.
+            crate::relay::PeerClaim::Failed(_) => {
                 self.show_error_lines(&[
                     "Remote port did not start its",
                     "bridge (slave went away).",
