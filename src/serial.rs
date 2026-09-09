@@ -230,10 +230,18 @@ pub enum PeerCallOutcome {
 ///
 /// **One mapping, because there are four callers and they must not disagree.**
 /// Two are local peer-dials (a modem-mode port, and the CP/M endpoint) and two
-/// reach a port on a slave through the master crossbar; the whole point of
-/// carrying [`PeerCallOutcome`] over the relay is that `ATD B@<ip>` answers the
-/// same thing whether the port is on this gateway or another one, and two
-/// copies of this match is exactly how that would quietly stop being true.
+/// reach a port on a slave; the whole point of carrying [`PeerCallOutcome`] over
+/// the relay is that `ATD B@<ip>` answers the same thing whether the port is on
+/// this gateway or another one, and two copies of this match is exactly how
+/// that would quietly stop being true.
+///
+/// **All four callers are the dialling device's own gateway**, which is the
+/// limit of what this can promise.  A call that crosses two gateways -- a
+/// device on one slave reaching a port on another, through the master -- does
+/// not reach here: that leg carries a relayed session and says "no call" only
+/// by withholding the hello, so `run_master_relay_peer` logs the outcome and
+/// the calling device hears `NO CARRIER`.  Carrying it the last hop needs
+/// another byte on the wire, which is another protocol version.
 ///
 /// `NO ANSWER` and `BUSY` are X3+ extended codes; `send_result` maps them to
 /// the right numeric/verbose form and folds them to `NO CARRIER` at low `X`, so
@@ -1663,21 +1671,36 @@ fn relay_reconnect_delay(
 /// reporting an auth rejection as "unreachable" while backing off on the
 /// network ladder (see `cpm_slave_announce`).  A caller adds its own subsystem
 /// prefix; this owns everything after it.
+///
+/// **`delay` is passed in rather than re-derived from `err`.**  Two of the
+/// three classes have a fixed wait this function could have looked up, but the
+/// network one is a running exponential the caller owns -- so a version that
+/// read the constants would have been silent about the only class whose wait
+/// changes, which is the one an operator watching a flapping link is trying to
+/// read.  Taking the caller's number also means the line cannot disagree with
+/// the sleep that follows it.
 fn relay_outage_message(
     err: &crate::relay::RelayConnectError,
     host: &str,
     mport: u16,
+    delay: Duration,
 ) -> String {
     use crate::relay::RelayConnectError as E;
     match err {
-        E::Network(m) => format!("master {}:{} unreachable: {}", host, mport, m),
+        E::Network(m) => format!(
+            "master {}:{} unreachable: {} — retrying in {}s",
+            host,
+            mport,
+            m,
+            delay.as_secs().max(1)
+        ),
         E::Auth(m) => format!(
             "master {}:{} auth rejected ({}) — backing off {}m; \
              check slave_master_username/password",
             host,
             mport,
             m,
-            RECONNECT_BACKOFF_AUTH.as_secs() / 60
+            (delay.as_secs() / 60).max(1)
         ),
         E::Refused(m) => format!(
             "master {}:{} not accepting relays ({}) — backing off {}s; \
@@ -1685,7 +1708,7 @@ fn relay_outage_message(
             host,
             mport,
             m,
-            RECONNECT_BACKOFF_REFUSED.as_secs()
+            delay.as_secs()
         ),
     }
 }
@@ -1808,7 +1831,7 @@ fn console_slave_register_tick(
             Ok(r) => r,
             Err(e) => {
                 let delay = relay_reconnect_delay(&e, &mut net_backoff);
-                let msg = relay_outage_message(&e, &host, mport);
+                let msg = relay_outage_message(&e, &host, mport, delay);
                 if should_log_outage(&last_outage, &msg) {
                     glog!("Serial console (Port {}): {}", label, msg);
                     last_outage = Some(msg);
@@ -2532,7 +2555,7 @@ pub async fn cpm_slave_announce(stop: Arc<AtomicBool>) {
                 // Say WHY, once per distinct reason: repeating it every retry
                 // buries the log, but discarding it (as this used to) leaves an
                 // operator watching identical lines with nothing to act on.
-                let msg = relay_outage_message(&e, &host, mport);
+                let msg = relay_outage_message(&e, &host, mport, delay);
                 if should_log_outage(&last_err, &msg) {
                     glog!("CP/M emulator: {}", msg);
                     last_err = Some(msg);

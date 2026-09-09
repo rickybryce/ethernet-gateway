@@ -4601,17 +4601,6 @@ const POPUP_SERVER_COL_W: f32 = 520.0;
 const POPUP_XFER_LEFT_W: f32 = 612.0;
 const POPUP_XFER_RIGHT_W: f32 = 576.0;
 
-/// The two columns of the AI/Browser/Weather/CP/M popup, which are **not**
-/// equal.  Its rows are `cpm_choice_row`s: they allocate the label column and
-/// the control box exactly and clip rather than wrap, so neither column can be
-/// narrower than the widest row it holds -- and the right-hand one is wider,
-/// because a `cpm_combo` is `CPM_CONTROL_W` plus its own button padding and
-/// two of those rows carry a trailing button as well.
-///
-/// **Measured, not derived from `CPM_LABEL_W + CPM_CONTROL_W`.**  That sum is
-/// 534 and the real rows are 542 and 650: the arithmetic version would have
-/// clipped the first character off every control in the right column, which is
-/// exactly the `ave` defect `cpm_choice_row` already caused once.
 /// The two columns of a per-port "Serial Port — More" popup.
 ///
 /// **The left one is a floor and the right one is a choice**, which is why
@@ -4633,6 +4622,17 @@ const POPUP_XFER_RIGHT_W: f32 = 576.0;
 const POPUP_SERIAL_LEFT_W: f32 = 570.0;
 const POPUP_SERIAL_RIGHT_W: f32 = 496.0;
 
+/// The two columns of the AI/Browser/Weather/CP/M popup, which are **not**
+/// equal.  Its rows are `cpm_choice_row`s: they allocate the label column and
+/// the control box exactly and clip rather than wrap, so neither column can be
+/// narrower than the widest row it holds -- and the right-hand one is wider,
+/// because a `cpm_combo` is `CPM_CONTROL_W` plus its own button padding and
+/// two of those rows carry a trailing button as well.
+///
+/// **Measured, not derived from `CPM_LABEL_W + CPM_CONTROL_W`.**  That sum is
+/// 534 and the real rows are 542 and 650: the arithmetic version would have
+/// clipped the first character off every control in the right column, which is
+/// exactly the `ave` defect `cpm_choice_row` already caused once.
 const POPUP_CPM_LEFT_W: f32 = 552.0;
 const POPUP_CPM_RIGHT_W: f32 = 660.0;
 
@@ -6820,7 +6820,6 @@ impl eframe::App for App {
 mod tests {
     use super::*;
 
-    /// Build a test App with default config and fresh shutdown/restart flags.
     /// Each column of the Serial Port popup is at least as wide as the rows it
     /// has to hold.
     ///
@@ -6901,6 +6900,7 @@ mod tests {
         );
     }
 
+    /// Build a test App with default config and fresh shutdown/restart flags.
     fn test_app() -> App {
         App::new(
             Config::default(),

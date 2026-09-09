@@ -32,14 +32,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now go through one function, which is also what guarantees the new byte is
   consumed rather than delivered to whoever is on the other end.
 
-- **A peer-dial across the crossbar now answers `BUSY` and `NO ANSWER` like a
-  local one.**  Dialling a port on *this* gateway already distinguishes a port
-  that is in another call from one that rang unheard -- modem result codes 7
-  and 8 at `X3` and above.  Reached through a slave, every failure collapsed to
+- **Dialling a slave's port from the master now answers `BUSY` and `NO ANSWER`
+  like a local one.**  Dialling a port on *this* gateway already distinguishes a
+  port that is in another call from one that rang unheard -- modem result codes
+  7 and 8 at `X3` and above.  Reached on a slave, every failure collapsed to
   `NO CARRIER`, so the same `ATD B@<ip>` answered differently depending only on
   which box the port was plugged into.  The slave's own outcome now travels
   with the answer above, and the four call sites that turn an outcome into a
   result code became one.
+
+  **A dial from one slave to another is not covered by this** and still hears
+  `NO CARRIER` for every kind of failure.  That leg carries a relayed session,
+  whose only vocabulary for "no call" is the absence of the hello, so the
+  outcome is written to the master's log rather than passed to the calling
+  device.  Naming it here because the two look identical from a terminal.
 
 - **A slave with the wrong master password no longer locks its own address out
   of the master.**  The reconnect loops wait 6 minutes after a rejected login,

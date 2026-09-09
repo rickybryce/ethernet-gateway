@@ -673,30 +673,41 @@ fn test_a_displaced_registration_is_logged() {
     // log buffer cannot be confused by a parallel test's identical address.
     let ip: IpAddr = "203.0.113.42".parse().unwrap();
     let facts = || RemotePortFacts { mode: Some("console".into()), erase: None };
-    let marker = "203.0.113.42 re-registered port A";
+    let marker = "203.0.113.42 registered port A over a registration";
     // Without this the buffers do not exist, `snapshot` answers empty, and the
     // quiet assertion below passes for the wrong reason -- which is exactly how
     // it failed the first time this test was written.
     crate::logger::init();
+    // The whole ring, not a window.  `snapshot(200)` was the first version and
+    // it is a flake: the buffer is process-wide, ~2500 tests run in parallel
+    // and many of them log, so a burst between the two registrations below
+    // could push this test's own line out of a 200-line tail and fail it with
+    // nothing wrong in the product.  The ring is capped at 2000, so asking for
+    // that many is asking for all of it.
+    let logged = || crate::logger::snapshot(2000).iter().any(|l| l.contains(marker));
+    // Registered here so the global entry is dropped however this test leaves,
+    // including on a failed assertion -- an assertion that poisons the registry
+    // for whatever runs next turns one red test into several.
+    struct Cleanup(IpAddr);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = super::remove_remote_port(self.0, "A");
+        }
+    }
+    let _cleanup = Cleanup(ip);
 
     // First registration: nothing was displaced, so nothing is said.
     let (_a, master_a) = tokio::io::duplex(64);
     let _g1 = register_remote_port(ip, "A".to_string(), facts(), master_a);
-    assert!(
-        !crate::logger::snapshot(200).iter().any(|l| l.contains(marker)),
-        "a first registration displaced nothing and must not warn"
-    );
+    assert!(!logged(), "a first registration displaced nothing and must not warn");
 
     // Second registration on the same key: the first is evicted, and said so.
     let (_b, master_b) = tokio::io::duplex(64);
     let _g2 = register_remote_port(ip, "A".to_string(), facts(), master_b);
     assert!(
-        crate::logger::snapshot(200).iter().any(|l| l.contains(marker)),
+        logged(),
         "displacing a live registration must name the address that did it"
     );
-
-    // Leave the global registry as we found it.
-    let _ = super::remove_remote_port(ip, "A");
 }
 
 /// Phase 2b: claiming a registered remote port removes it, writes the

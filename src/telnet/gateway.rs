@@ -3050,16 +3050,27 @@ impl TelnetSession {
                 .await?;
                 return Ok(());
             }
-            // A console port has nothing to be busy with -- the picker only
-            // lists console registrations, and one answers as soon as it is
-            // activated -- so the outcome is shown rather than translated into
-            // a modem code that has no meaning on this screen.
-            crate::relay::PeerClaim::Failed(_) => {
-                self.show_error_lines(&[
-                    "Remote port did not start its",
-                    "bridge (slave went away).",
-                ])
-                .await?;
+            // **The picker is not console-only**, which the first version of
+            // this arm assumed -- the same wrong premise the comment at the
+            // list-building site above was corrected for on 2026-08-23, and
+            // reintroduced here within one release.  Modem ports and the CP/M
+            // endpoint register through this path too, and those *can* be busy:
+            // a remote modem already in a call answers `Busy`, which the old
+            // wording reported as the slave having gone away.  So the outcome
+            // is worded from itself.  Not as a modem result code -- `BUSY` and
+            // `NO ANSWER` are for a device's AT layer and mean nothing on a
+            // menu screen -- but in the words the operator's next move depends
+            // on, since "it is in use" and "it is gone" call for different ones.
+            crate::relay::PeerClaim::Failed(why) => {
+                use crate::serial::PeerCallOutcome as O;
+                let lines: [&str; 2] = match why {
+                    O::Busy => ["That remote port is already", "in a call. Try again later."],
+                    O::NoAnswer | O::Answered => {
+                        ["The device on that remote port", "did not answer."]
+                    }
+                    O::Error => ["That remote port reported an", "error and did not connect."],
+                };
+                self.show_error_lines(&lines).await?;
                 return Ok(());
             }
         };

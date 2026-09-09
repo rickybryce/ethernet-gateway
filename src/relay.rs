@@ -602,12 +602,21 @@ const RELAY_HELLO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 
 /// How long the slave waits for the hello when it asked the master to **place
 /// a call** — the master withholds it until the far end answers, so this has
-/// to cover the master's own [`RELAY_PEER_ANSWER_WAIT`] with a little slack for
-/// the round trip. Too short here does not merely mis-report: the slave would
-/// say `NO CARRIER` while the master went on to connect, leaving a live call
-/// nobody is holding.
+/// to cover the longest the master might wait, with slack for the round trip.
+/// Too short here does not merely mis-report: the slave would say `NO CARRIER`
+/// while the master went on to connect, leaving a live call nobody is holding.
+///
+/// **Sized off [`RELAY_ANSWER_WAIT`], not off [`RELAY_PEER_ANSWER_WAIT`].**
+/// Those were the same number until the crossbar grew an answer byte, and the
+/// difference is a layer: on a crossbar dial the master does not ring anything
+/// itself, it waits `RELAY_ANSWER_WAIT` for a *second* slave to report whether
+/// its device picked up, and that slave's own ring is the
+/// `RELAY_PEER_ANSWER_WAIT` inside it.  Left at the inner value the two
+/// deadlines were equal while this one starts earlier -- before the master has
+/// accepted the exec and parsed the target -- so a far device answering near
+/// the end of its ring produced exactly the abandoned leg described above.
 const RELAY_HELLO_TIMEOUT_DIALING: std::time::Duration =
-    RELAY_PEER_ANSWER_WAIT.saturating_add(std::time::Duration::from_secs(5));
+    RELAY_ANSWER_WAIT.saturating_add(std::time::Duration::from_secs(5));
 
 /// The hello wait for a given target — see [`RELAY_HELLO`] for why they differ.
 fn hello_wait(target: &RelayTarget) -> std::time::Duration {
@@ -1224,24 +1233,31 @@ pub fn register_remote_port(
     let evicted = g
         .get_or_insert_with(HashMap::new)
         .insert((slave_ip, label.clone()), (stream, generation, facts));
-    // **Say when a registration displaced a live one.**  The key is
-    // `(peer IP, label)`, which two gateways behind one NAT address -- or two
-    // instances on one host -- share.  Both register "A"; the second evicts the
-    // first, whose slave sees EOF, calls it a dropped link and re-registers,
-    // evicting the second.  A permanent flap, and until this line nothing
-    // anywhere named the collision as its cause: the generation guard
-    // (`remove_remote_port_gen`) is for the *same* slave re-registering and
-    // correctly does not fire here, so the two look identical in the log.
+    // **Say when a registration displaced a live one, without naming a cause.**
+    // The key is `(peer IP, label)`, so an entry is replaced by either of two
+    // things and this function cannot tell them apart.  The ordinary one is the
+    // same slave reconnecting -- the master only drops an entry when it observes
+    // the channel teardown, so a slave that noticed the dead link first
+    // (keepalive, a NAT idle eviction, a restart whose RST we have not reaped)
+    // re-registers over its own stale entry, which is correct and expected.
+    // The other is two gateways sharing a source address -- a site behind NAT,
+    // or two instances on one host -- each evicting the other for ever.
     //
-    // Logged, not refused.  A re-register after a teardown we have not yet
-    // observed is the ordinary case and must still win, so this cannot decide
-    // which claimant is legitimate -- only a stable per-slave instance id on
-    // the wire could, and that is a grammar change.  One line turns a
-    // mystifying flap into a diagnosis in the meantime.
+    // An earlier version of this line asked "two slaves behind one address?",
+    // which is the rarer of the two and would have fired on every ordinary
+    // reconnect: a line that misnames a cause is a line an operator learns to
+    // scroll past, and it would have been wrong most of the times it appeared.
+    // It reports the fact and leaves the diagnosis to the reader, who can see
+    // from the surrounding lines whether one slave is reconnecting or two are
+    // trading the key.
+    //
+    // Logged, not refused: a re-register has to be allowed to win, so this
+    // cannot arbitrate.  Only a stable per-slave instance id on the wire could,
+    // and that is a grammar change.
     if evicted.is_some() {
         glog!(
-            "Relay: {} re-registered port {} — the previous registration for \
-             that address was displaced (two slaves behind one address?)",
+            "Relay: {} registered port {} over a registration still held for \
+             that address",
             slave_ip,
             label
         );
