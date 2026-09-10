@@ -1109,11 +1109,24 @@ fn test_a_crossbar_claim_cannot_wedge_the_serial_thread() {
         // message invites a developer to update it.  Slicing from the *last*
         // `block_on(` before the call scopes the evidence to the block that
         // actually wraps it.
-        let head = lines[from..i].join("\n");
+        // **Inclusive of the call's own line.**  `serial.rs` already writes
+        // the one-line form (`handle.block_on(crate::relay::send_peer_answer(
+        // ...))` at 1952), and an exclusive slice cannot see a `block_on(` that
+        // shares a line with the call -- so such a site silently borrowed the
+        // *preceding* block's marker, which is the very defect this scoping was
+        // added to stop.
+        let head = lines[from..=i].join("\n");
         let Some(bo) = head.rfind("block_on(") else {
             continue; // not awaited on a blocking thread — see cpm_slave_announce
         };
         sites += 1;
+        // **The abort must appear before the call, and that is deliberate.**
+        // Under `biased;` the arms are polled in written order, so the abort
+        // arm coming first is what gives it priority over the connect -- an
+        // order-insensitive check would pass a `select!` whose abort can only
+        // win when the relay future happens to be pending.  Said here because
+        // the property was accidental before it was intended, and the obvious
+        // reaction to this test going red is to reorder the arms back.
         if !head[bo..].contains("wait_for_serial_abort") {
             unraced.push(format!("serial.rs:{}", i + 1));
         }
@@ -1126,8 +1139,9 @@ fn test_a_crossbar_claim_cannot_wedge_the_serial_thread() {
     assert!(
         unraced.is_empty(),
         "a crossbar claim runs on the blocking serial thread and must be raced \
-         against wait_for_serial_abort, or a restart waits out the answer \
-         timeout: {unraced:?}"
+         against wait_for_serial_abort -- in the same `block_on`, and in an arm \
+         written BEFORE the call so `biased;` gives the abort priority -- or a \
+         restart waits out the answer timeout: {unraced:?}"
     );
     assert!(
         sites >= 6,
