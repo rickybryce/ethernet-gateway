@@ -32,16 +32,56 @@ class Keys:
     def focus(self):
         self.win.set_input_focus(X.RevertToParent, X.CurrentTime)
         self.d.sync(); time.sleep(0.2)
-    def key(self, ch, hold=0.05):
-        ks = XK.string_to_keysym(ch)
+    # X11 keysyms are NAMED, not spelled: `string_to_keysym('.')` is NoSymbol.
+    # The lookup then yielded keycode 0, and pressing keycode 0 types nothing
+    # and raises nothing -- so every '.', ':', '-' and '/' typed at the C64
+    # vanished in silence.  Measured consequences: `192.168.1.178` reached a
+    # Host prompt as `1921681178` (the gateway dutifully tried to connect to
+    # it), and `xmodemup.seq` reached a Filename prompt as `xmodemupseq` --
+    # which was read as the gateway's validate_filename stripping the dot.  It
+    # was not; the dot never left this file.  novaterm.py's `inst_del` carries
+    # the same lesson for control characters.
+    NAMES = {
+        ' ': 'space',   '\n': 'Return', '\t': 'Tab',
+        '.': 'period',  ',': 'comma',   ':': 'colon',     ';': 'semicolon',
+        '/': 'slash',   '-': 'minus',   '_': 'underscore', '=': 'equal',
+        '+': 'plus',    '*': 'asterisk', '?': 'question',  '!': 'exclam',
+        '(': 'parenleft', ')': 'parenright', '@': 'at',    '#': 'numbersign',
+        '$': 'dollar',  '%': 'percent', '&': 'ampersand',  "'": 'apostrophe',
+        '"': 'quotedbl', '<': 'less',   '>': 'greater',    '\\': 'backslash',
+    }
+
+    def _resolve(self, ch):
+        """Keycode for `ch`, and whether SHIFT is needed to reach it.
+
+        A keycode carries several symbols by level, so pressing the keycode
+        alone gives the UNSHIFTED one: asking for ':' and typing ';' is the
+        same silent-substitution class as the missing keysym above, one layer
+        down.  Ask the map which level actually matched.
+        """
+        ks = XK.string_to_keysym(self.NAMES.get(ch, ch))
+        if ks == 0:
+            raise KeyError("no X keysym for %r -- add it to Keys.NAMES" % ch)
         kc = self.d.keysym_to_keycode(ks)
+        if kc == 0:
+            raise KeyError("keysym %r is not on this keyboard layout" % ch)
+        return kc, self.d.keycode_to_keysym(kc, 0) != ks
+
+    def key(self, ch, hold=0.05):
+        kc, shift = self._resolve(ch)
+        sk = self.d.keysym_to_keycode(XK.string_to_keysym('Shift_L')) if shift else None
+        if sk:
+            xtest.fake_input(self.d, X.KeyPress, sk); self.d.sync(); time.sleep(hold)
         xtest.fake_input(self.d, X.KeyPress, kc)
         self.d.sync(); time.sleep(hold)
         xtest.fake_input(self.d, X.KeyRelease, kc)
         self.d.sync(); time.sleep(hold)
+        if sk:
+            xtest.fake_input(self.d, X.KeyRelease, sk); self.d.sync(); time.sleep(hold)
+
     def type(self, s, gap=0.12):
         for ch in s:
-            self.key({' ': 'space', '\n': 'Return'}.get(ch, ch))
+            self.key(ch)
             time.sleep(gap)
 
     def combo(self, mod, ch, hold=0.06):
