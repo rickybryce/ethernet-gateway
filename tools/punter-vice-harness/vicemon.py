@@ -7,12 +7,38 @@ class Mon:
         self.k.settimeout(1.5)
         self.drain(0.6)
     def drain(self, secs=0.5):
+        """Read whatever is already waiting, for at most `secs`.
+
+        **Poll in small slices rather than blocking on the socket timeout.**
+        The socket is set to 1.5 s, so a drain of an EMPTY socket -- which is
+        the normal case, since draining is a precaution against a stale prompt
+        -- blocked the full 1.5 s however small a window the caller asked for.
+        `cells()` drains five times (connect, three peeks, resume), so one
+        screen read cost 5 x 1.5 = 7.5 s; measured at 7.54 s.
+
+        That is not merely slow.  Entering the monitor PAUSES the emulated
+        machine, so those seconds are stolen from the C64 while the gateway's
+        45-second negotiation window runs on the wall clock: measured, the
+        session clock advanced 0 s across 52.8 s of reading.  A download whose
+        dialogs need five reads therefore armed its receiver ~78 s after the
+        gateway said "start within 45 seconds", and the transfer failed --
+        looking exactly like an XMODEM defect, in an instrument that was
+        spending the budget of the thing it was measuring.
+        """
         out = b""; end = time.time() + secs
-        while time.time() < end:
-            try: d = self.k.recv(65536)
-            except socket.timeout: continue
-            if not d: break
-            out += d
+        old = self.k.gettimeout()
+        try:
+            while True:
+                left = end - time.time()
+                if left <= 0:
+                    break
+                self.k.settimeout(min(left, 0.05))
+                try: d = self.k.recv(65536)
+                except socket.timeout: continue
+                if not d: break
+                out += d
+        finally:
+            self.k.settimeout(old)
         return out
     def cmd(self, c, wait=0.6):
         """Send a command and read until the monitor prompt comes back.
