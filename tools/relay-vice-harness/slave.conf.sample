@@ -1,0 +1,35 @@
+# Master/slave relay harness — SLAVE config (141).
+# The device on serial A dials ATDT ethernetgateway; the slave relays the
+# session to the master (178) over SSH, so the menu and the files are the
+# MASTER's.
+enable_console = false
+telnet_enabled = true
+telnet_port = 2323
+security_enabled = false
+username = YOURUSER
+password = CHANGEME
+transfer_dir = ethernetgateway-data/transfer
+verbose = true
+ssh_enabled = false
+web_enabled = false
+
+serial_a_enabled = true
+serial_a_mode = modem
+serial_a_port = /home/ricky/relay-vice/run/ttyGW
+serial_a_baud = 2400
+serial_a_echo = true
+serial_a_verbose = true
+serial_b_enabled = false
+
+gateway_role = slave
+slave_master_host = 192.168.1.178
+slave_master_port = 2222
+slave_master_username = YOURUSER
+slave_master_password = CHANGEME
+relay_transport = ssh
+
+punter_block_size = 255
+punter_negotiation_timeout = 45
+punter_block_timeout = 20
+punter_max_retries = 10
+punter_negotiation_retry_interval = 5
