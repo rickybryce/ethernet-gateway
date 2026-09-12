@@ -750,10 +750,14 @@ pub fn master_password_state(configured: &str) -> MasterPasswordState {
     MasterPasswordState::Missing
 }
 
-/// Enrolment and the wipe each happen **once per process**, not once per
-/// connection: a slave opens several relay connections (port A, port B, the
-/// CP/M endpoint) and they would otherwise each offer the same key and each
-/// rewrite the same config file.
+/// Enrolment happens **once per process**, not once per connection: a slave
+/// opens several relay connections (port A, port B, the CP/M endpoint) and they
+/// would otherwise each offer the same key.
+///
+/// The wipe deliberately has no such latch -- see [`forget_master_password`],
+/// where one was a bug.  The difference is that an offer has nothing to test
+/// itself against, while the wipe can simply ask whether the password is still
+/// there.
 static KEY_OFFERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// How long to wait for the master's answer to a key offer.
 ///
@@ -761,14 +765,12 @@ static KEY_OFFERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 /// master that does not answer is one the slave should stop waiting on and go
 /// register with, password in hand.
 const ENROL_REPLY_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
-static PASSWORD_FORGOTTEN: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
 
 /// Hand the master this slave's public key, so the next connection can use it.
 ///
 /// Deliberately fire-and-forget.  Whether it worked is answered by the *next*
 /// connection authenticating with the key -- which is also the only evidence
-/// good enough to act on (see `forget_master_password_once`) -- so nothing here
+/// good enough to act on (see `forget_master_password`) -- so nothing here
 /// waits on, or trusts, a reply.  A master too old to know the command answers
 /// `channel_failure`, which is exactly the "not supported" signal we want and
 /// needs no protocol version bump.
@@ -842,11 +844,23 @@ async fn offer_key_for_enrolment_once(session: &russh::client::Handle<SlaveRelay
 }
 
 /// Remove `slave_master_password` from this slave's config, once.
-fn forget_master_password_once() {
-    use std::sync::atomic::Ordering;
-    if PASSWORD_FORGOTTEN.swap(true, Ordering::SeqCst) {
-        return;
-    }
+fn forget_master_password() {
+    // **The emptiness check is the idempotence, and a latch on top of it was
+    // a bug.**  This used to `swap` a once-per-process flag true on the way
+    // in, before asking whether there was anything to erase -- so the first
+    // key login of a slave whose config was already empty spent the turn on a
+    // no-op, and a password appearing afterwards (a hand-edited file, an
+    // upgrade landing mid-session) was never erased for the life of the
+    // process.  Moving the latch below the check does not fix it either: the
+    // reappearing password is exactly the case a latch refuses.
+    //
+    // So there is no latch.  After the first successful wipe the config is
+    // empty and every later call returns here, which is the repeat-write
+    // guard the flag was meant to be; the only thing lost is that several
+    // relay connections authenticating at the same instant may each write the
+    // same empty value, which `update_config_values` serializes and which
+    // costs nothing.  The wipe now heals itself rather than needing a human
+    // to notice it had stopped.
     if crate::config::get_config().slave_master_password.is_empty() {
         return;
     }
@@ -856,23 +870,6 @@ fn forget_master_password_once() {
          removed from {} — it is no longer stored anywhere on this machine.",
         crate::config::CONFIG_FILE
     );
-}
-
-/// Raise or withdraw the "the password is still stored" entry.
-///
-/// Called after every key login, because that is the only moment both halves
-/// of the question are known: that the key works, and what the config still
-/// holds. [`forget_master_password_once`] normally empties it a line earlier
-/// and this withdraws the entry again -- the entry exists for the cases that
-/// wipe cannot cover, chiefly a password saved back into the config by an
-/// operator after the once-per-process wipe has already fired.
-fn review_stored_master_password() {
-    let id = crate::resolve::Problem::MasterPasswordStillStored.id();
-    if crate::config::get_config().slave_master_password.is_empty() {
-        crate::resolve::clear(&id);
-    } else {
-        crate::resolve::report(crate::resolve::Problem::MasterPasswordStillStored);
-    }
 }
 
 /// This machine's name, reduced to something worth writing in a file.
@@ -1391,18 +1388,13 @@ async fn connect_master_relay_inner(
         // The typed one first: it is the copy that exists right now, and the
         // config may never have had one at all.
         clear_pending_master_password();
-        forget_master_password_once();
-        review_stored_master_password();
+        forget_master_password();
     } else {
         // Authenticated by password: offer the key, so the next connection can
         // use it and this one's credential can go.  Best-effort and fire-and-
         // forget -- whether it worked is answered by the next connect, not by a
         // reply, and a master too old to know the command simply refuses the
         // channel.
-        //
-        // And withdraw any standing "still stored" entry: its premise is that
-        // the key is doing the work, and right now the password is.
-        crate::resolve::clear(&crate::resolve::Problem::MasterPasswordStillStored.id());
         offer_key_for_enrolment_once(&session).await;
     }
 

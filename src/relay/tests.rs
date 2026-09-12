@@ -2190,3 +2190,46 @@ fn test_every_master_password_label_fits_a_c64() {
         }
     }
 }
+
+/// **The wipe has to be able to run more than once.**
+///
+/// It used to latch a once-per-process flag *before* asking whether there was
+/// anything to erase, so the first key login of a slave whose config was
+/// already empty spent the turn on a no-op -- and a password appearing
+/// afterwards (a hand-edited file, an upgrade landing mid-session) was never
+/// erased for the life of the process.  Moving the latch below the check would
+/// not have fixed it either: a reappearing password is exactly the case a
+/// latch refuses.  So there is no latch, and this holds that.
+///
+/// The first call is the no-op that used to poison the rest.
+#[tokio::test]
+async fn test_the_password_wipe_heals_itself() {
+    let _lock = PEER_DIAL_TEST_LOCK.lock().await;
+    let prev = crate::config::get_config().slave_master_password;
+
+    // Nothing to do -- the call that used to spend the only turn.
+    crate::config::update_config_value("slave_master_password", "");
+    super::forget_master_password();
+
+    // A password appears afterwards, and must still be erased.
+    crate::config::update_config_value("slave_master_password", "from-a-hand-edit");
+    assert_eq!(
+        crate::config::get_config().slave_master_password, "from-a-hand-edit",
+        "the fixture did not take, so the assertion below would prove nothing"
+    );
+    super::forget_master_password();
+    assert!(
+        crate::config::get_config().slave_master_password.is_empty(),
+        "a password that appeared after a no-op call was never erased"
+    );
+
+    // And again, because "once" was the whole defect.
+    crate::config::update_config_value("slave_master_password", "and-again");
+    super::forget_master_password();
+    assert!(
+        crate::config::get_config().slave_master_password.is_empty(),
+        "the wipe stopped working after its first real erase"
+    );
+
+    crate::config::update_config_value("slave_master_password", &prev);
+}

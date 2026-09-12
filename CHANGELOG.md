@@ -80,19 +80,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   took the password, retried within seconds, enrolled its key and registered --
   with the config file still empty throughout.
 
-- **The Resolve Errors screen offers to retire a master password the slave no
-  longer needs.**  The automatic wipe runs once per process, so a password
-  saved back into `egateway.conf` after it has fired -- by a hand edit, or by
-  the Pass box on any of the three editors -- stays on disk indefinitely while
-  the key does all the work.  The entry appears only once a key login has
-  actually succeeded, and the remedy re-checks that at the moment the button is
-  pressed: erasing the password on a slave whose key has since been revoked
-  would leave a headless machine with no credential at all, so it is refused
-  with the reason rather than obeyed.  The other ways a password can linger --
-  a master too old to enrol, or one with relays switched off -- have no remedy
-  on *this* machine, so by the registry's own rule they stay in the log rather
-  than becoming an entry nobody can clear.
-
 ### Changed
 
 - **Every telnet session is asked which terminal it is**, even one that
@@ -107,6 +94,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   client's own pty request, with no modem in a position to answer for it.
 
 ### Fixed
+
+- **The wipe that removes the master's password could stop working for the
+  life of the process.**  `forget_master_password` latched a once-per-process
+  flag *before* asking whether there was anything to erase, so the first key
+  login of a slave whose config was already empty spent the only turn on a
+  no-op -- and a password appearing afterwards, from a hand-edited file or an
+  upgrade landing mid-session, was never erased at all.  There is no latch now:
+  after the first successful wipe the config is empty and every later call
+  returns on that, which is the repeat-write guard the flag was meant to be.
+  The wipe heals itself rather than needing somebody to notice it had quietly
+  stopped.
 
 - **A slave logging in with its key no longer reads as an unconfigured one.**
   Enrolling the key empties `slave_master_password`, which is the entire point

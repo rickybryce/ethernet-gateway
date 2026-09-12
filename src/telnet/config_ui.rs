@@ -527,7 +527,7 @@ impl TelnetSession {
     /// server restart can show the restart notice only on an actual change.
     /// Draw the "set one field" screen and read the answer.
     ///
-    /// Split out of [`other_set_field`] because not every field this screen
+    /// Split out of [`Self::other_set_field`] because not every field this screen
     /// asks about is written to `egateway.conf`: the master's password is
     /// needed for exactly one login and is held in memory only, so it shares
     /// the screen and not the write.  One screen, two destinations -- rather
