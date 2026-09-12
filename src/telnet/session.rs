@@ -115,12 +115,30 @@ pub(crate) const DETECT_PROMPT: &str = "Press BACKSPACE to detect terminal: ";
 /// and the fallback lands on exactly the answer the announcement would have
 /// given, so a short wait cannot be worse than not asking at all.
 ///
+/// **`ANNOUNCED_WAIT` is how long a person gets, and it was too short at 10 s.**
+/// The argument above quietly assumes the announcement is right about the
+/// terminal, and the case this gateway exists for is the one where it is not:
+/// a Commodore behind tcpser or a WiFi modem has the *bridge* announcing
+/// `VT100` on its behalf, so a C64 owner who does not find INST/DEL within the
+/// window gets 80-column menus whose lowercase lands in the machine's graphics
+/// range -- unreadable, on first contact, with nothing saying why.  Ten seconds
+/// is not long to read a 40-column prompt and find a key.  Measured on the real
+/// rig: answered inside a second it detects PETSCII and draws a readable
+/// 40-column screen; answered late it is ANSI and is not.
+///
+/// It is an upper bound only -- `timeout` returns the instant a byte arrives,
+/// so pressing the key continues at once and nobody waits out the 30 s.
+/// Lengthening it therefore costs only a client that never presses anything,
+/// which is a script, which is not using the session it is waiting for.
+///
+/// Ricky's call, 2026-09-12.
+///
 /// Neither is the session idle allowance (`idle_timeout_secs`, 900 s by
 /// default): that one is applied *inside* `read_byte_filtered` and is handled
 /// below, because an idle timeout firing first must still reach the fallback
 /// rather than dropping a client that told us what it was.
 pub(crate) const DETECT_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
-pub(crate) const ANNOUNCED_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+pub(crate) const ANNOUNCED_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The re-ask when the answer was a space.  Same 40-column budget, which is why
 /// it is this terse — the first draft said "Space cannot be the erase key.

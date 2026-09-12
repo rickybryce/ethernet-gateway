@@ -88,12 +88,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `VT100` for a C64, so the gateway answered "Terminal detected: ANSI" nine
   seconds before the C64 pressed INST/DEL and sent it 80-column menus whose
   lowercase letters render from the C64's graphics range.  The announcement is
-  now the **fallback** for a session that never presses a key (10 s), so a probe
+  now the **fallback** for a session that never presses a key (30 s), so a probe
   or script is believed rather than dropped, and it lands on exactly the answer
   it would have given before.  SSH is unchanged: its `TERM` comes from the
   client's own pty request, with no modem in a position to answer for it.
 
 ### Fixed
+
+- **A Commodore had ten seconds to find INST/DEL, and a modem answering for it
+  won the rest of the time.**  The BACKSPACE prompt falls back to the announced
+  TTYPE, and that wait was 10 s -- which assumes the announcement is right about
+  the terminal.  For the hardware this gateway exists for it is not: a C64
+  behind tcpser or a WiFi modem has the *bridge* announcing `VT100` on its
+  behalf, so an operator who did not find the key in time got 80-column menus
+  with every lowercase letter in the machine's graphics range, unreadable, on
+  first contact, with nothing saying why.  The wait is 30 s now.  It is an
+  **upper bound only** -- the read returns the instant a key arrives, so
+  pressing INST/DEL continues at once and nobody waits it out -- so the cost
+  falls entirely on a client that never presses anything, which is a script,
+  which is not using the session it is waiting for.  Measured on the rig:
+  answered inside a second, `Terminal detected: PETSCII (Commodore 64)` and a
+  readable 40-column screen; answered late, ANSI and not.
 
 - **The desktop window title now reports the relay.**  A **master** counts the
   slaves registered with it (`no slaves connected` / `1 slave connected` /

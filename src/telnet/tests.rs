@@ -6729,8 +6729,13 @@ async fn read_until(
     // waiting on input with nothing more to say, which is exactly when this
     // must fail fast and print what it did see.
     // Comfortably past ANNOUNCED_WAIT: a deadline equal to the wait under test
-    // races it, and the loser is decided by the scheduler.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    // races it, and the loser is decided by the scheduler.  **Derived from the
+    // constant, not copied**, because the two were 30 s and 10 s and the day
+    // ANNOUNCED_WAIT was raised to 30 they would have become equal -- a flake
+    // whose cause is a number in another file.
+    let deadline = std::time::Instant::now()
+        + crate::telnet::session::ANNOUNCED_WAIT
+        + std::time::Duration::from_secs(15);
     loop {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
         if left.is_zero() {
