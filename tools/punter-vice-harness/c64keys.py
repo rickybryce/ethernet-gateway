@@ -65,7 +65,19 @@ class Keys:
         kc = self.d.keysym_to_keycode(ks)
         if kc == 0:
             raise KeyError("keysym %r is not on this keyboard layout" % ch)
-        return kc, self.d.keycode_to_keysym(kc, 0) != ks
+        if self.d.keycode_to_keysym(kc, 0) == ks:
+            return kc, False
+        # It is not the unshifted symbol, so SHIFT is about to be pressed --
+        # check that shifted is actually where it lives.  On a layout that puts
+        # it at an AltGr level, pressing Shift reaches a DIFFERENT character and
+        # types it with no error: the same silent substitution this whole table
+        # exists to stop, one level further down.
+        if self.d.keycode_to_keysym(kc, 1) != ks:
+            raise KeyError(
+                "%r is on keycode %d but at neither level 0 nor 1 -- this "
+                "layout would type something else" % (ch, kc)
+            )
+        return kc, True
 
     def key(self, ch, hold=0.05):
         kc, shift = self._resolve(ch)

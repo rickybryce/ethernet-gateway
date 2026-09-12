@@ -56,6 +56,11 @@ esac
 
 # Drop out of warp, and PROVE it (see vicewarp.py -- a blind Alt+W is a toggle
 # that fails silently in both directions).
-DISPLAY=:0 timeout 90 python3 vicewarp.py 2>&1 | grep -v "X protocol\|Xlib" || {
+# PIPESTATUS again: vicewarp.py exists precisely because a blind Alt+W fails
+# silently, and piping its status through grep re-hid the failure it was written
+# to expose -- every later transfer would then run warped against gateway
+# timeouts measured on the wall clock.
+DISPLAY=:0 timeout 90 python3 vicewarp.py 2>&1 | grep -v "X protocol\|Xlib"
+[ "${PIPESTATUS[0]}" -eq 0 ] || {
     echo "FATAL: could not put VICE back to real speed" >&2; exit 1; }
 echo "ready on the $LINK link"

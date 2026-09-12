@@ -29,6 +29,12 @@ if [ "$LINK" = serial ]; then DIALNO=ethernetgateway; else DIALNO=1; fi
 pgrep -x x64sc >/dev/null || { echo "FATAL: no VICE running -- start-vice.sh first" >&2; exit 1; }
 
 echo "--- restarting the slave for a clean line"
+# Empty the log BEFORE launching.  start-slave.sh kills the old gateway, sleeps,
+# and rebuilds the socat pair before its `tee` truncates this file -- ten-odd
+# seconds during which it still holds the PREVIOUS run's "REGISTERED with
+# master".  The poll below would match that on its first iteration and declare a
+# slave ready that is not up: the exact failure the poll was written to prevent.
+: > slave.log
 (nohup ./start-slave.sh "$LINK" > /dev/null 2>&1 < /dev/null &)
 # Wait for the thing this run actually needs, not for a fixed sleep: on the
 # serial link that is the port having registered with the master, on telnet the
@@ -44,7 +50,13 @@ done
 [ "$ready" = yes ] || { echo "FATAL: slave never reported '$want'; see slave.log" >&2; exit 1; }
 echo "--- slave ready ($want)"
 
-DISPLAY=:0 timeout 120 python3 freshdisk.py 2>&1 | grep -v "X protocol\|Xlib" || {
+# Report PYTHON's status, not grep's.  `cmd | grep -v ... || FATAL` tests the
+# filter, and grep answers 0 whenever it printed a line -- so freshdisk.py's own
+# "FATAL: monitor refused ..." was passed through and the run continued against
+# the previous run's disk.  The same trap, with the same fix, is three lines
+# below for run-transfer.py; this call never got it.
+DISPLAY=:0 timeout 120 python3 freshdisk.py 2>&1 | grep -v "X protocol\|Xlib"
+[ "${PIPESTATUS[0]}" -eq 0 ] || {
     echo "FATAL: could not swap in a fresh transfer disk" >&2; exit 1; }
 
 # Report the transfer's status, not the filter's: ending on a pipe would make
