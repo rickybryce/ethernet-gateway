@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Choosing a serial port now switches it on.**  Picking a device and then
+  forgetting to tick *Enabled* was the commonest way to end up with a serial
+  port that does nothing, and nothing could report it: a port that names a
+  device and is disabled is indistinguishable from one switched off on
+  purpose, so the gateway stayed silent and the operator was left looking at a
+  setting that appeared correct.  Choosing a device is the operator saying they
+  want that port, so the port comes on &mdash; on **all four** surfaces, because
+  one rule in the config layer carries the telnet serial screens, the web form,
+  the desktop editor and the setup wizard.
+  Two deliberate limits.  It fires on a **change** of device, never on every
+  write: the desktop and the wizard write every key on every save, so
+  re-enabling on an unchanged device would override an operator who had
+  switched a configured port off and give them no way to make it stick.  And
+  **clearing a device does not switch the port off** &mdash; turning something
+  off that nobody asked to turn off is the worse surprise, and an enabled port
+  with no device already says so in the log.
+
 ## [1.0.0] - 2026-09-12
 
 ### Added

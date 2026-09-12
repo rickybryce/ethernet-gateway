@@ -4037,6 +4037,11 @@ impl App {
         if out.password.is_empty() {
             out.password = config::get_config().password;
         }
+        // A port the operator just pointed at a device comes on, the same rule
+        // the telnet and web paths get from `update_config_values`.  The
+        // desktop writes every key on every save, so it is compared against
+        // the config as stored -- `last_synced_cfg` -- and not against itself.
+        config::enable_ports_that_gained_a_device(&self.last_synced_cfg, &mut out);
         out.slave_master_password = master_password_for_save(
             &out.slave_master_password,
             &config::get_config().slave_master_password,

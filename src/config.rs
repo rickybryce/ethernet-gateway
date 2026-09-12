@@ -2917,6 +2917,43 @@ fn ensure_cpm_layout(cfg: &Config) {
     }
 }
 
+/// Turn on a serial port the operator has just pointed at a device.
+///
+/// **Choosing a device is the operator saying they want that port.**  Picking
+/// one and then forgetting to tick *Enabled* is the commonest way to end up
+/// with a serial port that does nothing, and nothing can report it: a port
+/// with a device and `enabled = false` is indistinguishable from a port
+/// deliberately switched off, so the gateway stayed silent and the operator
+/// was left looking at a setting that appeared correct.
+///
+/// Two things it deliberately does not do:
+///
+/// * **It fires on a CHANGE, never on every write.**  The desktop editor and
+///   the wizard write every key on every save, so "this port names a device"
+///   is true there for ever after; re-enabling on that would override an
+///   operator who had deliberately switched a configured port off, and they
+///   would have no way to make it stick.
+/// * **Clearing a device does not switch the port off.**  Turning something
+///   off that the operator did not ask to turn off is a worse surprise than
+///   leaving it on, and an enabled port with no device already says so in the
+///   log.
+///
+/// One rule for every surface, because there are four ways in -- the telnet
+/// serial screens, the web form, the desktop editor and the setup wizard --
+/// and the first three had each forgotten it.  Telnet and the web land in
+/// [`update_config_values`]; the desktop and the wizard land in
+/// [`save_config`]; both call this.  Pure, so the rule can be tested without
+/// touching a config file.
+pub fn enable_ports_that_gained_a_device(old: &Config, new: &mut Config) {
+    for id in [SerialPortId::A, SerialPortId::B] {
+        let before = old.port(id).port.trim().to_string();
+        let after = new.port(id).port.trim().to_string();
+        if after != before && !after.is_empty() {
+            new.port_mut(id).enabled = true;
+        }
+    }
+}
+
 pub fn save_config(cfg: &Config) -> Result<(), String> {
     // A password typed into the desktop editor or the first-run wizard is
     // hashed before it reaches the disk *or* the in-memory config, so the two
@@ -3927,9 +3964,18 @@ pub fn update_config_values(pairs: &[(&str, &str)]) {
         Config::default()
     };
     let was_cpm_enabled = cfg.cpm_emu_enabled;
+    // The ports as the file has them, so a device that CHANGES can be told
+    // from one that merely is what it was -- see
+    // `enable_ports_that_gained_a_device`.
+    let before_ports = cfg.clone();
     for &(key, value) in pairs {
         apply_config_key(&mut cfg, key, value);
     }
+    // Applied after the pairs, so pointing a port at a device turns it on even
+    // when the same save carries the (unticked, therefore absent, therefore
+    // false) Enabled checkbox the operator forgot.  That is the whole point:
+    // the forgotten tick is the defect being fixed.
+    enable_ports_that_gained_a_device(&before_ports, &mut cfg);
     // Whatever the caller was setting, the password does not go back to disk
     // in the clear.  Unconditional rather than gated on `pairs` naming
     // `password`: this rewrites the file from the whole struct, so a save of
@@ -6306,6 +6352,118 @@ mod tests {
         assert_eq!(cfg.transfer_dir, DEFAULT_TRANSFER_DIR);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The shared write path really applies it**, not just the pure rule.
+    ///
+    /// Telnet and the web both land in `update_config_values`, so this covers
+    /// both: the rule could be perfect and still reach nobody.
+    #[tokio::test]
+    async fn test_the_shared_write_path_enables_a_port_given_a_device() {
+        let _lock = CONFIG_TEST_LOCK.lock().await;
+        update_config_values(&[("serial_a_port", ""), ("serial_a_enabled", "false")]);
+        assert!(
+            !get_config().port(SerialPortId::A).enabled,
+            "the fixture did not take, so the assertion below would prove nothing"
+        );
+
+        // What the web sends when the operator picks a device and leaves the
+        // checkbox unticked: the port key, and `enabled` as an explicit false
+        // (an absent checkbox is read as false by the boolean loop).
+        update_config_values(&[("serial_a_port", "/dev/ttyUSB0"), ("serial_a_enabled", "false")]);
+        assert!(
+            get_config().port(SerialPortId::A).enabled,
+            "choosing a device left the port switched off"
+        );
+
+        // And a later save that does not change the device leaves an operator's
+        // deliberate OFF alone.
+        update_config_values(&[("serial_a_enabled", "false")]);
+        update_config_values(&[("serial_a_port", "/dev/ttyUSB0")]);
+        assert!(
+            !get_config().port(SerialPortId::A).enabled,
+            "an unchanged device re-enabled a port that was switched off on purpose"
+        );
+
+        update_config_values(&[("serial_a_port", ""), ("serial_a_enabled", "false")]);
+    }
+
+    /// **The desktop writes wholesale, so it has to ask for the rule itself.**
+    ///
+    /// Telnet and the web get it free from `update_config_values`; the desktop
+    /// editor and the setup wizard go through `save_config`, and the call in
+    /// `persist_config` is the only thing that carries them.  Scanned from the
+    /// source because the drawing code has no test harness, and a surface that
+    /// silently stopped applying the rule is exactly the defect being fixed.
+    #[test]
+    fn test_the_desktop_save_path_asks_for_the_rule() {
+        let src = include_str!("gui.rs");
+        let start = src
+            .find("fn persist_config")
+            .expect("the desktop's single save path");
+        let end = src[start..]
+            .find("\n    fn ")
+            .map(|i| i + start + 5)
+            .unwrap_or(src.len());
+        let body = &src[start..end];
+        assert!(
+            body.contains("enable_ports_that_gained_a_device"),
+            "persist_config no longer applies the rule, so the desktop and the \
+             setup wizard would save a port the operator pointed at a device \
+             and left switched off"
+        );
+    }
+
+    /// **Choosing a device turns the port on**, because forgetting the tick is
+    /// the commonest way to end up with a serial port that does nothing, and
+    /// nothing can report it: a port with a device and `enabled = false` looks
+    /// exactly like one switched off on purpose.
+    #[test]
+    fn test_pointing_a_port_at_a_device_enables_it() {
+        let mut old = Config::default();
+        old.port_mut(SerialPortId::A).port = String::new();
+        old.port_mut(SerialPortId::A).enabled = false;
+
+        // The reported case: a device is chosen, the tick is forgotten.
+        let mut new = old.clone();
+        new.port_mut(SerialPortId::A).port = "/dev/ttyUSB0".to_string();
+        enable_ports_that_gained_a_device(&old, &mut new);
+        assert!(new.port(SerialPortId::A).enabled, "the port was left doing nothing");
+        // ...and it did not reach across to the other port.
+        assert!(!new.port(SerialPortId::B).enabled, "port B was switched on too");
+
+        // **Not on every write.**  The desktop and the wizard write every key
+        // on every save, so an unchanged device must not re-enable a port the
+        // operator deliberately switched off -- they would never make it stick.
+        let mut stored = Config::default();
+        stored.port_mut(SerialPortId::A).port = "/dev/ttyUSB0".to_string();
+        stored.port_mut(SerialPortId::A).enabled = false;
+        let mut resave = stored.clone();
+        enable_ports_that_gained_a_device(&stored, &mut resave);
+        assert!(
+            !resave.port(SerialPortId::A).enabled,
+            "a save with no change re-enabled a port that was switched off on purpose"
+        );
+
+        // Clearing the device must not enable anything...
+        let mut cleared = stored.clone();
+        cleared.port_mut(SerialPortId::A).port = String::new();
+        enable_ports_that_gained_a_device(&stored, &mut cleared);
+        assert!(!cleared.port(SerialPortId::A).enabled);
+        // ...nor switch a running port off: turning something off the operator
+        // did not ask to turn off is the worse surprise.
+        let mut on = stored.clone();
+        on.port_mut(SerialPortId::A).enabled = true;
+        let mut cleared_on = on.clone();
+        cleared_on.port_mut(SerialPortId::A).port = String::new();
+        enable_ports_that_gained_a_device(&on, &mut cleared_on);
+        assert!(cleared_on.port(SerialPortId::A).enabled, "clearing a device switched the port off");
+
+        // Whitespace is not a device, and is not a change either.
+        let mut spaced = old.clone();
+        spaced.port_mut(SerialPortId::A).port = "   ".to_string();
+        enable_ports_that_gained_a_device(&old, &mut spaced);
+        assert!(!spaced.port(SerialPortId::A).enabled, "blank text counted as a device");
     }
 
     #[test]
