@@ -68,6 +68,18 @@ verify() { # proto dir
         # entry on it can be this run's download.
         scp -q $SLAVE:/home/ricky/relay-vice/run/xfer.d64 "$OUT/$proto-$dir.d64" || return 1
         python3 "$TOOLS/d64read.py" "$OUT/$proto-$dir.d64" > "$OUT/$proto-$dir.dir" 2>&1
+        # **Is this the disk the run was given?**  freshdisk.py writes a marker
+        # naming this swap; if the emulator was holding a different disk and
+        # wrote its own view back, the marker is what goes missing.  The old
+        # check read the image with c1541 -- the wrong SIDE of the swap, which
+        # is why a unit number that meant device SIXTEEN went unnoticed for
+        # weeks while every "fresh" disk was the previous run's.
+        mark="$(grep -oE "marker run[0-9]{5}" "$OUT/$proto-$dir.screen" 2>/dev/null \
+                | tail -1 | awk "{print \$2}")"
+        if [ -n "$mark" ] && ! grep -qi "$mark" "$OUT/$proto-$dir.dir"; then
+            echo "    the disk graded is NOT the disk we built ($mark missing)"
+            return 1
+        fi
         python3 "$TOOLS/verify-run.py" "$TOOLS/payloads/PUNTEST.SEQ" "$OUT/$proto-$dir.d64"
         return $?
     else
