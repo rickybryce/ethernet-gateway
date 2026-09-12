@@ -857,6 +857,23 @@ fn forget_master_password_once() {
     );
 }
 
+/// Raise or withdraw the "the password is still stored" entry.
+///
+/// Called after every key login, because that is the only moment both halves
+/// of the question are known: that the key works, and what the config still
+/// holds. [`forget_master_password_once`] normally empties it a line earlier
+/// and this withdraws the entry again -- the entry exists for the cases that
+/// wipe cannot cover, chiefly a password saved back into the config by an
+/// operator after the once-per-process wipe has already fired.
+fn review_stored_master_password() {
+    let id = crate::resolve::Problem::MasterPasswordStillStored.id();
+    if crate::config::get_config().slave_master_password.is_empty() {
+        crate::resolve::clear(&id);
+    } else {
+        crate::resolve::report(crate::resolve::Problem::MasterPasswordStillStored);
+    }
+}
+
 /// This machine's name, reduced to something worth writing in a file.
 fn hostname_label() -> String {
     std::fs::read_to_string("/etc/hostname")
@@ -1374,12 +1391,17 @@ async fn connect_master_relay_inner(
         // config may never have had one at all.
         clear_pending_master_password();
         forget_master_password_once();
+        review_stored_master_password();
     } else {
         // Authenticated by password: offer the key, so the next connection can
         // use it and this one's credential can go.  Best-effort and fire-and-
         // forget -- whether it worked is answered by the next connect, not by a
         // reply, and a master too old to know the command simply refuses the
         // channel.
+        //
+        // And withdraw any standing "still stored" entry: its premise is that
+        // the key is doing the work, and right now the password is.
+        crate::resolve::clear(&crate::resolve::Problem::MasterPasswordStillStored.id());
         offer_key_for_enrolment_once(&session).await;
     }
 

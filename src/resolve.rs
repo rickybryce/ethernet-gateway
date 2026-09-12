@@ -42,6 +42,20 @@ pub enum Problem {
     /// Carries the host and port because the remedy is per-host: forgetting one
     /// master's key must not forget another's.
     MasterHostKeyChanged { host: String, port: u16 },
+
+    /// This slave gets in with its key, and a copy of the master's password is
+    /// still sitting in `egateway.conf`.
+    ///
+    /// **Reported only once the key is proven**, which is what makes the remedy
+    /// safe: erasing the password on a slave whose key does *not* work strands
+    /// a headless machine with no way in at all.  The other ways a password can
+    /// linger -- a master too old to enrol, or one with relays switched off --
+    /// have no remedy on *this* machine, so by this module's own rule they stay
+    /// in the log rather than becoming an entry nobody can clear.
+    ///
+    /// Carries nothing: it is about this gateway's own config file, of which
+    /// there is one.
+    MasterPasswordStillStored,
 }
 
 impl Problem {
@@ -52,6 +66,7 @@ impl Problem {
             Problem::MasterHostKeyChanged { host, port } => {
                 format!("hostkey:{}:{}", host, port)
             }
+            Problem::MasterPasswordStillStored => "masterpass".to_string(),
         }
     }
 
@@ -62,6 +77,7 @@ impl Problem {
     pub fn title(&self) -> String {
         match self {
             Problem::MasterHostKeyChanged { .. } => "Master host key changed".to_string(),
+            Problem::MasterPasswordStillStored => "Master password still stored".to_string(),
         }
     }
 
@@ -91,6 +107,23 @@ impl Problem {
                 "Only clear it if you know why the".to_string(),
                 "key changed.".to_string(),
             ],
+            Problem::MasterPasswordStillStored => vec![
+                "This slave logs in to its master".to_string(),
+                "with its key, so the master's".to_string(),
+                "password is not needed here any".to_string(),
+                "more -- but a copy is still stored".to_string(),
+                "in egateway.conf.".to_string(),
+                String::new(),
+                "That file is 0600, but the value".to_string(),
+                "is the master's full login: it".to_string(),
+                "opens telnet, SSH and the web UI".to_string(),
+                "on the master, not just the relay.".to_string(),
+                String::new(),
+                "Erasing it is safe while the key".to_string(),
+                "works. If the key is ever revoked,".to_string(),
+                "this slave will ask for the".to_string(),
+                "password again.".to_string(),
+            ],
         }
     }
 
@@ -99,6 +132,9 @@ impl Problem {
         match self {
             Problem::MasterHostKeyChanged { .. } => {
                 "Forget the old key and pin the new one".to_string()
+            }
+            Problem::MasterPasswordStillStored => {
+                "Erase the stored master password".to_string()
             }
         }
     }
@@ -125,6 +161,28 @@ impl Problem {
                     )),
                     Err(e) => Err(format!("Could not update gateway_hosts: {}", e)),
                 }
+            }
+            Problem::MasterPasswordStillStored => {
+                // **Checked again here, not merely at report time.** The entry
+                // is raised when the key is working, but an operator may press
+                // this minutes later -- and by then a revoked key would have put
+                // this slave back on the password being erased. Refusing is the
+                // difference between a tidy config file and a headless machine
+                // with no way in.
+                if !crate::relay::relay_authenticated_by_key() {
+                    return Err(
+                        "This slave is not logging in with its key at the moment, so the                          password is the only way it can reach its master. Erasing it now                          would leave it with no credential at all."
+                            .to_string(),
+                    );
+                }
+                if crate::config::get_config().slave_master_password.is_empty() {
+                    return Ok("The password was already gone.".to_string());
+                }
+                crate::config::update_config_values(&[("slave_master_password", "")]);
+                Ok(format!(
+                    "Removed the master's password from {}. This slave logs in with its                      key, which never leaves this machine.",
+                    crate::config::CONFIG_FILE
+                ))
             }
         }
     }
@@ -262,7 +320,7 @@ mod tests {
     /// problem added later is measured too.
     #[test]
     fn test_every_problem_fits_a_narrow_screen() {
-        for p in [key_problem()] {
+        for p in [key_problem(), Problem::MasterPasswordStillStored] {
             assert!(
                 p.title().chars().count() <= 36,
                 "title {:?} is {} columns",
@@ -280,5 +338,39 @@ mod tests {
             // its own key) so it gets the 80-column budget.
             assert!(p.action().chars().count() <= 60, "action {:?} is too long", p.action());
         }
+    }
+
+    /// **The remedy must refuse when the key is not the thing getting in.**
+    /// The entry is raised while a key login is working, but a button is
+    /// pressed by a human minutes later, and a key revoked in between would
+    /// make erasing the password the act that strands a headless slave.
+    #[test]
+    fn test_erasing_the_password_is_refused_without_a_working_key() {
+        let _lock = crate::relay::key_auth_test_lock();
+        crate::relay::note_relay_key_auth(false);
+        let err = Problem::MasterPasswordStillStored
+            .apply()
+            .expect_err("no key in use, so the password is the only way in");
+        assert!(
+            err.contains("only way"),
+            "the refusal must say why, not just decline: {err}"
+        );
+        crate::relay::note_relay_key_auth(false);
+    }
+
+    /// The explanation has to name what is actually at stake -- that the stored
+    /// value is the master's whole login, not a relay-only secret -- and say
+    /// that erasing it is reversible by retyping.
+    #[test]
+    fn test_the_stored_password_explanation_names_the_stake() {
+        let text = Problem::MasterPasswordStillStored.explain().join(" ");
+        assert!(text.contains("egateway.conf"), "name the file: {text}");
+        assert!(text.contains("full login"), "name the severity: {text}");
+        assert!(text.contains("revoked"), "say what happens if the key goes: {text}");
+        assert!(
+            Problem::MasterPasswordStillStored.action().starts_with("Erase"),
+            "the action is imperative: {}",
+            Problem::MasterPasswordStillStored.action()
+        );
     }
 }

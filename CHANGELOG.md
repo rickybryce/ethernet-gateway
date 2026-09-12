@@ -61,6 +61,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   took the password, retried within seconds, enrolled its key and registered --
   with the config file still empty throughout.
 
+- **The Resolve Errors screen offers to retire a master password the slave no
+  longer needs.**  The automatic wipe runs once per process, so a password
+  saved back into `egateway.conf` after it has fired -- by a hand edit, or by
+  the Pass box on any of the three editors -- stays on disk indefinitely while
+  the key does all the work.  The entry appears only once a key login has
+  actually succeeded, and the remedy re-checks that at the moment the button is
+  pressed: erasing the password on a slave whose key has since been revoked
+  would leave a headless machine with no credential at all, so it is refused
+  with the reason rather than obeyed.  The other ways a password can linger --
+  a master too old to enrol, or one with relays switched off -- have no remedy
+  on *this* machine, so by the registry's own rule they stay in the log rather
+  than becoming an entry nobody can clear.
+
 ### Changed
 
 - **Every telnet session is asked which terminal it is**, even one that
