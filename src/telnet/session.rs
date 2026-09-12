@@ -155,6 +155,13 @@ impl TelnetSession {
     /// may have been made by a modem on the machine's behalf, and a Commodore
     /// so classified gets menus it cannot render.
     pub(crate) fn note_announced_terminal(&mut self, name: &str) {
+        // **Once the question is settled it stays settled.**  The flag means
+        // "we have an answer", not "an announcement gave us one": a `SB TTYPE
+        // IS` can arrive at any time, including the `drain_input()` a few lines
+        // after "Terminal detected", and without this a C64 that had just
+        // pressed 0x14 was silently turned back into an ANSI terminal by its
+        // modem's VT100 claim -- the exact defect the prompt exists to prevent,
+        // reached by a later road.
         if self.ttype_matched {
             return;
         }
@@ -234,7 +241,6 @@ impl TelnetSession {
         // snapshot taken here would still say "nothing announced", and the
         // client that did announce would be dropped at the timeout: the exact
         // regression this fallback exists to prevent.
-        let detect_wait = if self.ttype_matched { ANNOUNCED_WAIT } else { DETECT_WAIT };
         let detect_method = 'detect: {
             self.send_raw(b"\r\n").await?;
             self.send_raw(DETECT_PROMPT.as_bytes()).await?;
@@ -262,6 +268,11 @@ impl TelnetSession {
             let mut byte;
             let mut attempt = 0;
             loop {
+                // Read per attempt, not once before the loop: the name can
+                // land while we are waiting, and a client that announced one
+                // should not then be held for the full minute.
+                let detect_wait =
+                    if self.ttype_matched { ANNOUNCED_WAIT } else { DETECT_WAIT };
                 let waited = tokio::time::timeout(detect_wait, self.read_byte_filtered()).await;
                 // An idle timeout from *inside* the read is the same event as
                 // our own expiring, and must take the same road: with
@@ -315,10 +326,12 @@ impl TelnetSession {
             // any-byte rule that byte becomes the erase key: a script sending
             // `f` for File Transfer would delete a character with `f` for the
             // rest of the session.  So with a name in hand only the three real
-            // backspace bytes answer the question, and anything else is pushed
-            // back to be read as what it was -- which leaves the bytes consumed
-            // before the colour prompt exactly as they were when this prompt
-            // did not exist for such a client.
+            // backspace bytes answer the question.  Anything else is pushed
+            // back rather than acted on -- though note the `drain_input()`
+            // below consumes it, exactly as it consumed such a byte before
+            // this prompt existed for an announced client.  What the pushback
+            // buys is therefore not delivery but *intent*: the byte is never
+            // treated as this session's erase key.
             //
             // A session with NO announcement keeps the any-byte rule, and must:
             // it is the rule the exotic machines need, an Apple I back arrow
@@ -353,6 +366,10 @@ impl TelnetSession {
                 if can_be_erase_char(byte) { "" } else { " (space: not used as erase)" }
             )
         };
+        // The answer is now fixed, however it was reached.  See
+        // `note_announced_terminal`: a TTYPE landing after this point must not
+        // overwrite what the machine itself told us.
+        self.ttype_matched = true;
 
         let type_name = match self.terminal_type {
             TerminalType::Petscii => "PETSCII (Commodore 64)",

@@ -539,6 +539,127 @@ impl russh::client::Handler for SlaveRelayHandler {
 /// proxy's `GATEWAY_CONNECT_TIMEOUT`).
 const RELAY_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// Enrolment and the wipe each happen **once per process**, not once per
+/// connection: a slave opens several relay connections (port A, port B, the
+/// CP/M endpoint) and they would otherwise each offer the same key and each
+/// rewrite the same config file.
+static KEY_OFFERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// How long to wait for the master's answer to a key offer.
+///
+/// Short on purpose: this runs inside the relay connect's own budget, and a
+/// master that does not answer is one the slave should stop waiting on and go
+/// register with, password in hand.
+const ENROL_REPLY_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+static PASSWORD_FORGOTTEN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Hand the master this slave's public key, so the next connection can use it.
+///
+/// Deliberately fire-and-forget.  Whether it worked is answered by the *next*
+/// connection authenticating with the key -- which is also the only evidence
+/// good enough to act on (see `forget_master_password_once`) -- so nothing here
+/// waits on, or trusts, a reply.  A master too old to know the command answers
+/// `channel_failure`, which is exactly the "not supported" signal we want and
+/// needs no protocol version bump.
+async fn offer_key_for_enrolment_once(session: &russh::client::Handle<SlaveRelayHandler>) {
+    use std::sync::atomic::Ordering;
+    // **Latched only on a definite answer.**  Setting it here, before the
+    // attempt, meant one bad moment -- a master briefly not accepting relays, a
+    // channel that would not open, a lost race with another slave -- retired
+    // enrolment for the life of the process, on a headless daemon, silently.
+    if KEY_OFFERED.load(Ordering::SeqCst) {
+        return;
+    }
+    let line = match crate::ssh::client_public_key_line() {
+        Ok(l) => l,
+        Err(e) => {
+            glog!("Relay: cannot offer a key for enrolment: {}", e);
+            return;
+        }
+    };
+    // The label is this machine's name, for the comment the master writes
+    // beside the key.  Advisory only -- the master sanitises it, and identity
+    // is the key itself.
+    let label = hostname_label();
+    let channel = match session.channel_open_session().await {
+        Ok(c) => c,
+        Err(e) => {
+            glog!("Relay: could not open a channel to offer the key ({}); will retry", e);
+            return;
+        }
+    };
+    let cmd = format!("enroll-key {} {}", line.trim(), label);
+    let mut channel = channel;
+    if let Err(e) = channel.exec(true, cmd.as_bytes()).await {
+        glog!("Relay: could not send the key for enrolment ({}); will retry", e);
+        return;
+    }
+    // **`exec` only queues the request**, so its `Ok` says nothing about what
+    // the master decided -- reporting success there told an operator the key
+    // was enrolled while the master was refusing it.  The answer is a channel
+    // Success or Failure, and it is worth waiting briefly for: it is the
+    // difference between "keep the password because this master is old" and
+    // "keep the password because something went wrong", and between retrying
+    // and not.
+    let answer = tokio::time::timeout(ENROL_REPLY_WAIT, async {
+        while let Some(msg) = channel.wait().await {
+            match msg {
+                russh::ChannelMsg::Success => return Some(true),
+                russh::ChannelMsg::Failure => return Some(false),
+                _ => continue,
+            }
+        }
+        None
+    })
+    .await;
+    match answer {
+        Ok(Some(true)) => {
+            KEY_OFFERED.store(true, Ordering::SeqCst);
+            glog!("Relay: the master accepted this slave's key for enrolment ({})", label);
+        }
+        Ok(Some(false)) => {
+            // A master that does not know the command, is not a master, or has
+            // relays off answers exactly this.  Not retried: the answer will be
+            // the same next time, and the password keeps working.
+            KEY_OFFERED.store(true, Ordering::SeqCst);
+            glog!(
+                "Relay: this master did not accept key enrolment; keeping the stored password"
+            );
+        }
+        _ => glog!("Relay: no answer to the key offer; will retry on the next connection"),
+    }
+}
+
+/// Remove `slave_master_password` from this slave's config, once.
+fn forget_master_password_once() {
+    use std::sync::atomic::Ordering;
+    if PASSWORD_FORGOTTEN.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if crate::config::get_config().slave_master_password.is_empty() {
+        return;
+    }
+    crate::config::update_config_values(&[("slave_master_password", "")]);
+    glog!(
+        "Relay: this slave now logs in with its key, so the master's password has been \
+         removed from {} — it is no longer stored anywhere on this machine.",
+        crate::config::CONFIG_FILE
+    );
+}
+
+/// This machine's name, reduced to something worth writing in a file.
+fn hostname_label() -> String {
+    std::fs::read_to_string("/etc/hostname")
+        .ok()
+        .or_else(|| std::env::var("COMPUTERNAME").ok())
+        .unwrap_or_default()
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '.')
+        .take(32)
+        .collect()
+}
+
 /// Relay wire-protocol version.  Bump on any incompatible change to the
 /// master↔slave relay framing so a version-skewed pair fails cleanly with a
 /// clear message instead of desyncing (§9).
@@ -956,6 +1077,7 @@ async fn connect_master_relay_inner(
     // nothing is unchanged and an upgrade needs no coordination.  A master too
     // old to know about keys simply refuses the method and the password runs.
     let mut authed = false;
+    let mut by_key = false;
     match crate::ssh::load_or_generate_client_key() {
         Ok(key) => {
             let hash_alg = session.best_supported_rsa_hash().await.ok().flatten().flatten();
@@ -968,6 +1090,7 @@ async fn connect_master_relay_inner(
             {
                 Ok(russh::client::AuthResult::Success) => {
                     authed = true;
+                    by_key = true;
                     glog!("Relay: authenticated to master {}:{} by public key", host, port);
                 }
                 // Not enrolled (or this master predates key auth).  That is an
@@ -1013,6 +1136,22 @@ async fn connect_master_relay_inner(
             // A transport error mid-auth is network, not a credential rejection.
             Err(e) => return Err(RelayConnectError::Network(format!("auth error: {}", e))),
         }
+    }
+
+    if by_key {
+        // **The key works, so the password is no longer needed -- and only now
+        // is that safe to act on.**  Wiping it on the strength of the master
+        // saying "stored" would strand this slave if the enrolment were lost
+        // between then and the next connect; waiting for a key login to
+        // actually succeed proves the whole path before discarding the fallback.
+        forget_master_password_once();
+    } else {
+        // Authenticated by password: offer the key, so the next connection can
+        // use it and this one's credential can go.  Best-effort and fire-and-
+        // forget -- whether it worked is answered by the next connect, not by a
+        // reply, and a master too old to know the command simply refuses the
+        // channel.
+        offer_key_for_enrolment_once(&session).await;
     }
 
     let channel = session

@@ -667,7 +667,19 @@
                     slave.</strong> Public-key login <em>into</em> the gateway's SSH server
                     is offered only to a <strong>slave</strong> whose key has been enrolled
                     in <code>relay_authorized_keys</code>; every other client authenticates
-                    with the unified password. That exists so a slave need not store the
+                    with the unified password. Such a key authorizes the relay
+                    <code>exec</code> a slave needs and <strong>not</strong> an interactive
+                    session &mdash; a shell request on a key-authenticated connection is
+                    refused, so the menu stays behind the password, which is also what an
+                    operator who blanked that password was asking for. A slave enrols itself: on a connection it
+                    authenticated with the password it sends <code>enroll-key</code> on its
+                    own channel, and the master appends the key with the slave's hostname
+                    and address as a comment. That command is refused unless the connection
+                    has already authenticated, is idempotent, is bounded to 64 keys, and
+                    re-renders the key from the parsed form so nothing from the wire is
+                    echoed into the file &mdash; the comment label is stripped to
+                    alphanumerics for the same reason, since a newline in it would let a
+                    peer append authorizations of its own. That exists so a slave need not store the
                     master's login in cleartext &mdash; <code>slave_master_password</code>
                     is <em>presented</em> rather than checked, so it can never be a hash,
                     and a key removes the secret instead of disguising it. A rejected key

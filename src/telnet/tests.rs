@@ -6576,6 +6576,41 @@ async fn test_a_silent_announced_client_falls_back_instead_of_being_dropped() {
     assert_eq!(session.erase_char, session::DEFAULT_ERASE_CHAR);
 }
 
+/// **A terminal announced AFTER the keypress does not overrule it.**
+///
+/// `SB TTYPE IS` can arrive at any moment, including the input drain that runs
+/// a few lines after "Terminal detected" -- so without a latch a C64 that had
+/// just pressed 0x14 was turned back into an ANSI terminal by its modem's
+/// VT100 claim, which is the very defect the prompt exists to prevent.
+#[tokio::test]
+async fn test_a_late_announcement_cannot_overrule_the_keypress() {
+    let (session, peer) = make_test_session_with_peer(TerminalType::Ascii);
+    let (mut prd, mut pwr) = tokio::io::split(peer);
+    let task = tokio::spawn(async move {
+        let mut session = session;
+        let _ = session.detect_terminal_type().await;
+        session
+    });
+
+    let asked = read_until(&mut prd, "detect terminal").await;
+    assert!(asked.contains("detect terminal"), "no prompt: {asked:?}");
+    use tokio::io::AsyncWriteExt;
+    pwr.write_all(&[0x14]).await.unwrap();          // the C64 answers
+    let seen = read_until(&mut prd, "color?").await;
+    assert!(seen.to_lowercase().contains("petscii"), "{seen:?}");
+    pwr.write_all(b"n").await.unwrap();
+
+    let mut session = task.await.unwrap();
+    assert_eq!(session.terminal_type, TerminalType::Petscii);
+    // The modem speaks up late, exactly as tcpser's negotiation does.
+    session.note_announced_terminal("VT100");
+    assert_eq!(
+        session.terminal_type,
+        TerminalType::Petscii,
+        "a late TTYPE must not overrule the machine's own answer"
+    );
+}
+
 /// **A client that named itself and then typed ahead keeps its name, and keeps
 /// its byte.**
 ///

@@ -1049,8 +1049,13 @@ pub(crate) struct TelnetSession {
     neg_sent_do: Box<[bool; 256]>,
     neg_sent_wont: Box<[bool; 256]>,
     neg_sent_dont: Box<[bool; 256]>,
-    // TTYPE result — set once via SB TTYPE IS. Prevents re-requesting
-    // and lets detect_terminal_type skip the BACKSPACE prompt.
+    // **"The terminal question is settled"**, whichever way it was settled:
+    // by an `SB TTYPE IS` we recognised, or by the BACKSPACE keypress.  It
+    // prevents re-requesting the name, it is what `detect_terminal_type` falls
+    // back to when nobody presses a key, and -- once detection has concluded --
+    // it is what stops a LATE announcement overwriting the answer the machine
+    // itself gave.  On telnet it no longer skips the prompt: that is the whole
+    // point of asking a Commodore whose modem calls itself a VT100.
     ttype_matched: bool,
     // Raw TERMINAL-TYPE name the client announced via SB TTYPE IS,
     // recorded even when it isn't one we recognize, so the gateway-debug

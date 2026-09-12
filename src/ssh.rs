@@ -40,6 +40,31 @@ pub(crate) const GATEWAY_CLIENT_KEY_FILE: &str = "ethernetgateway-data/ethernet_
 pub(crate) const RELAY_AUTHORIZED_KEYS_FILE: &str =
     "ethernetgateway-data/relay_authorized_keys";
 
+/// The authorized-keys path, redirected under test.
+///
+/// The same `cfg(test)` redirect `config_file_path` uses, and for the same
+/// reason: the constant is a relative path, so a test would otherwise write
+/// into the real data directory -- and chdir'ing instead is process-global,
+/// which races every other test in the binary.
+#[cfg(not(test))]
+fn relay_authorized_keys_path() -> String {
+    RELAY_AUTHORIZED_KEYS_FILE.to_string()
+}
+
+#[cfg(test)]
+fn relay_authorized_keys_path() -> String {
+    use std::sync::OnceLock;
+    static TEST_KEYS_PATH: OnceLock<String> = OnceLock::new();
+    TEST_KEYS_PATH
+        .get_or_init(|| {
+            std::env::temp_dir()
+                .join(format!("egateway_relay_keys_test_{}", std::process::id()))
+                .to_string_lossy()
+                .into_owned()
+        })
+        .clone()
+}
+
 // ─── Public API ────────────────────────────────────────────
 
 /// Start the SSH server if enabled in config.
@@ -286,7 +311,8 @@ fn load_or_generate_host_key() -> Result<russh::keys::PrivateKey, String> {
 /// every slave that was working, and a silently dropped line is a credential
 /// that stops working for no stated reason.
 pub(crate) fn load_relay_authorized_keys() -> Vec<russh::keys::PublicKey> {
-    let Ok(text) = std::fs::read_to_string(RELAY_AUTHORIZED_KEYS_FILE) else {
+    let path = relay_authorized_keys_path();
+    let Ok(text) = std::fs::read_to_string(&path) else {
         return Vec::new();
     };
     let mut keys = Vec::new();
@@ -299,13 +325,112 @@ pub(crate) fn load_relay_authorized_keys() -> Vec<russh::keys::PublicKey> {
             Ok(k) => keys.push(k),
             Err(e) => glog!(
                 "SSH: {} line {} is not a public key ({}); skipping it",
-                RELAY_AUTHORIZED_KEYS_FILE,
+                path,
                 n + 1,
                 e
             ),
         }
     }
     keys
+}
+
+/// How many slave keys one master will hold.
+///
+/// A bound rather than a belief: enrolment is a remote peer causing a write, so
+/// the file must not be able to grow without end -- a slave that regenerated
+/// its key every boot would otherwise append for ever.  Sixty-four is far past
+/// any real deployment and small enough to read.
+pub(crate) const MAX_AUTHORIZED_KEYS: usize = 64;
+
+/// Record a slave's public key so it can stop storing the master's password.
+///
+/// Called only for a peer that has **already authenticated**, so this grants no
+/// access the caller did not just demonstrate it has -- what it changes is that
+/// the access survives a password change, which is why the entry is written to
+/// be identifiable and removable by hand.
+///
+/// Returns the message to log, or an error to refuse with.
+/// Enrolment is a read-modify-write of one file, so it is serialised.
+///
+/// Two slaves reconnecting at the same moment -- the normal case when a master
+/// comes back up -- would otherwise each read the pre-existing file and each
+/// write their own version, and the second rename would discard the first
+/// slave's key while both were told they had been enrolled.  The staged rename
+/// makes the *write* atomic; it does nothing for the read that preceded it.
+static ENROL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub(crate) fn enroll_relay_key(
+    line: &str,
+    peer: Option<std::net::IpAddr>,
+    label: &str,
+) -> Result<String, String> {
+    let key = russh::keys::PublicKey::from_openssh(line.trim())
+        .map_err(|e| format!("not a usable public key: {}", e))?;
+
+    let _serialised = ENROL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let existing = load_relay_authorized_keys();
+    if key_is_authorized(&existing, &key) {
+        // Idempotent: a slave re-sending the key it already enrolled is the
+        // normal case on every restart, and must not append a second line.
+        return Ok(format!(
+            "already enrolled ({})",
+            key.fingerprint(Default::default())
+        ));
+    }
+    if existing.len() >= MAX_AUTHORIZED_KEYS {
+        return Err(format!(
+            "{} already holds {} keys; remove one before enrolling another",
+            relay_authorized_keys_path(),
+            existing.len()
+        ));
+    }
+
+    // **The label is remote input written into a file we later parse**, so a
+    // newline in it would let a peer append authorized keys of its own
+    // choosing.  Reduced to a short run of harmless characters rather than
+    // escaped, because it is a convenience for a human reading the file and
+    // nothing depends on its exact content.
+    let safe: String = label
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '.' || *c == '_')
+        .take(32)
+        .collect();
+    let who = if safe.is_empty() { "slave".to_string() } else { safe };
+    let from = peer.map(|i| i.to_string()).unwrap_or_else(|| "unknown".into());
+    let path = relay_authorized_keys_path();
+    let mut text = std::fs::read_to_string(&path).unwrap_or_default();
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    // The key is re-rendered from the PARSED key, never echoed from the wire:
+    // whatever arrives, what lands in the file is a key this gateway itself
+    // formatted.
+    let rendered = key
+        .to_openssh()
+        .map_err(|e| format!("cannot render the key: {}", e))?;
+    // No date: this crate carries no wall-clock formatter and one is not worth
+    // a dependency for a comment.  The file's mtime says when it last changed
+    // and the fingerprint says which device a line is, which is what an
+    // operator removing one actually needs.
+    text.push_str(&format!("{} {} {}\n", rendered.trim(), who, from));
+
+    crate::config::ensure_parent_dir(&path);
+    let tmp = format!("{}.new", path);
+    std::fs::write(&tmp, &text).map_err(|e| format!("cannot write {}: {}", tmp, e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    std::fs::rename(&tmp, &path)
+        .map_err(|e| format!("cannot replace {}: {}", path, e))?;
+
+    Ok(format!(
+        "enrolled {} for {} from {}",
+        key.fingerprint(Default::default()),
+        who,
+        from
+    ))
 }
 
 /// This gateway's outbound public key, as an OpenSSH line.
@@ -501,6 +626,7 @@ impl russh::server::Server for SshServer {
             // slave then takes effect on its next reconnect rather than on a
             // restart of the master.
             authorized_keys: load_relay_authorized_keys(),
+            key_authed: false,
             counted: false,
         }
     }
@@ -558,6 +684,15 @@ struct SshHandler {
     /// off the auth path, and it means enrolling a slave takes effect on its
     /// next reconnect rather than on a restart of the master.
     authorized_keys: Vec<russh::keys::PublicKey>,
+    /// This connection authenticated with an enrolled **relay** key.
+    ///
+    /// It is a narrower credential than the password, and must stay narrower:
+    /// the file is called `relay_authorized_keys`, the manual calls it a relay
+    /// key, and a slave only ever needs `exec`.  Without this flag the same key
+    /// opened a full interactive menu -- configuration, file transfer, the
+    /// gateways -- and did so even where the operator had blanked the SSH
+    /// password specifically to shut that door.
+    key_authed: bool,
     counted: bool,
 }
 
@@ -897,6 +1032,7 @@ impl russh::server::Handler for SshHandler {
         {
             return Ok(russh::server::Auth::reject());
         }
+        self.key_authed = true;
         if let Some(ip) = self.peer_addr {
             telnet::clear_lockout(&self.lockouts, ip);
             glog!("SSH: {} authenticated by public key ({})", ip, public_key.fingerprint(Default::default()));
@@ -979,6 +1115,18 @@ impl russh::server::Handler for SshHandler {
         channel: russh::ChannelId,
         session: &mut russh::server::Session,
     ) -> Result<(), Self::Error> {
+        // **A relay key is not a login.**  It authorizes the `exec` a slave
+        // needs and nothing else; the interactive menu stays behind the
+        // password, which is also what an operator who blanked that password
+        // was asking for.
+        if self.key_authed {
+            glog!(
+                "SSH: shell refused for {:?} — a relay key authorizes relay exec, not a session",
+                self.peer_addr
+            );
+            session.channel_failure(channel)?;
+            return Ok(());
+        }
         // Only allow one shell per connection.
         if self.duplex_writer.is_some() {
             session.channel_failure(channel)?;
@@ -1079,6 +1227,67 @@ impl russh::server::Handler for SshHandler {
 
         // Grammar (§3 Model B): `serial-relay <port> menu`
         //                    or `serial-relay <port> dial <host>:<port>`.
+        // **Key enrolment.**  A slave that just authenticated asks the master to
+        // remember its public key, so it can stop storing the master's password
+        // in cleartext.  Its own channel and its own command, which is what
+        // makes this need no protocol version bump: a master too old to know
+        // the word answers `channel_failure`, the slave reads that as "not
+        // supported" and carries on with its password exactly as before.
+        //
+        // Refused unless this connection authenticated -- `self.counted` is set
+        // only by a successful auth -- because the whole safety argument is
+        // that enrolment grants nothing the caller has not already shown it has.
+        if let Some(rest) = command.strip_prefix("enroll-key ") {
+            if !self.counted {
+                glog!("SSH: enroll-key from {:?} refused (not authenticated)", self.peer_addr);
+                session.channel_failure(channel)?;
+                return Ok(());
+            }
+            // **Only a master that accepts relays enrols anybody** -- the same
+            // gate the relay commands use, and it belongs here rather than
+            // below them.  Without it a *standalone* gateway with SSH switched
+            // on would let any authenticated user record a key and thereafter
+            // log in without the password, surviving a password change, on a
+            // machine whose operator never asked for relaying at all.
+            {
+                let cfg = config::get_config();
+                if cfg.gateway_role != "master" || !cfg.master_accept_relays {
+                    glog!(
+                        "SSH: enroll-key from {:?} refused (role={}, accept_relays={})",
+                        self.peer_addr,
+                        cfg.gateway_role,
+                        cfg.master_accept_relays
+                    );
+                    drop(cfg);
+                    session.channel_failure(channel)?;
+                    return Ok(());
+                }
+            }
+            // `<type> <base64> [label]` -- the label is advisory and the master
+            // writes its own comment; see `enroll_relay_key`.
+            let mut it = rest.splitn(3, ' ');
+            let (t, b64, label) = (
+                it.next().unwrap_or_default(),
+                it.next().unwrap_or_default(),
+                it.next().unwrap_or_default(),
+            );
+            match enroll_relay_key(&format!("{} {}", t, b64), self.peer_addr, label)
+            {
+                Ok(msg) => {
+                    glog!("SSH: relay key from {:?}: {}", self.peer_addr, msg);
+                    // Reload for THIS connection too, so a slave that enrols and
+                    // reconnects immediately is not told "no" by a stale list.
+                    self.authorized_keys = load_relay_authorized_keys();
+                    session.channel_success(channel)?;
+                }
+                Err(e) => {
+                    glog!("SSH: enroll-key from {:?} refused: {}", self.peer_addr, e);
+                    session.channel_failure(channel)?;
+                }
+            }
+            return Ok(());
+        }
+
         let Some(parsed) = crate::relay::parse_relay_command(command) else {
             glog!(
                 "SSH: refused exec {:?} from {:?} (only serial-relay is allowed)",
@@ -1609,6 +1818,7 @@ mod tests {
             session_writers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             lockouts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             authorized_keys: Vec::new(),
+            key_authed: false,
             counted: false,
         };
 
@@ -1653,6 +1863,104 @@ mod tests {
 
         drop(session);
         server.abort();
+    }
+
+    /// Serialise the enrolment tests and give each a clean file.
+    ///
+    /// They share one redirected path (per process, like the config's), so
+    /// without this they would race each other's writes and the bound test
+    /// would count another test's keys.
+    fn keys_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = std::fs::remove_file(relay_authorized_keys_path());
+        g
+    }
+
+    /// Enrolment writes a key that can then authenticate, and is idempotent.
+    #[test]
+    fn test_enrolling_a_key_makes_it_authorized_once() {
+        let _lock = keys_test_lock();
+        let key = russh::keys::PrivateKey::random(
+            &mut rand::rng(),
+            russh::keys::Algorithm::Ed25519,
+        )
+        .unwrap();
+        let line = key.public_key().to_openssh().unwrap();
+
+        assert!(!key_is_authorized(&load_relay_authorized_keys(), key.public_key()));
+        let msg = enroll_relay_key(&line, Some("10.0.0.5".parse().unwrap()), "slave-a").unwrap();
+        assert!(msg.contains("enrolled"), "{msg}");
+        assert!(key_is_authorized(&load_relay_authorized_keys(), key.public_key()));
+
+        // Re-enrolling the same key is the normal case on every restart and
+        // must not append a second line.
+        let again = enroll_relay_key(&line, Some("10.0.0.5".parse().unwrap()), "slave-a").unwrap();
+        assert!(again.contains("already enrolled"), "{again}");
+        let text = std::fs::read_to_string(relay_authorized_keys_path()).unwrap();
+        assert_eq!(text.lines().filter(|l| l.starts_with("ssh-")).count(), 1);
+        // The comment identifies the device for whoever has to remove it.
+        assert!(text.contains("slave-a"), "{text}");
+        assert!(text.contains("10.0.0.5"), "{text}");
+    }
+
+    /// **A label cannot inject lines.**  It is remote input written into a file
+    /// this gateway later parses as authorizations, so a newline in it would
+    /// let a peer enrol keys of its own choosing.
+    #[test]
+    fn test_a_label_cannot_add_authorized_keys() {
+        let _lock = keys_test_lock();
+        let mine = russh::keys::PrivateKey::random(
+            &mut rand::rng(),
+            russh::keys::Algorithm::Ed25519,
+        )
+        .unwrap();
+        let smuggled = russh::keys::PrivateKey::random(
+            &mut rand::rng(),
+            russh::keys::Algorithm::Ed25519,
+        )
+        .unwrap();
+        let evil = format!("ok\n{}\n", smuggled.public_key().to_openssh().unwrap());
+
+        enroll_relay_key(&mine.public_key().to_openssh().unwrap(), None, &evil).unwrap();
+        let keys = load_relay_authorized_keys();
+        assert!(key_is_authorized(&keys, mine.public_key()));
+        assert!(
+            !key_is_authorized(&keys, smuggled.public_key()),
+            "a key smuggled through the LABEL must not become authorized"
+        );
+        assert_eq!(keys.len(), 1);
+    }
+
+    /// The file cannot grow without end.
+    #[test]
+    fn test_enrolment_is_bounded() {
+        let _lock = keys_test_lock();
+        for _ in 0..MAX_AUTHORIZED_KEYS {
+            let k = russh::keys::PrivateKey::random(
+                &mut rand::rng(),
+                russh::keys::Algorithm::Ed25519,
+            )
+            .unwrap();
+            enroll_relay_key(&k.public_key().to_openssh().unwrap(), None, "x").unwrap();
+        }
+        let one_more = russh::keys::PrivateKey::random(
+            &mut rand::rng(),
+            russh::keys::Algorithm::Ed25519,
+        )
+        .unwrap();
+        let e = enroll_relay_key(&one_more.public_key().to_openssh().unwrap(), None, "x")
+            .unwrap_err();
+        assert!(e.contains("remove one"), "{e}");
+    }
+
+    /// Rubbish on the wire is refused, not written.
+    #[test]
+    fn test_enrolment_refuses_what_is_not_a_key() {
+        let _lock = keys_test_lock();
+        assert!(enroll_relay_key("ssh-ed25519 not-base64", None, "x").is_err());
+        assert!(enroll_relay_key("", None, "x").is_err());
+        assert!(load_relay_authorized_keys().is_empty());
     }
 
     /// A key nobody enrolled is refused, and costs nothing.
@@ -1814,6 +2122,7 @@ mod tests {
             session_writers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             lockouts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             authorized_keys,
+            key_authed: false,
             counted: false,
         }
     }
@@ -1837,6 +2146,7 @@ mod tests {
             session_writers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             lockouts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             authorized_keys: Vec::new(),
+            key_authed: false,
             counted: false,
         };
 
@@ -1919,6 +2229,7 @@ mod tests {
             session_writers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             lockouts: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             authorized_keys: Vec::new(),
+            key_authed: false,
             counted: false,
         };
 
@@ -2210,6 +2521,7 @@ mod tests {
             session_writers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             lockouts: lockouts.clone(),
             authorized_keys: Vec::new(),
+            key_authed: false,
             counted: false,
         };
         // Correct credentials, but locked out → reject, no slot claimed.
@@ -2244,6 +2556,7 @@ mod tests {
             session_writers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             lockouts: lockouts.clone(),
             authorized_keys: Vec::new(),
+            key_authed: false,
             counted: false,
         };
         for _ in 0..telnet::AUTH_MAX_ATTEMPTS {
@@ -2293,6 +2606,7 @@ mod tests {
             session_writers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             lockouts: lockouts.clone(),
             authorized_keys: Vec::new(),
+            key_authed: false,
             counted: false,
         };
         assert!(matches!(

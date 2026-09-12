@@ -325,7 +325,9 @@ fn main() {
         if cfg.gateway_role == "slave" {
             match ssh::client_public_key_line() {
                 Ok(line) => glog!(
-                    "Relay: this slave's public key — add it to {} on the master:\n{}",
+                    "Relay: this slave's public key. The master records it by itself on \
+                     the first login and the stored password is then erased; paste it \
+                     into {} on the master only to authorize this slave in advance.\n{}",
                     ssh::RELAY_AUTHORIZED_KEYS_FILE,
                     line.trim()
                 ),

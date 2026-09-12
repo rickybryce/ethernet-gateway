@@ -17,17 +17,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removes the secret rather than disguising it (encrypting it would put the
   decrypting key on the same disk): the slave authenticates with the Ed25519 key
   it already generates for outbound SSH, whose private half never leaves the
-  machine.  Paste the line the slave logs at startup into
-  `relay_authorized_keys` on the master, clear `slave_master_password`, done.
-  Verified between two live gateways: key auth registers both ports, a password
-  with no key enrolled still works unchanged, and clearing the password before
-  enrolling the key reports exactly that, naming the file to fix it.
+  machine.  **The operator does nothing extra**: enter the master's password on the slave
+  exactly as before, and it is gone by the second connection.  The slave hands
+  the master its key over the connection the password just authenticated, and
+  erases the password only once a key login has actually SUCCEEDED -- never on
+  the strength of the master saying it stored something, which would strand a
+  slave if the enrolment were lost in between.  Enrolment rides on its own exec
+  channel, so no protocol version bump and no upgrading the two ends together:
+  a master that does not know the command refuses that one request and the
+  slave carries on with its password.  Pre-authorizing a slave by hand still
+  works -- paste the line it logs at startup into `relay_authorized_keys` and
+  leave the password empty, and the secret never exists on that machine.
+  Verified between two live gateways across six scenarios: password connect
+  enrols the key; the next connect authenticates by key and erases the password;
+  the steady state reconnects with an empty config; a revoked key leaves the
+  slave saying exactly what is wrong; retyping the password re-enrols and erases
+  it again; and a duplicate, a stranger's key and a malformed line in the
+  authorized-keys file change none of it (the bad line is named in the log and
+  skipped).
   **Nothing changes for an existing pair** -- the slave offers its key first and
   falls back to the password, and a master with no `relay_authorized_keys` file
   refuses key auth outright, so the two ends may be upgraded in either order.
   A rejected key deliberately does *not* count toward the per-IP lockout: a
   public key is not guessable, and counting it would ban the ordinary sequence
   of a slave offering a key, being refused, then logging in with its password.
+  An enrolled key is **narrower than the password**: it authorizes the relay
+  `exec` and not an interactive session, so it cannot reach the menu, the
+  configuration or file transfer -- including on a gateway whose SSH password
+  was blanked to shut that door.  Enrolment itself is refused unless the
+  gateway is a master with `master_accept_relays` on, so a standalone gateway
+  with SSH switched on cannot have keys pushed into it.
 
 ### Changed
 
