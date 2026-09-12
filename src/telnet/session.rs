@@ -8,7 +8,7 @@ use super::*;
 
 /// Map a TTYPE name reported by the client (via `IAC SB TTYPE IS ...`)
 /// to one of our TerminalType variants. Returns None for names we don't
-/// recognize so the caller falls back to the BACKSPACE-press detection.
+/// recognize, leaving the BACKSPACE press as the only evidence there is.
 /// Names arrive uppercase per RFC 1091, but we match case-insensitively
 /// to be tolerant of non-compliant clients.
 pub(crate) fn match_terminal_name(name: &str) -> Option<TerminalType> {
@@ -106,6 +106,17 @@ pub(crate) fn can_be_erase_char(byte: u8) -> bool {
 /// string changing.
 pub(crate) const DETECT_PROMPT: &str = "Press BACKSPACE to detect terminal: ";
 
+/// How long the BACKSPACE prompt waits for a key.
+///
+/// Two values, because the two situations are not the same question.  With
+/// nothing to fall back on the prompt is the only way to learn anything, so it
+/// waits out the session idle allowance.  With a terminal already announced it
+/// only needs long enough for a person to press a key -- a machine never will
+/// -- and the fallback lands on exactly the answer the announcement would have
+/// given, so a short wait cannot be worse than not asking at all.
+pub(crate) const DETECT_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+pub(crate) const ANNOUNCED_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// The re-ask when the answer was a space.  Same 40-column budget, which is why
 /// it is this terse — the first draft said "Space cannot be the erase key.
 /// Press BACKSPACE: " and was 48 columns, wrapping on exactly the terminal this
@@ -129,9 +140,15 @@ impl TelnetSession {
     /// One function rather than a second copy of the rule in `ssh.rs`, because
     /// the two transports carry one fact and should not come to disagree about
     /// what it means.  An unrecognised name is still recorded for the
-    /// gateway-debug diagnostic while `ttype_matched` stays false, so on the
-    /// telnet side a client calling itself something unheard-of is still asked
-    /// to press BACKSPACE — we skip the question only when we know the answer.
+    /// gateway-debug diagnostic while `ttype_matched` stays false.
+    ///
+    /// **What being "matched" buys differs by transport, and that is
+    /// deliberate.**  Over SSH it is the answer: `run()` skips detection
+    /// entirely, and the client's `TERM` came from the terminal itself.  Over
+    /// telnet it is only the *fallback* for a session that never presses a key
+    /// — see [`Self::detect_terminal_type`] — because there the announcement
+    /// may have been made by a modem on the machine's behalf, and a Commodore
+    /// so classified gets menus it cannot render.
     pub(crate) fn note_announced_terminal(&mut self, name: &str) {
         if self.ttype_matched {
             return;
@@ -179,16 +196,39 @@ impl TelnetSession {
             self.drain_input().await;
         }
 
-        // If TTYPE already identified the client, skip the manual prompt.
+        // **Ask, even when the client announced a terminal type.**  A TTYPE is
+        // a claim made by whatever speaks telnet, and on the paths this gateway
+        // exists for that is a modem rather than the machine behind it:
+        // measured 2026-09-11, tcpser announces `VT100` for a Commodore 64, so
+        // the C64 was classified ANSI and never asked.  It then got 80-column
+        // menus whose lowercase letters land in its graphics range and an
+        // `ESC[2J` it prints as `[2J` -- which reads as a broken gateway, not
+        // as a modem answering on its behalf.  The keypress is the machine's
+        // own evidence and it crosses the bridge intact (measured: the C64's
+        // 0x14 arrived through tcpser and was ignored, the question having been
+        // settled nine seconds earlier).
+        //
+        // The announcement is kept as the **fallback**, not as a short-circuit,
+        // so a session that is not a person -- a probe, a script -- is not
+        // dropped at a prompt it will never answer.  With something to fall
+        // back on the wait is short (`ANNOUNCED_WAIT`), and the fallback is
+        // exactly what the announcement would have decided anyway, so this can
+        // only be as good as the old behaviour or better.
+        //
+        // **SSH never reaches here** -- `run()` skips detection for it -- and
+        // must not: there the TERM comes from the client's own pty request,
+        // with no bridge in a position to answer for it.
+        //
         // `detect_method` records how the terminal type was decided, for
         // the gateway-debug terminal diagnostic emitted below.
-        let detect_method = if self.ttype_matched {
-            self.erase_char = match self.terminal_type {
-                TerminalType::Petscii => 0x14,
-                _ => DEFAULT_ERASE_CHAR,
-            };
-            format!("telnet TTYPE \"{}\"", self.ttype_raw.as_deref().unwrap_or("?"))
-        } else {
+        let announced = self.ttype_matched.then(|| {
+            (
+                self.terminal_type,
+                self.ttype_raw.clone().unwrap_or_else(|| "?".to_string()),
+            )
+        });
+        let detect_wait = if announced.is_some() { ANNOUNCED_WAIT } else { DETECT_WAIT };
+        let detect_method = 'detect: {
             self.send_raw(b"\r\n").await?;
             self.send_raw(DETECT_PROMPT.as_bytes()).await?;
             self.flush().await?;
@@ -215,10 +255,7 @@ impl TelnetSession {
             let mut byte;
             let mut attempt = 0;
             loop {
-                byte = match tokio::time::timeout(
-                    std::time::Duration::from_secs(60),
-                    self.read_byte_filtered(),
-                )
+                byte = match tokio::time::timeout(detect_wait, self.read_byte_filtered())
                 .await
                 {
                     Ok(result) => match result? {
@@ -226,6 +263,18 @@ impl TelnetSession {
                         None => return Ok(()),
                     },
                     Err(_) => {
+                        // Nobody pressed anything.  Believe the announcement if
+                        // there was one rather than dropping the session.
+                        if let Some((tt, name)) = announced.as_ref() {
+                            self.terminal_type = *tt;
+                            self.erase_char = match tt {
+                                TerminalType::Petscii => 0x14,
+                                _ => DEFAULT_ERASE_CHAR,
+                            };
+                            break 'detect format!(
+                                "telnet TTYPE \"{}\" (no key pressed)", name
+                            );
+                        }
                         self.send_raw(b"\r\n\r\n  Disconnected: idle timeout.\r\n\r\n")
                             .await?;
                         return Err(std::io::Error::new(

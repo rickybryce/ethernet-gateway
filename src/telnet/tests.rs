@@ -5927,15 +5927,19 @@ fn test_modem_apply_settings_row_count() {
 /// Commodore-side client was sent ANSI instead of PETSCII. Verified live:
 /// `TERM=c64` over SSH now reaches the menu in PETSCII.
 ///
-/// On the telnet side the same function decides whether the BACKSPACE prompt
-/// can be skipped, so the two transports cannot come to disagree about what an
-/// announced name means.
+/// On the telnet side the same function decides what the BACKSPACE prompt
+/// *falls back to*, so the two transports cannot come to disagree about what an
+/// announced name means. **It no longer decides whether to ask**: telnet asks
+/// every session, because a TTYPE is a claim by whatever speaks telnet, which
+/// for a Commodore behind a WiFi modem is the modem (measured: tcpser announces
+/// `VT100` for a C64). `ttype_matched` therefore means "we have an answer if
+/// nobody presses a key", and for SSH it still means "this is the answer".
 #[test]
 fn test_an_announced_terminal_is_believed() {
-    // A name we know: type is taken and the prompt is skipped.
+    // A name we know: the type is taken from it.
     let mut s = make_test_session(TerminalType::Ascii);
     s.note_announced_terminal("xterm-256color");
-    assert!(s.ttype_matched, "a known TERM must skip the prompt");
+    assert!(s.ttype_matched, "a known TERM must be believed");
     assert_eq!(s.terminal_type, TerminalType::Ansi);
     assert_eq!(s.ttype_raw.as_deref(), Some("xterm-256color"));
 
@@ -5946,8 +5950,9 @@ fn test_an_announced_terminal_is_believed() {
     assert_eq!(s.terminal_type, TerminalType::Petscii);
 
     // An unrecognised name is *recorded* for the gateway-debug diagnostic but
-    // does not count as identification, so on telnet that client is still asked
-    // to press BACKSPACE: the question is skipped only when we know the answer.
+    // does not count as identification, so there is nothing for the telnet
+    // prompt to fall back on and a silent client is disconnected rather than
+    // guessed at.
     let mut s = make_test_session(TerminalType::Ascii);
     s.note_announced_terminal("MY-WEIRD-TERM");
     assert!(!s.ttype_matched, "an unknown TERM must still be asked");
@@ -6480,6 +6485,129 @@ async fn test_detect_terminal_type_opening_negotiation() {
     );
 
     task.abort();
+}
+
+/// **A telnet client that announced a terminal is still asked.**
+///
+/// The announcement is a claim made by whatever speaks telnet, and on the paths
+/// this gateway exists for that is a modem rather than the machine behind it:
+/// measured 2026-09-11, tcpser announces `VT100` for a Commodore 64, and the
+/// C64 was then classified ANSI and never asked.  Its own INST/DEL crosses the
+/// bridge intact, so asking gets the right answer -- this pins that we ask.
+///
+/// Driven end to end rather than by inspecting a flag, because the defect was
+/// precisely that the flag was consulted *instead of* the wire.
+#[tokio::test]
+async fn test_an_announced_telnet_client_is_still_asked() {
+    let (mut session, peer) = make_test_session_with_peer(TerminalType::Ascii);
+    session.note_announced_terminal("VT100");
+    assert!(session.ttype_matched, "VT100 must be a name we know");
+
+    let (mut prd, mut pwr) = tokio::io::split(peer);
+    let task = tokio::spawn(async move {
+        let mut session = session;
+        let _ = session.detect_terminal_type().await;
+        session
+    });
+
+    // The prompt must arrive even though the client named itself.
+    let seen = read_until(&mut prd, DETECT_PROMPT).await;
+    assert!(
+        seen.to_lowercase().contains(&DETECT_PROMPT.to_lowercase()),
+        "an announced client must still be asked; got {:?}",
+        String::from_utf8_lossy(seen.as_bytes())
+    );
+
+    // The C64 answers with its own key, and that must win over the modem's claim.
+    use tokio::io::AsyncWriteExt;
+    pwr.write_all(&[0x14]).await.unwrap();
+    let seen = read_until(&mut prd, "color?").await;
+    assert!(
+        seen.to_lowercase().contains("petscii"),
+        "the keypress must decide, not the announcement; got {:?}",
+        seen
+    );
+    pwr.write_all(b"n").await.unwrap();
+
+    let session = task.await.unwrap();
+    assert_eq!(session.terminal_type, TerminalType::Petscii);
+    assert_eq!(session.erase_char, 0x14);
+}
+
+/// **A client that answers nothing is believed, not dropped.**
+///
+/// Asking everybody costs nothing to a person and would cost a session to a
+/// probe or a script, which never presses a key: before this the announcement
+/// short-circuited the prompt, so such a client sailed through.  The
+/// announcement is now the fallback, and the fallback lands on exactly the
+/// answer it would have given -- so this can only be as good as the old
+/// behaviour or better.  Under a paused clock, so the wait is asserted rather
+/// than slept through.
+#[tokio::test(start_paused = true)]
+async fn test_a_silent_announced_client_falls_back_instead_of_being_dropped() {
+    let (mut session, peer) = make_test_session_with_peer(TerminalType::Ascii);
+    session.note_announced_terminal("xterm-256color");
+
+    let (mut prd, mut pwr) = tokio::io::split(peer);
+    let task = tokio::spawn(async move {
+        let mut session = session;
+        let outcome = session.detect_terminal_type().await;
+        (session, outcome)
+    });
+
+    // No key is ever pressed.  The wait expires and the announcement stands.
+    let seen = read_until(&mut prd, "color?").await;
+    assert!(
+        !seen.contains("idle timeout"),
+        "a client with an announcement must not be disconnected; got {:?}",
+        seen
+    );
+    assert!(
+        seen.to_lowercase().contains("ansi"),
+        "the announcement must decide; got {:?}",
+        seen
+    );
+
+    use tokio::io::AsyncWriteExt;
+    pwr.write_all(b"n").await.unwrap();
+    let (session, outcome) = task.await.unwrap();
+    assert!(outcome.is_ok(), "the session must survive: {:?}", outcome);
+    assert_eq!(session.terminal_type, TerminalType::Ansi);
+    assert_eq!(session.erase_char, session::DEFAULT_ERASE_CHAR);
+}
+
+/// Read from the peer until `marker` shows up, bounded so a wrong expectation
+/// fails with what was actually written instead of hanging the suite.
+async fn read_until(
+    prd: &mut tokio::io::ReadHalf<tokio::io::DuplexStream>,
+    marker: &str,
+) -> String {
+    use tokio::io::AsyncReadExt;
+    let mut buf = Vec::new();
+    for _ in 0..64 {
+        let mut tmp = [0u8; 256];
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            prd.read(&mut tmp),
+        )
+        .await
+        {
+            Ok(Ok(0)) | Err(_) => break,
+            Ok(Ok(n)) => buf.extend_from_slice(&tmp[..n]),
+            Ok(Err(_)) => break,
+        }
+        // Case-insensitively: once PETSCII is detected every letter on the way
+        // out is case-swapped, so "Use PETSCII color?" leaves as "uSE petscii
+        // COLOR?" and an exact match waits out the timeout for text that is
+        // already there.
+        if String::from_utf8_lossy(&buf)
+            .to_lowercase()
+            .contains(&marker.to_lowercase())
+        {
+            break;
+        }
+    }
+    String::from_utf8_lossy(&buf).to_string()
 }
 
 #[tokio::test]
