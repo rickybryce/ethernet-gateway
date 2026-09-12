@@ -2630,18 +2630,19 @@ fn master_slave_rows(cfg: &Config) -> String {
             false, 12,
             &relay_field_attr(dis_slave, relay_status),
         ),
-        // The placeholder is drawn only while the box is empty, and that is
-        // the case that needed explaining: a slave on key auth stores no
-        // password, which rendered as a blank box indistinguishable from a
-        // slave nobody has configured.  Same answer as the telnet screen and
-        // the desktop editor -- `relay::master_password_state`.
         // **Never echoed, and never saved.**  Rendering the value would put
         // the master's full login -- telnet, SSH and the web UI there, not
         // just the relay -- in this page's source and post it back on every
-        // unrelated save.  The box is empty and the placeholder says what the
-        // state actually is: `Auth OK` once the key works, at which point
-        // there is nothing to type here at all and the field is holding its
-        // place in the layout.
+        // unrelated save.  So the box is always empty and the placeholder
+        // carries the meaning: the relay's link status, the same answer the
+        // desktop's boxes give (`relay_field_attr` -> `SlaveRelayStatus`).
+        //
+        // The telnet screen deliberately says something *different* here -- it
+        // reports the credential (`master_password_state`: `Auth OK`, `(set)`)
+        // and lists the per-port link separately, because it has the rows to
+        // show both.  These two boxes are all the room the editors have, so
+        // they answer the question an operator actually arrives with, which is
+        // whether the thing is connected.
         pass = textfield_attr(
             "slave_master_password", "Pass", "", true, 12,
             &relay_field_attr(dis_slave, relay_status),

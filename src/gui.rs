@@ -801,6 +801,9 @@ struct App {
     // config; no UI surface).  last_seen tracks the live rect, geom_changed_at
     // debounces writes, saved holds what's on disk to avoid redundant writes.
     last_seen_geom: Option<(i32, i32, i32, i32)>,
+    /// The window title last handed to the window manager, so
+    /// `track_window_title` only sends a command when the words change.
+    last_title: Option<String>,
     geom_changed_at: f64,
     saved_geom: Option<(i32, i32, i32, i32)>,
     // String buffers for numeric fields so the user can type freely
@@ -1261,6 +1264,7 @@ impl App {
             shutdown,
             restart,
             last_seen_geom: None,
+            last_title: None,
             geom_changed_at: 0.0,
             saved_geom,
             telnet_port_buf,
@@ -4482,6 +4486,27 @@ impl App {
     /// drag doesn't rewrite the file on every frame.  On Wayland the compositor
     /// doesn't report an outer position (`outer_rect` is None) — we skip, so
     /// geometry simply isn't remembered there.
+    /// Keep the window title reporting the relay, sending a viewport command
+    /// only when the text actually changes.
+    ///
+    /// **Only on a change.** The title is recomputed every frame -- it has to
+    /// be, since the relay moves in a background thread and the window has no
+    /// other way to hear about it -- but `ViewportCommand::Title` is a round
+    /// trip to the window manager, and issuing one 5 times a second for a
+    /// string that has not changed is work the compositor has to do for
+    /// nothing.
+    fn track_window_title(&mut self, ctx: &egui::Context) {
+        let title = window_title(
+            &self.cfg.gateway_role,
+            crate::relay::connected_slave_count(),
+            crate::relay::slave_relay_status(),
+        );
+        if self.last_title.as_deref() != Some(title.as_str()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.last_title = Some(title);
+        }
+    }
+
     fn track_window_geometry(&mut self, ctx: &egui::Context) {
         let (pos, size, now) = ctx.input(|i| {
             let vp = i.viewport();
@@ -4840,6 +4865,32 @@ fn relay_status_bg(status: crate::relay::SlaveRelayStatus) -> Option<Color32> {
         S::Connecting => Some(STATUS_WAIT_BG),
         S::CredentialNeeded => Some(WARN_BG),
         S::Idle => None,
+    }
+}
+
+/// The window title for this gateway's role.
+///
+/// **Standalone is left exactly as it was**, deliberately: a gateway with no
+/// relay has nothing to report and a suffix on every window would be noise on
+/// the commonest configuration.
+///
+/// A master counts **slaves**, not ports -- see `relay::connected_slave_count`,
+/// where one machine registering three endpoints must not read as three
+/// connections. A slave reports the same link status its credential boxes show,
+/// so the two cannot disagree.
+///
+/// Pure so it can be tested without a window: the whole of the behaviour is in
+/// which words go where.
+fn window_title(role: &str, slaves: usize, status: crate::relay::SlaveRelayStatus) -> String {
+    let base = format!("Ethernet Gateway v{}", env!("CARGO_PKG_VERSION"));
+    match role {
+        "master" => match slaves {
+            0 => format!("{base} — no slaves connected"),
+            1 => format!("{base} — 1 slave connected"),
+            n => format!("{base} — {n} slaves connected"),
+        },
+        "slave" => format!("{base} — master: {}", status.label()),
+        _ => base,
     }
 }
 
@@ -5345,6 +5396,7 @@ impl eframe::App for App {
 
         self.refresh_from_global();
         self.track_window_geometry(ui.ctx());
+        self.track_window_title(ui.ctx());
 
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
 
@@ -7168,6 +7220,41 @@ mod tests {
             app.last_synced_cfg.password, cfg.password,
             "the sync snapshot lost the credential, so the editor will churn"
         );
+    }
+
+    /// **The title bar reports the role, and standalone is left alone.**
+    ///
+    /// A master counts *slaves*, not ports: one slave commonly registers both
+    /// serial ports and its CP/M endpoint, so a port count would report one
+    /// machine as three.  A slave reports the same status string its credential
+    /// boxes show, so the window and the panel cannot disagree.
+    #[test]
+    fn test_the_window_title_reports_the_role() {
+        use crate::relay::SlaveRelayStatus as S;
+        let base = format!("Ethernet Gateway v{}", env!("CARGO_PKG_VERSION"));
+
+        // Standalone is untouched -- a suffix on every window would be noise on
+        // the commonest configuration, and it is the one role with nothing to
+        // say.
+        assert_eq!(window_title("standalone", 0, S::Idle), base);
+        // Even if stale relay state is lying around, a standalone says nothing.
+        assert_eq!(window_title("standalone", 4, S::Connected), base);
+
+        // A master counts, and counts in English.
+        assert_eq!(window_title("master", 0, S::Idle), format!("{base} — no slaves connected"));
+        assert_eq!(window_title("master", 1, S::Idle), format!("{base} — 1 slave connected"));
+        assert_eq!(window_title("master", 3, S::Idle), format!("{base} — 3 slaves connected"));
+
+        // A slave reports its link, and every status is distinguishable in the
+        // title -- a title that read the same in two states would be worse than
+        // no title change at all.
+        let mut seen = std::collections::HashSet::new();
+        for st in [S::Connected, S::Connecting, S::CredentialNeeded, S::Idle] {
+            let t = window_title("slave", 0, st);
+            assert!(t.starts_with(&base), "the title lost the program name: {t}");
+            assert!(t.contains(st.label()), "{st:?} is not reported: {t}");
+            assert!(seen.insert(t.clone()), "two states share one title: {t}");
+        }
     }
 
     /// **A restored window must not put its title bar under a panel.**

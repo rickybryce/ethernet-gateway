@@ -95,6 +95,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The desktop window title now reports the relay.**  A **master** counts the
+  slaves registered with it (`no slaves connected` / `1 slave connected` /
+  `n slaves connected`), counted by address rather than by port -- one slave
+  commonly registers both serial ports and its CP/M endpoint, so a port count
+  would report one machine as three.  A **slave** reports its link to the
+  master, the same status string its credential boxes show, so the window and
+  the panel cannot disagree.  A **standalone** gateway is left exactly as it
+  was: it has no relay to report, and a suffix on every window would be noise
+  on the commonest configuration.  The title is recomputed each frame -- it has
+  to be, since the relay moves in a background thread -- but the window manager
+  is only told when the words actually change.
+
 - **A slave's relay link was reported nowhere an operator would look.**  The
   Master/Slave screen's live link status listed only ports in **console** mode,
   and the link state was only ever published by the console register loop -- so

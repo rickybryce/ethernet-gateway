@@ -1857,6 +1857,19 @@ pub async fn claim_remote_peer(ip: IpAddr, label: &str) -> PeerClaim {
 
 /// List the currently-registered remote console ports, sorted stably so
 /// the picker order doesn't jump around between redraws.
+/// How many distinct **slaves** are registered with this master right now.
+///
+/// Counted by address, not by port: the registry is keyed by
+/// `(slave IP, port label)` and one slave commonly registers both its serial
+/// ports and its CP/M endpoint, so a port count would report one machine as
+/// three and a master with two slaves as "six connected".
+pub fn connected_slave_count() -> usize {
+    let mut ips: Vec<IpAddr> = list_remote_ports().into_iter().map(|p| p.ip).collect();
+    ips.sort();
+    ips.dedup();
+    ips.len()
+}
+
 pub fn list_remote_ports() -> Vec<RemotePort> {
     let g = REMOTE_PORTS.lock().unwrap_or_else(|e| e.into_inner());
     let mut v: Vec<RemotePort> = g
