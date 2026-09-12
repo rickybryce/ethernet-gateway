@@ -2601,7 +2601,19 @@ fn master_slave_rows(cfg: &Config) -> String {
         host = textfield_attr("slave_master_host", "Master Host", &cfg.slave_master_host, false, 16, dis_slave),
         port = numfield_attr("slave_master_port", "Port", cfg.slave_master_port, dis_slave),
         user = textfield_attr("slave_master_username", "User", &cfg.slave_master_username, false, 12, dis_slave),
-        pass = textfield_attr("slave_master_password", "Pass", &cfg.slave_master_password, true, 12, dis_slave),
+        // The placeholder is drawn only while the box is empty, and that is
+        // the case that needed explaining: a slave on key auth stores no
+        // password, which rendered as a blank box indistinguishable from a
+        // slave nobody has configured.  Same answer as the telnet screen and
+        // the desktop editor -- `relay::master_password_state`.
+        pass = textfield_attr(
+            "slave_master_password", "Pass", &cfg.slave_master_password, true, 12,
+            &format!(
+                "{} placeholder=\"{}\"",
+                dis_slave,
+                html_escape(crate::relay::master_password_state("").label()),
+            ),
+        ),
     )
 }
 

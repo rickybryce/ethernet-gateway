@@ -76,6 +76,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A slave logging in with its key no longer reads as an unconfigured one.**
+  Enrolling the key empties `slave_master_password`, which is the entire point
+  -- and all three configuration surfaces rendered that empty value as a dim
+  `(not set)`, the same thing shown by a slave with no way in at all.  The
+  state the feature exists to reach was displayed as the fault it replaces.
+  The telnet Master/Slave screen now says `(using key)`, and the web and
+  desktop Pass boxes carry it as the placeholder drawn while they are empty;
+  all three ask `relay::master_password_state`, so they cannot describe one
+  state three ways.  It is an **outcome, not a setting**: the claim is made
+  only after a key login has actually succeeded -- the config cannot know
+  whether a key is enrolled on the *master* -- and it is taken down again the
+  moment a key is refused, because a stale "using key" is worse than the dim
+  `(not set)` it replaced.  A password typed at a screen and still held in
+  memory reads `(entered, not saved)` rather than `(not set)`, which is what an
+  operator saw immediately after typing one.
+
 - **A peer-dial across the master crossbar no longer answers `CONNECT` for a
   device that never picked up.**  Dialling a port on one slave from a device on
   another (`ATD B@<slave-ip>` through a master) reported carrier the moment the

@@ -2062,6 +2062,7 @@ fn test_the_master_credential_prompt_appears_and_withdraws() {
 /// over a configured one while it is held, and the key working forgets it.
 #[test]
 fn test_a_typed_master_password_is_held_in_memory_only() {
+    let _lock = super::key_auth_test_lock();
     super::clear_pending_master_password();
     assert_eq!(
         super::master_password_to_try("from-the-config"),
@@ -2088,4 +2089,104 @@ fn test_a_typed_master_password_is_held_in_memory_only() {
         "from-the-config",
         "once the key works the typed password is forgotten"
     );
+}
+
+/// **The state this feature exists to reach must not read as the fault it
+/// replaced.**
+///
+/// A slave that has enrolled its key stores no master password, and every
+/// configuration surface rendered that empty value as a dim `(not set)` -- the
+/// same thing shown by a slave with no way in at all. The operator had no way
+/// to tell a working gateway from a broken one.
+#[test]
+fn test_a_keyed_slave_does_not_read_as_unconfigured() {
+    let _lock = super::key_auth_test_lock();
+    super::clear_pending_master_password();
+
+    super::note_relay_key_auth(true);
+    let state = super::master_password_state("");
+    assert_eq!(
+        state,
+        super::MasterPasswordState::UsingKey,
+        "an empty password plus a working key is the goal, not a missing setting"
+    );
+    assert_ne!(
+        state.label(),
+        super::MasterPasswordState::Missing.label(),
+        "the working state must not be spelled the same as the broken one"
+    );
+
+    super::note_relay_key_auth(false);
+}
+
+/// **A claim must come down when it stops being true.** A key revoked on the
+/// master puts this slave back on its password, and a surface still saying
+/// "using key" would be a stale reassurance -- worse than the dim `(not set)`
+/// it replaced, because it argues against the operator's own evidence.
+#[test]
+fn test_a_revoked_key_takes_the_claim_down() {
+    let _lock = super::key_auth_test_lock();
+    super::clear_pending_master_password();
+
+    super::note_relay_key_auth(true);
+    assert_eq!(super::master_password_state(""), super::MasterPasswordState::UsingKey);
+
+    // What the connect path does when the master refuses the key.
+    super::note_relay_key_auth(false);
+    assert_eq!(
+        super::master_password_state(""),
+        super::MasterPasswordState::Missing,
+        "a refused key must stop the surfaces claiming it works"
+    );
+    assert_eq!(
+        super::master_password_state("still-configured"),
+        super::MasterPasswordState::Stored,
+        "and the fallback password is what is getting in now"
+    );
+}
+
+/// A password typed at a screen is held in memory, so the config is still
+/// empty -- and telling the operator `(not set)` immediately after they typed
+/// it reads as the box having swallowed their input.
+#[test]
+fn test_a_typed_password_is_not_reported_as_missing() {
+    let _lock = super::key_auth_test_lock();
+    super::note_relay_key_auth(false);
+    super::clear_pending_master_password();
+    assert_eq!(super::master_password_state(""), super::MasterPasswordState::Missing);
+
+    super::set_pending_master_password("typed-at-a-screen");
+    assert_eq!(
+        super::master_password_state(""),
+        super::MasterPasswordState::Entered,
+        "a password waiting to be tried is not a missing one"
+    );
+
+    super::clear_pending_master_password();
+}
+
+/// Every label has to fit the narrowest surface that draws it: the telnet
+/// Master/Slave screen renders `  Pass:   <label>` on a 40-column PETSCII
+/// terminal, which does not wrap -- it silently loses the end.
+///
+/// Distinctness is asserted too: two states that read identically on a C64 are
+/// worse than a lost tail, because the screen then argues nothing is wrong.
+#[test]
+fn test_every_master_password_label_fits_a_c64() {
+    let states = [
+        super::MasterPasswordState::UsingKey,
+        super::MasterPasswordState::Stored,
+        super::MasterPasswordState::Entered,
+        super::MasterPasswordState::Missing,
+    ];
+    for s in states {
+        // "  Pass:   " is ten columns of prefix on a 40-column screen.
+        let width = "  Pass:   ".chars().count() + s.label().chars().count();
+        assert!(width <= 40, "{:?} renders {} columns: {:?}", s, width, s.label());
+    }
+    for (i, a) in states.iter().enumerate() {
+        for b in &states[i + 1..] {
+            assert_ne!(a.label(), b.label(), "{a:?} and {b:?} read the same");
+        }
+    }
 }

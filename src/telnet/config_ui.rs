@@ -2704,10 +2704,26 @@ impl TelnetSession {
                     self.amber(&cfg.slave_master_username)
                 };
                 self.send_line(&format!("  User:   {}", user_disp)).await?;
-                let pass_disp = if cfg.slave_master_password.is_empty() {
-                    self.dim("(not set)")
-                } else {
-                    self.green("(set)")
+                // **An empty password is the goal, not a fault.**  A slave
+                // that has enrolled its key has nothing stored here, and
+                // rendering that as a dim `(not set)` showed the state the
+                // feature exists to reach in the same colours as a slave with
+                // no way in at all.  `relay::master_password_state` is the one
+                // answer all three surfaces render.
+                let pass_state = crate::relay::master_password_state(
+                    &cfg.slave_master_password,
+                );
+                let pass_disp = match pass_state {
+                    crate::relay::MasterPasswordState::UsingKey
+                    | crate::relay::MasterPasswordState::Stored => {
+                        self.green(pass_state.label())
+                    }
+                    crate::relay::MasterPasswordState::Entered => {
+                        self.amber(pass_state.label())
+                    }
+                    crate::relay::MasterPasswordState::Missing => {
+                        self.dim(pass_state.label())
+                    }
                 };
                 self.send_line(&format!("  Pass:   {}", pass_disp)).await?;
             } else {

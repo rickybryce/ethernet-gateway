@@ -3152,7 +3152,22 @@ impl App {
             });
             ui.horizontal(|ui| {
                 labeled_field(ui, "User:", &mut self.cfg.slave_master_username, 120.0);
-                labeled_password(ui, "Pass:", &mut self.cfg.slave_master_password, "");
+                // The hint is drawn only while the box is empty, which is
+                // exactly when an operator needs to be told *why* it is empty:
+                // a slave on key auth has no password stored, and a blank box
+                // with no placeholder reads as a setting nobody filled in.
+                //
+                // Asked with an empty string on purpose -- the only states
+                // reachable while the box is blank are the ones that do not
+                // depend on what is stored, and a `(set)` hint that can never
+                // be drawn would be a second answer to keep in step with the
+                // first.  It also keeps the buffer's `&mut` the only borrow.
+                labeled_password(
+                    ui,
+                    "Pass:",
+                    &mut self.cfg.slave_master_password,
+                    crate::relay::master_password_state("").label(),
+                );
             });
         });
         // No transport control: SSH is the only implemented relay

@@ -642,6 +642,113 @@ pub fn master_credential_needed() -> Option<(String, u16)> {
         .clone()
 }
 
+/// Whether the last relay authentication this slave completed used its key.
+///
+/// **A slave logging in by key has an empty `slave_master_password`, which is
+/// the whole point of the feature -- and every configuration surface rendered
+/// that empty value as a dim `(not set)`, the same thing a genuinely broken
+/// slave shows.** So the state the feature is trying to reach read as a fault,
+/// and the operator had no way to tell one from the other.
+///
+/// Published here rather than derived at the surfaces because only the connect
+/// path knows it: the config cannot say whether a key is enrolled on the
+/// *master*, and a slave that has never connected honestly does not know
+/// either. Hence "authenticated by key", an outcome, rather than "a key
+/// exists", which is true on every gateway and would claim something unproven.
+static AUTHENTICATED_BY_KEY: AtomicBool = AtomicBool::new(false);
+
+/// Record how the connection that just authenticated got in.
+///
+/// Called on both outcomes, never only on success: a key that stops working
+/// (revoked on the master, or the authorized-keys file lost) must take the
+/// claim down with it, or the surfaces would go on saying "using key" about a
+/// slave that is back on its password -- a stale reassurance being worse than
+/// the dim `(not set)` this replaced.
+pub fn note_relay_key_auth(used_key: bool) {
+    AUTHENTICATED_BY_KEY.store(used_key, Ordering::Relaxed);
+}
+
+/// Whether this slave is currently getting in with its key.
+pub fn relay_authenticated_by_key() -> bool {
+    AUTHENTICATED_BY_KEY.load(Ordering::Relaxed)
+}
+
+/// Serializes the tests that drive [`AUTHENTICATED_BY_KEY`] and
+/// [`PENDING_MASTER_PASSWORD`].
+///
+/// Both are process-wide, and the tests that exercise them live in two
+/// modules -- `relay::tests` reads the state those statics produce, and
+/// `resolve::tests` drives the remedy that refuses on the strength of one.
+/// Run in parallel they would set the flag out from under each other, which is
+/// a flake that reports as a real refusal defect.
+#[cfg(test)]
+pub(crate) static KEY_AUTH_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Take that lock, surviving a previous test's panic.
+#[cfg(test)]
+pub(crate) fn key_auth_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    KEY_AUTH_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// What a configuration surface should say about a slave's master password.
+///
+/// One answer for all three surfaces, so telnet, the web editor and the
+/// desktop cannot describe one state three ways -- the same reason
+/// `master_password_screen_lines` is shared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MasterPasswordState {
+    /// The key is doing the work; no password is needed here.
+    UsingKey,
+    /// A password is stored in `egateway.conf`.
+    Stored,
+    /// One was typed at a screen and is held in memory, not on disk.
+    Entered,
+    /// Nothing to log in with.
+    Missing,
+}
+
+impl MasterPasswordState {
+    /// The short label, fitted to the narrowest surface (40 columns with the
+    /// menus' two-space indent and the `Pass:` column) -- see
+    /// `test_every_master_password_label_fits_a_c64`.
+    pub fn label(self) -> &'static str {
+        match self {
+            MasterPasswordState::UsingKey => "(using key)",
+            MasterPasswordState::Stored => "(set)",
+            MasterPasswordState::Entered => "(entered, not saved)",
+            MasterPasswordState::Missing => "(not set)",
+        }
+    }
+}
+
+/// How this slave is getting in, given whatever the config holds.
+///
+/// **`UsingKey` outranks `Stored` deliberately.** The field answers "how does
+/// this slave log in?", and once the key works that is the honest answer even
+/// if a password is still on disk -- the wipe is best-effort and a master that
+/// refuses enrolment leaves one behind for ever. What is still *stored* is a
+/// separate question with a separate remedy, and it is reported on the Resolve
+/// Errors screen rather than squeezed into this one word.
+pub fn master_password_state(configured: &str) -> MasterPasswordState {
+    if relay_authenticated_by_key() {
+        return MasterPasswordState::UsingKey;
+    }
+    if !configured.is_empty() {
+        return MasterPasswordState::Stored;
+    }
+    if PENDING_MASTER_PASSWORD
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some()
+    {
+        // Typed at a screen and not yet spent.  Saying `(not set)` here is what
+        // an operator sees immediately after typing it, which reads as the box
+        // having swallowed their input.
+        return MasterPasswordState::Entered;
+    }
+    MasterPasswordState::Missing
+}
+
 /// Enrolment and the wipe each happen **once per process**, not once per
 /// connection: a slave opens several relay connections (port A, port B, the
 /// CP/M endpoint) and they would otherwise each offer the same key and each
@@ -1194,11 +1301,17 @@ async fn connect_master_relay_inner(
                 Ok(russh::client::AuthResult::Success) => {
                     authed = true;
                     by_key = true;
+                    note_relay_key_auth(true);
                     glog!("Relay: authenticated to master {}:{} by public key", host, port);
                 }
                 // Not enrolled (or this master predates key auth).  That is an
                 // ordinary state, not a fault: fall through to the password.
-                Ok(_) => {}
+                //
+                // It is also the moment a *previously* enrolled key stopped
+                // working, so the claim comes down here as well as going up
+                // above -- the configuration screens must not go on saying
+                // "using key" about a slave that is back on its password.
+                Ok(_) => note_relay_key_auth(false),
                 Err(e) => {
                     return Err(RelayConnectError::Network(format!("key auth error: {}", e)))
                 }
@@ -1206,7 +1319,10 @@ async fn connect_master_relay_inner(
         }
         // No usable key is not fatal while a password exists -- say so once and
         // carry on, rather than failing a slave that was working.
-        Err(e) => glog!("Relay: no client key ({}); falling back to the password", e),
+        Err(e) => {
+            note_relay_key_auth(false);
+            glog!("Relay: no client key ({}); falling back to the password", e)
+        }
     }
 
     // A password typed at a screen wins over the configured one, and never
