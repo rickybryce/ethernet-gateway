@@ -95,6 +95,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A slave's relay link was reported nowhere an operator would look.**  The
+  Master/Slave screen's live link status listed only ports in **console** mode,
+  and the link state was only ever published by the console register loop -- so
+  a **modem**-mode port, which is how a dialled-in device reaches the master,
+  registered and bridged with nothing saying so on any surface.  Reported from
+  a live pair as "I don't know if the slave connected": the one screen built to
+  answer that was silent about the only port enabled, and the sole evidence
+  anywhere was a line in the log.  The modem register loop now publishes its
+  link state exactly as the console one does, and the telnet screen lists both
+  kinds.
+  **The slave's own User and Pass boxes now report the link too**, on the web
+  editor and the desktop, because that is where somebody asking "did it
+  connect?" is already looking -- the two fields they filled in.  Connected
+  shows the word `Connected` on a green background in both boxes; connecting is
+  amber, a missing credential is red, and a gateway with nothing to report is
+  left alone rather than coloured, since an alarm about a correctly configured
+  machine is worse than no alarm.  **Every state but connected stays editable**,
+  so an operator can always supply what is missing.  On the web the connected
+  boxes are `readonly` rather than `disabled` -- a disabled control is one the
+  page's JS cannot re-enable, and the relay's state is not something it can
+  follow -- and what they submit is empty, which both keys now treat as "leave
+  it alone", so a link dropping between the render and the save can never write
+  the word "Connected" into a credential.
+
 - **The desktop window could come back with its title bar under the desktop
   panel, for good.**  The saved position is the *frame's* top-left and the
   window manager draws the title bar in the frame's top edge, so a frame

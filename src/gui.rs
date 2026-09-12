@@ -48,6 +48,16 @@ const CONSOLE_BG: Color32 = Color32::from_rgb(0x08, 0x12, 0x28); // deeper blue 
 const SELECTION: Color32 = Color32::from_rgb(0x26, 0x4f, 0x78);
 const POPUP_BG: Color32 = Color32::from_rgb(0x04, 0x18, 0x0a);      // deep forest green — popup panel
 const POPUP_INPUT_BG: Color32 = Color32::from_rgb(0x1c, 0x46, 0x2a); // brighter green — text entry on popups
+/// Backgrounds for the slave credential boxes, which report the relay link
+/// rather than merely holding a setting.
+///
+/// They are drawn **inside** the text boxes because that is where an operator
+/// looking for "did it connect?" is already looking -- the two boxes they
+/// filled in.  The popup's ordinary input background is already a green
+/// (`POPUP_INPUT_BG`), so "connected" has to be a markedly stronger one or the
+/// signal is invisible on the surface that carries it.
+const STATUS_OK_BG: Color32 = Color32::from_rgb(0x1f, 0x7a, 0x3a);   // connected — strong green
+const STATUS_WAIT_BG: Color32 = Color32::from_rgb(0x5a, 0x46, 0x10); // connecting — dark amber
 const WARN_BG: Color32 = Color32::from_rgb(0x33, 0x06, 0x06);      // dark red — WARNING popup panel (must-acknowledge)
 const WARN_BORDER: Color32 = Color32::from_rgb(0xe0, 0x3a, 0x3a);  // red border for warning popups
 
@@ -3215,27 +3225,44 @@ impl App {
                 labeled_field(ui, "Master host:", &mut self.cfg.slave_master_host, 150.0);
                 labeled_field(ui, "Port:", &mut self.slave_master_port_buf, 50.0);
             });
+            // **These two boxes report the link, not just hold a setting.**
+            // An operator asking "did the slave connect?" looks at the
+            // credentials they typed, so that is where the answer belongs --
+            // measured the hard way on a live pair, where the only evidence
+            // anywhere was a line in the log.
+            let relay_status = crate::relay::slave_relay_status();
+            let bg = relay_status_bg(relay_status);
             ui.horizontal(|ui| {
-                labeled_field(ui, "User:", &mut self.cfg.slave_master_username, 120.0);
-                // The hint is drawn only while the box is empty, which is
-                // exactly when an operator needs to be told *why* it is empty:
-                // a slave on key auth has no password stored, and a blank box
-                // with no placeholder reads as a setting nobody filled in.
-                //
-                // Asked with an empty string on purpose -- the only states
-                // reachable while the box is blank are the ones that do not
-                // depend on what is stored, and a `(set)` hint that can never
-                // be drawn would be a second answer to keep in step with the
-                // first.  It also keeps the buffer's `&mut` the only borrow.
-                labeled_password(
-                    ui,
-                    "Pass:",
-                    &mut self.cfg.slave_master_password,
-                    crate::relay::master_password_state(
-                        &self.last_synced_cfg.slave_master_password,
-                    )
-                    .label(),
-                );
+                if let Some(bg) = bg {
+                    // `extreme_bg_color` is what egui fills a text edit with.
+                    ui.visuals_mut().extreme_bg_color = bg;
+                }
+                if relay_status.stands_in_for_credentials() {
+                    // Connected: there is nothing left to type, so both boxes
+                    // say so.  Nothing is bound to the config here, which is
+                    // also what keeps the word out of the saved username.
+                    relay_status_box(ui, "User:", relay_status.label(), 120.0);
+                    relay_status_box(ui, "Pass:", relay_status.label(), 120.0);
+                } else {
+                    // Not connected: the operator may need to enter these, so
+                    // they stay ordinary editable fields -- tinted by the
+                    // status, but never taken away.
+                    labeled_field(ui, "User:", &mut self.cfg.slave_master_username, 120.0);
+                    // The hint is drawn only while the box is empty, which is
+                    // exactly when an operator needs to be told *why* it is
+                    // empty: a slave on key auth has no password stored, and a
+                    // blank box with no placeholder reads as a setting nobody
+                    // filled in.
+                    labeled_password(
+                        ui,
+                        "Pass:",
+                        &mut self.cfg.slave_master_password,
+                        crate::relay::master_password_state(
+                            &self.last_synced_cfg.slave_master_password,
+                        )
+                        .label(),
+                    );
+                }
             });
         });
         // No transport control: SSH is the only implemented relay
@@ -4798,6 +4825,38 @@ fn cpm_combo(ui: &egui::Ui, id_salt: &str) -> egui::ComboBox {
 fn labeled_field(ui: &mut egui::Ui, label: &str, buf: &mut String, width: f32) {
     ui.label(label);
     singleline_with_menu(ui, buf, false, Some(width));
+}
+
+/// The background a slave credential box should carry for a link status, or
+/// `None` to leave the ordinary input colour alone.
+///
+/// `Idle` deliberately gets nothing: a gateway that is not a slave, or one
+/// whose ports are all disabled, has no link to report and colouring its boxes
+/// would be an alarm about a machine that is working as configured.
+fn relay_status_bg(status: crate::relay::SlaveRelayStatus) -> Option<Color32> {
+    use crate::relay::SlaveRelayStatus as S;
+    match status {
+        S::Connected => Some(STATUS_OK_BG),
+        S::Connecting => Some(STATUS_WAIT_BG),
+        S::CredentialNeeded => Some(WARN_BG),
+        S::Idle => None,
+    }
+}
+
+/// A credential box standing in for itself: once the link is up there is
+/// nothing to type, so the box reports the link instead.
+///
+/// Drawn as a real (non-interactive) text box rather than a label so the row
+/// keeps its shape -- swapping a box for a label would move every widget
+/// beside it, which is the `cpm_choice_row` lesson one panel over.
+fn relay_status_box(ui: &mut egui::Ui, label: &str, text: &str, width: f32) {
+    ui.label(label);
+    let mut shown = text.to_string();
+    ui.add(
+        egui::TextEdit::singleline(&mut shown)
+            .desired_width(width)
+            .interactive(false),
+    );
 }
 
 /// Helper: a `Port:` field whose *label* turns red when the last port check

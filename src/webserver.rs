@@ -1314,6 +1314,15 @@ fn collect_form_updates(
                 }
                 continue;
             }
+            // **An empty username box means "leave it alone", exactly as the
+            // password one does.**  The box is rendered empty whenever the
+            // relay is connected -- it is standing in for the link at that
+            // point, not holding a value -- so writing an empty submission
+            // through would blank the credential that link depends on the next
+            // time anything reconnects.
+            if *key == "slave_master_username" && v.is_empty() {
+                continue;
+            }
             updates.push(((*key).to_string(), v.clone()));
         }
     }
@@ -2554,6 +2563,10 @@ fn master_slave_rows(cfg: &Config) -> String {
     let role_sel = |v: &str| if cfg.gateway_role == v { "selected" } else { "" };
     let is_master = cfg.gateway_role == "master";
     let is_slave = cfg.gateway_role == "slave";
+    // **These two boxes report the link, not just hold a setting** -- an
+    // operator asking "did the slave connect?" looks at the credentials they
+    // typed.  Same answer as the desktop and the telnet screen.
+    let relay_status = crate::relay::slave_relay_status();
     // Grey out the fields that don't apply to the current role: `accept relays`
     // and `serve Kermit to slave ports` are Master-only, the master
     // host/port/user/pass are Slave-only.  The server renders the initial
@@ -2611,7 +2624,12 @@ fn master_slave_rows(cfg: &Config) -> String {
         ),
         host = textfield_attr("slave_master_host", "Master Host", &cfg.slave_master_host, false, 16, dis_slave),
         port = numfield_attr("slave_master_port", "Port", cfg.slave_master_port, dis_slave),
-        user = textfield_attr("slave_master_username", "User", &cfg.slave_master_username, false, 12, dis_slave),
+        user = textfield_attr(
+            "slave_master_username", "User",
+            if relay_status.stands_in_for_credentials() { "" } else { &cfg.slave_master_username },
+            false, 12,
+            &relay_field_attr(dis_slave, relay_status),
+        ),
         // The placeholder is drawn only while the box is empty, and that is
         // the case that needed explaining: a slave on key auth stores no
         // password, which rendered as a blank box indistinguishable from a
@@ -2626,13 +2644,7 @@ fn master_slave_rows(cfg: &Config) -> String {
         // place in the layout.
         pass = textfield_attr(
             "slave_master_password", "Pass", "", true, 12,
-            &format!(
-                "{} placeholder=\"{}\"",
-                dis_slave,
-                html_escape(
-                    crate::relay::master_password_state(&cfg.slave_master_password).label()
-                ),
-            ),
+            &relay_field_attr(dis_slave, relay_status),
         ),
     )
 }
@@ -4355,6 +4367,39 @@ fn textfield(name: &str, label: &str, value: &str, masked: bool, size: usize) ->
 
 /// Like [`textfield`] but with an extra attribute string (e.g. `"disabled"`),
 /// used to grey out fields that don't apply to the current gateway role.
+/// Extra attributes for the slave's two credential boxes: the link status as a
+/// placeholder, a background colour for it, and `readonly` once the link is up.
+///
+/// **`readonly`, never `disabled`.**  A disabled input is not submitted at all,
+/// which would be fine, but the page's own guard
+/// (`test_disabled_inputs_are_re_enabled_by_js`) exists because a control the
+/// operator cannot re-enable is a trap -- and the relay's state is not
+/// something the page's JS can follow.  `readonly` keeps the box submitted and
+/// harmless, because the value it submits is **empty**, which both keys already
+/// treat as "leave it alone".  So a link that drops between the render and the
+/// save cannot write the word "Connected" into a credential.
+fn relay_field_attr(gate: &str, status: crate::relay::SlaveRelayStatus) -> String {
+    use crate::relay::SlaveRelayStatus as S;
+    let bg = match status {
+        S::Connected => "#1f7a3a",
+        S::Connecting => "#5a4610",
+        S::CredentialNeeded => "#7a1f1f",
+        S::Idle => "",
+    };
+    let mut attr = gate.to_string();
+    attr.push_str(&format!(
+        " placeholder=\"{}\"",
+        html_escape(status.label())
+    ));
+    if !bg.is_empty() {
+        attr.push_str(&format!(" style=\"background:{bg}\""));
+    }
+    if status.stands_in_for_credentials() {
+        attr.push_str(" readonly");
+    }
+    attr
+}
+
 fn textfield_attr(
     name: &str,
     label: &str,
@@ -5905,6 +5950,68 @@ mod tests {
         );
 
         crate::relay::clear_pending_master_password();
+    }
+
+    /// **A connected relay must not be able to blank its own credentials.**
+    ///
+    /// While the link is up both boxes stand in for it -- rendered empty, with
+    /// the status as the placeholder -- so the value they submit is empty.  If
+    /// empty went through as a value, the first Save on a connected slave would
+    /// erase the username the link depends on.  `readonly` (not `disabled`) is
+    /// deliberate: the box still submits, and what it submits has to be
+    /// harmless, because the link can drop between the render and the save.
+    #[test]
+    fn test_a_connected_slaves_credential_boxes_cannot_blank_the_config() {
+        let _lock = crate::relay::key_auth_test_lock();
+        let cfg = Config {
+            gateway_role: "slave".to_string(),
+            slave_master_username: "ricky".to_string(),
+            ..Config::default()
+        };
+        let mut fields: HashMap<String, String> = HashMap::new();
+        fields.insert("slave_master_username".to_string(), String::new());
+        fields.insert("slave_master_password".to_string(), String::new());
+        fields.insert("slave_master_host".to_string(), "192.168.1.178".to_string());
+        let (updates, _) = collect_form_updates(&fields, &cfg);
+        assert!(
+            !updates.iter().any(|(k, _)| k == "slave_master_username"),
+            "an empty username box erased the credential the link depends on"
+        );
+        // **Positive control**: a real value still saves, or the field is dead.
+        fields.insert("slave_master_username".to_string(), "someone".to_string());
+        let (updates, _) = collect_form_updates(&fields, &cfg);
+        assert!(
+            updates.iter().any(|(k, v)| k == "slave_master_username" && v == "someone"),
+            "the username can no longer be set at all: {updates:?}"
+        );
+        // And the neighbouring field on the same form still saves, so this is
+        // not a screen that quietly stopped writing anything.
+        assert!(
+            updates.iter().any(|(k, v)| k == "slave_master_host" && v == "192.168.1.178"),
+            "the rest of the Master/Slave form stopped saving: {updates:?}"
+        );
+    }
+
+    /// The connected boxes are `readonly`, never `disabled` -- a disabled input
+    /// is one the operator cannot re-enable, and the relay's state is not
+    /// something this page's JS can follow.
+    #[test]
+    fn test_the_connected_credential_boxes_are_readonly_not_disabled() {
+        use crate::relay::SlaveRelayStatus as S;
+        let connected = relay_field_attr("", S::Connected);
+        assert!(connected.contains("readonly"), "{connected}");
+        assert!(!connected.contains("disabled"), "{connected}");
+        assert!(connected.contains("Connected"), "{connected}");
+        assert!(connected.contains("background:"), "no colour in the box: {connected}");
+        // Every other state stays editable, or an operator cannot supply what
+        // is missing.
+        for st in [S::Connecting, S::CredentialNeeded, S::Idle] {
+            let a = relay_field_attr("", st);
+            assert!(!a.contains("readonly"), "{st:?} took the box away: {a}");
+        }
+        // Idle is not an alarm: a gateway that is not a slave has no link to
+        // report, and colouring its boxes would shout about a working machine.
+        assert!(!relay_field_attr("", S::Idle).contains("background:"));
     }
 
     #[test]

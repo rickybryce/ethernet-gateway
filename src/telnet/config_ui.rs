@@ -2838,7 +2838,15 @@ impl TelnetSession {
                         crate::config::SerialPortId::B,
                     ] {
                         let p = cfg.port(id);
-                        if p.enabled && p.mode == "console" {
+                        // **Not console mode only.**  A modem-mode port
+                        // registers with the master exactly as a console one
+                        // does -- it is how a dialled-in device reaches the
+                        // master -- and this screen used to skip it, so the one
+                        // screen built to answer "is the slave connected?" was
+                        // silent about the only port an operator had enabled.
+                        // Reported from a live pair whose Port B was registered
+                        // and bridging the whole time.
+                        if p.enabled && (p.mode == "console" || p.mode == "modem") {
                             let st = crate::relay::slave_link_state(id.index());
                             self.send_line(&format!(
                                 "  Link {}: {}",

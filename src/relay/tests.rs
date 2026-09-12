@@ -2277,3 +2277,59 @@ fn test_a_refused_password_puts_the_ask_back() {
     super::clear_master_credential_needed();
     super::clear_pending_master_password();
 }
+
+/// **The status the credential boxes report, aggregated over both ports.**
+///
+/// `Connected` outranks everything: one working port means this gateway can
+/// reach its master, whatever the other is doing.  `CredentialNeeded` outranks
+/// `Connecting`, because a retry loop with no usable credential will keep
+/// failing and calling that "connecting" is an encouraging untruth.
+#[test]
+fn test_the_relay_status_the_credential_boxes_report() {
+    let _lock = super::key_auth_test_lock();
+    use super::{SlaveLinkState as L, SlaveRelayStatus as S};
+    let reset = || {
+        super::set_slave_link(0, L::Down);
+        super::set_slave_link(1, L::Down);
+        super::clear_master_credential_needed();
+    };
+
+    reset();
+    assert_eq!(super::slave_relay_status(), S::Idle, "nothing configured is not an alarm");
+
+    // Either port registering is enough, and bridging counts as connected too.
+    reset();
+    super::set_slave_link(1, L::Registered);
+    assert_eq!(super::slave_relay_status(), S::Connected);
+    reset();
+    super::set_slave_link(0, L::Bridging);
+    assert_eq!(super::slave_relay_status(), S::Connected);
+
+    reset();
+    super::set_slave_link(0, L::Connecting);
+    assert_eq!(super::slave_relay_status(), S::Connecting);
+
+    // A missing credential outranks a retry loop that cannot succeed...
+    reset();
+    super::set_slave_link(0, L::Connecting);
+    super::note_master_credential_needed("10.0.0.9", 2222);
+    assert_eq!(super::slave_relay_status(), S::CredentialNeeded);
+
+    // ...but never outranks a port that is actually up: the other port may be
+    // the one that needs a credential, and "connected" is the useful truth.
+    super::set_slave_link(1, L::Registered);
+    assert_eq!(super::slave_relay_status(), S::Connected);
+
+    // Only `Connected` stands in for the boxes; every other state must leave
+    // them editable, or an operator cannot supply what is missing.
+    assert!(S::Connected.stands_in_for_credentials());
+    for st in [S::Connecting, S::CredentialNeeded, S::Idle] {
+        assert!(!st.stands_in_for_credentials(), "{st:?} took the boxes away");
+    }
+    // The words are drawn inside a text box on the narrowest surface.
+    for st in [S::Connected, S::Connecting, S::CredentialNeeded, S::Idle] {
+        assert!(st.label().chars().count() <= 16, "{st:?}: {:?}", st.label());
+    }
+
+    reset();
+}

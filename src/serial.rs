@@ -2175,6 +2175,7 @@ fn modem_slave_announce_tick(
 
     loop {
         if aborted(idx) {
+            crate::relay::set_slave_link(idx, crate::relay::SlaveLinkState::Down);
             return;
         }
         // Only announce while this is still a slave modem port with peer-dial
@@ -2187,6 +2188,10 @@ fn modem_slave_announce_tick(
             || p.port.is_empty()
             || p.mode != "modem"
         {
+            // **A port that stops relaying must stop claiming a link.** The
+            // status surfaces read this, and a stale "registered" is a worse
+            // answer than none.
+            crate::relay::set_slave_link(idx, crate::relay::SlaveLinkState::Down);
             return;
         }
         let host = cfg.slave_master_host.clone();
@@ -2196,6 +2201,10 @@ fn modem_slave_announce_tick(
         let label = id.label();
 
         attempt = attempt.saturating_add(1);
+        // Entering a connect attempt — "connecting" covers the retry and
+        // backoff paths too, exactly as it does in the console loop, because
+        // they all loop back through here.
+        crate::relay::set_slave_link(idx, crate::relay::SlaveLinkState::Connecting);
         glog!(
             "Serial modem (Port {}): registering with master {}:{} as '{}' (attempt {})",
             label,
@@ -2250,6 +2259,7 @@ fn modem_slave_announce_tick(
         }
         last_outage = None;
         net_backoff = RECONNECT_BACKOFF_MIN;
+        crate::relay::set_slave_link(idx, crate::relay::SlaveLinkState::Registered);
         glog!(
             "Serial modem (Port {}): REGISTERED with master; awaiting a call",
             label
@@ -2259,6 +2269,7 @@ fn modem_slave_announce_tick(
         let crate::relay::MasterRelay { _session, mut stream } = relay;
         match slave_wait_for_activate(&handle, &mut stream, &shutdown, idx, id, &registered_as) {
             ActivateOutcome::Activated => {
+                crate::relay::set_slave_link(idx, crate::relay::SlaveLinkState::Bridging);
                 glog!(
                     "Serial modem (Port {}): call in from master — ringing local port",
                     label

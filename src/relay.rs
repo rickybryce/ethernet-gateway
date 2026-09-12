@@ -1979,6 +1979,72 @@ pub fn set_slave_link(port_index: usize, state: SlaveLinkState) {
     }
 }
 
+/// What a configuration surface should say about this slave's link to its
+/// master, aggregated over its ports.
+///
+/// **One answer for all three surfaces**, the same reason
+/// `master_password_state` is shared: telnet, the web editor and the desktop
+/// must not describe one link three ways.
+///
+/// Aggregated rather than per-port because the question the credential boxes
+/// answer is "can this gateway reach its master at all" -- a per-port list is
+/// the Master/Slave screen's job, and it has one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlaveRelayStatus {
+    /// At least one port is registered with the master (or bridging a call).
+    Connected,
+    /// Something is mid-attempt, including the retry backoff.
+    Connecting,
+    /// Nothing can be tried: there is no usable credential for the master.
+    CredentialNeeded,
+    /// Configured as a slave, but nothing is attempting anything -- typically
+    /// no port is enabled, so no register loop exists to run.
+    Idle,
+}
+
+impl SlaveRelayStatus {
+    /// The word the credential boxes show. Short: it is drawn *inside* a text
+    /// box on the narrowest of the three surfaces.
+    pub fn label(self) -> &'static str {
+        match self {
+            SlaveRelayStatus::Connected => "Connected",
+            SlaveRelayStatus::Connecting => "Connecting...",
+            SlaveRelayStatus::CredentialNeeded => "Password needed",
+            SlaveRelayStatus::Idle => "Not connected",
+        }
+    }
+
+    /// Whether the credential fields should stand in for themselves rather
+    /// than be editable: once the link is up there is nothing to type.
+    pub fn stands_in_for_credentials(self) -> bool {
+        matches!(self, SlaveRelayStatus::Connected)
+    }
+}
+
+/// The current link status, over both ports.
+///
+/// `Connected` outranks everything: one working port means this gateway can
+/// reach its master, whatever the other is doing. `CredentialNeeded` outranks
+/// `Connecting` because a retry loop with no usable credential is going to
+/// keep failing, and saying "connecting" about it would be an encouraging
+/// untruth of exactly the kind this file keeps having to remove.
+pub fn slave_relay_status() -> SlaveRelayStatus {
+    let states = [slave_link_state(0), slave_link_state(1)];
+    if states
+        .iter()
+        .any(|s| matches!(s, SlaveLinkState::Registered | SlaveLinkState::Bridging))
+    {
+        return SlaveRelayStatus::Connected;
+    }
+    if master_credential_needed().is_some() {
+        return SlaveRelayStatus::CredentialNeeded;
+    }
+    if states.iter().any(|s| matches!(s, SlaveLinkState::Connecting)) {
+        return SlaveRelayStatus::Connecting;
+    }
+    SlaveRelayStatus::Idle
+}
+
 /// Read a slave port's current link state.
 /// True while this gateway is the one announcing its CP/M emulator to the
 /// master as the dialable `CPM` endpoint.  Set by the announcer task; read for
