@@ -156,6 +156,7 @@ fn main() {
     // `config::data_dir_display`.
     glog!("Data directory: {}", config::data_dir_display());
 
+
     // ── One gateway per directory ─────────────────────────────
     // Settled before a single listener is started, because the alternative is
     // what shipped until now: a second copy comes up fully, opens a window,
@@ -314,6 +315,23 @@ fn main() {
         // cycle because the config is re-read here; `configure_file_logging` is
         // idempotent and keeps the file open when the policy is unchanged.
         logger::configure_file_logging(logger::file_policy_from(&cfg));
+        // A slave says which key it will offer the master, because nothing
+        // else can: enrolling it means pasting this line into the master's
+        // `relay_authorized_keys`, and a slave is typically headless with a
+        // C64 for a console.  **After the config is read** -- the first
+        // version asked `get_config()` before `load_or_create_config()` and
+        // silently saw role "standalone", so the one machine that needs this
+        // line was the one machine that never printed it.
+        if cfg.gateway_role == "slave" {
+            match ssh::client_public_key_line() {
+                Ok(line) => glog!(
+                    "Relay: this slave's public key — add it to {} on the master:\n{}",
+                    ssh::RELAY_AUTHORIZED_KEYS_FILE,
+                    line.trim()
+                ),
+                Err(e) => glog!("Relay: could not read this slave's public key: {}", e),
+            }
+        }
         // Asks the policy, not `cfg.log_to_file`: a blank `log_file` disables
         // file logging too, and this line claimed "Logging to " with an empty
         // path when it consulted only the flag.  It also names the version,

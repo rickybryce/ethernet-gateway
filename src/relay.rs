@@ -945,18 +945,74 @@ async fn connect_master_relay_inner(
         }
     }
 
-    match session.authenticate_password(username, password).await {
-        Ok(russh::client::AuthResult::Success) => {}
-        Ok(_) => {
+    // **Offer the key before the password.**  `slave_master_password` is the
+    // only cleartext secret left in `egateway.conf`, and it cannot be hashed
+    // the way `password` is: the slave *presents* it, and a hash cannot be
+    // presented.  So the secret is removed rather than disguised -- the slave
+    // proves itself with the Ed25519 key it already generates for outbound SSH,
+    // once the master has that key in its `relay_authorized_keys`.
+    //
+    // The password remains the fallback, so an installation that has enrolled
+    // nothing is unchanged and an upgrade needs no coordination.  A master too
+    // old to know about keys simply refuses the method and the password runs.
+    let mut authed = false;
+    match crate::ssh::load_or_generate_client_key() {
+        Ok(key) => {
+            let hash_alg = session.best_supported_rsa_hash().await.ok().flatten().flatten();
+            match session
+                .authenticate_publickey(
+                    username,
+                    russh::keys::PrivateKeyWithHashAlg::new(std::sync::Arc::new(key), hash_alg),
+                )
+                .await
+            {
+                Ok(russh::client::AuthResult::Success) => {
+                    authed = true;
+                    glog!("Relay: authenticated to master {}:{} by public key", host, port);
+                }
+                // Not enrolled (or this master predates key auth).  That is an
+                // ordinary state, not a fault: fall through to the password.
+                Ok(_) => {}
+                Err(e) => {
+                    return Err(RelayConnectError::Network(format!("key auth error: {}", e)))
+                }
+            }
+        }
+        // No usable key is not fatal while a password exists -- say so once and
+        // carry on, rather than failing a slave that was working.
+        Err(e) => glog!("Relay: no client key ({}); falling back to the password", e),
+    }
+
+    if !authed {
+        // **An empty password after a refused key is a diagnosis, not a
+        // rejection.**  It means the operator has moved to keys and the
+        // enrolment has not been done (or was undone), and saying so here is
+        // the difference between a five-minute fix and reading a log for an
+        // hour.
+        if password.is_empty() {
             let _ = session
                 .disconnect(russh::Disconnect::ByApplication, "auth failed", "")
                 .await;
-            return Err(RelayConnectError::Auth(
-                "authentication rejected by master".to_string(),
-            ));
+            return Err(RelayConnectError::Auth(format!(
+                "master {}:{} refused this slave's public key and no \
+                 slave_master_password is set — add the slave's key to \
+                 {} on the master (the slave logs it at startup)",
+                host, port, crate::ssh::RELAY_AUTHORIZED_KEYS_FILE
+            )));
         }
-        // A transport error mid-auth is network, not a credential rejection.
-        Err(e) => return Err(RelayConnectError::Network(format!("auth error: {}", e))),
+        match session.authenticate_password(username, password).await {
+            Ok(russh::client::AuthResult::Success) => {}
+            Ok(_) => {
+                let _ = session
+                    .disconnect(russh::Disconnect::ByApplication, "auth failed", "")
+                    .await;
+                return Err(RelayConnectError::Auth(
+                    "authentication rejected by master".to_string(),
+                ));
+            }
+            // A transport error mid-auth is network, not a credential rejection.
+            Err(e) => return Err(RelayConnectError::Network(format!("auth error: {}", e))),
+        }
     }
 
     let channel = session

@@ -641,7 +641,7 @@
                     <tr><td>Default port</td><td>2222 (<code>ssh_port</code>).</td></tr>
                     <tr><td>Implementation</td><td>russh server (<code>src/ssh.rs</code>).</td></tr>
                     <tr><td>Host key</td><td>Ed25519, auto-generated on first run, persisted to <code>ethernetgateway-data/ethernet_ssh_host_key</code> (OpenSSH PEM, <code>0o600</code> on Unix).</td></tr>
-                    <tr><td>Authentication</td><td>Password only, against the unified <code>username</code> / <code>password</code> (shared with telnet and the web UI). Constant-time comparison.</td></tr>
+                    <tr><td>Authentication</td><td>The unified <code>username</code> / <code>password</code> (shared with telnet and the web UI), compared in constant time &mdash; <em>plus</em> public-key login for an enrolled <strong>slave</strong>, against <code>relay_authorized_keys</code>. Key auth is refused outright when that file is absent, so an installation that has never used it is unchanged.</td></tr>
                     <tr><td>Brute-force lockout</td><td>Shared per-IP map with telnet: 3 failures &rarr; 5-minute ban. <code>auth_rejection_time</code> is 1&nbsp;s.</td></tr>
                     <tr><td>Capacity</td><td>Bounded by <code>max_sessions</code>; connections over the cap are rejected at auth.</td></tr>
                 </table>
@@ -663,12 +663,20 @@
                 </div>
 
                 <div class="callout callout-warn">
-                    <strong>Server auth is password-only.</strong> Public-key login
-                    <em>into</em> the gateway's SSH server is not offered &mdash; the server
-                    accepts the unified password. (Public keys are used in the
-                    <em>other</em> direction; see <a href="#gateway">the gateway</a>.) This
-                    is a deliberate simplicity choice for the gateway's trusted-user threat
-                    model &mdash; see <a href="#security">Security</a>.
+                    <strong>Server auth is the unified password, plus keys for a
+                    slave.</strong> Public-key login <em>into</em> the gateway's SSH server
+                    is offered only to a <strong>slave</strong> whose key has been enrolled
+                    in <code>relay_authorized_keys</code>; every other client authenticates
+                    with the unified password. That exists so a slave need not store the
+                    master's login in cleartext &mdash; <code>slave_master_password</code>
+                    is <em>presented</em> rather than checked, so it can never be a hash,
+                    and a key removes the secret instead of disguising it. A rejected key
+                    does not count toward the per-IP lockout: a public key is not
+                    guessable, and counting it would ban the ordinary sequence of a slave
+                    offering a key, being refused, then logging in with its password.
+                    (Public keys are also used in the <em>other</em> direction; see
+                    <a href="#gateway">the gateway</a>.) See
+                    <a href="#security">Security</a>.
                 </div>
             </div>
 
@@ -937,9 +945,9 @@ example.com:22 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...
                     <li><strong>Owner-only key files.</strong> Private keys and the dial-history file are <code>0o600</code>, written atomically so they are never briefly world-readable.</li>
                 </ul>
                 <div class="callout callout-info">
-                    <strong>Known limitations (by design).</strong> The inbound server is
-                    password-only (no client-certificate / pubkey login <em>into</em> the
-                    gateway), and private keys are stored without a passphrase because the
+                    <strong>Known limitations (by design).</strong> The inbound server takes the unified
+                    password from every client and a public key only from an enrolled
+                    slave (no client certificates), and private keys are stored without a passphrase because the
                     process runs unattended. Both are deliberate trade-offs for the
                     trusted-user / LAN threat model. If you expose the gateway to a hostile
                     network, front it with a firewall or VPN.

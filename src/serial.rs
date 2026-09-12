@@ -1714,9 +1714,13 @@ fn relay_outage_message(
             m,
             render_backoff(delay)
         ),
+        // The remedy names BOTH credentials a slave can present, because a
+        // slave that has moved to key auth has no password to check and being
+        // sent to look at one teaches the wrong habit.  The inner message says
+        // which of the two actually failed.
         E::Auth(m) => format!(
             "master {}:{} auth rejected ({}) — backing off {}; \
-             check slave_master_username/password",
+             check slave_master_username/password, or enrol this slave's key",
             host,
             mport,
             m,

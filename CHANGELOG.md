@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A slave can log in to its master with a key instead of storing the master's
+  password.**  `slave_master_password` was the one secret in `egateway.conf`
+  that could not be hashed -- a slave *presents* it rather than checking it, and
+  a hash cannot be presented -- and it is not just "a relay password": it is the
+  master's **unified** login, which opens telnet, SSH and the web UI.  The fix
+  removes the secret rather than disguising it (encrypting it would put the
+  decrypting key on the same disk): the slave authenticates with the Ed25519 key
+  it already generates for outbound SSH, whose private half never leaves the
+  machine.  Paste the line the slave logs at startup into
+  `relay_authorized_keys` on the master, clear `slave_master_password`, done.
+  Verified between two live gateways: key auth registers both ports, a password
+  with no key enrolled still works unchanged, and clearing the password before
+  enrolling the key reports exactly that, naming the file to fix it.
+  **Nothing changes for an existing pair** -- the slave offers its key first and
+  falls back to the password, and a master with no `relay_authorized_keys` file
+  refuses key auth outright, so the two ends may be upgraded in either order.
+  A rejected key deliberately does *not* count toward the per-IP lockout: a
+  public key is not guessable, and counting it would ban the ordinary sequence
+  of a slave offering a key, being refused, then logging in with its password.
+
+### Changed
+
+- **Every telnet session is asked which terminal it is**, even one that
+  announced a type over TTYPE.  That announcement is made by whatever speaks
+  telnet, which for a Commodore on a WiFi modem is the *modem*: tcpser reports
+  `VT100` for a C64, so the gateway answered "Terminal detected: ANSI" nine
+  seconds before the C64 pressed INST/DEL and sent it 80-column menus whose
+  lowercase letters render from the C64's graphics range.  The announcement is
+  now the **fallback** for a session that never presses a key (10 s), so a probe
+  or script is believed rather than dropped, and it lands on exactly the answer
+  it would have given before.  SSH is unchanged: its `TERM` comes from the
+  client's own pty request, with no modem in a position to answer for it.
+
 ### Fixed
 
 - **A peer-dial across the master crossbar no longer answers `CONNECT` for a

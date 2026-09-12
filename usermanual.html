@@ -797,7 +797,7 @@ phone-number slots are covered in chapter 9.
         <tr><td><code>slave_master_host</code></td><td>string</td><td><em>(empty)</em></td><td>Slave only: the master's hostname/IP.</td></tr>
         <tr><td><code>slave_master_port</code></td><td>u16</td><td><code>2222</code></td><td>Slave only: the master's SSH port.</td></tr>
         <tr><td><code>slave_master_username</code></td><td>string</td><td><em>(empty)</em></td><td>Slave only: must match the master's unified username.</td></tr>
-        <tr><td><code>slave_master_password</code></td><td>string</td><td><em>(empty)</em></td><td>Slave only: must match the master's unified password.</td></tr>
+        <tr><td><code>slave_master_password</code></td><td>string</td><td><em>(empty)</em></td><td>Slave only: must match the master&rsquo;s unified password. <strong>Leave it empty once the slave&rsquo;s key is enrolled</strong> &mdash; see &sect;9.14. It is the one value in this file that cannot be hashed, because the slave <em>presents</em> it rather than checking it, so removing it is better than disguising it. A slave offers its key first and falls back to this only if the key is refused.</td></tr>
         <tr><td><code>relay_transport</code></td><td>string</td><td><code>ssh</code></td><td>Relay transport; only <code>ssh</code> is implemented.</td></tr>
         <tr><td><code>transfer_dir</code></td><td>string</td><td><code>ethernetgateway-data/transfer</code></td><td>Base directory for file transfers. A relative value is taken from the launch directory; an absolute one is used as written.</td></tr>
         <tr><td><code>place_bundled_terminals</code></td><td>bool</td><td><code>true</code></td><td>Write <code>EGT8080.COM</code> and <code>EGT80.COM</code> when they are missing. They are this gateway&rsquo;s own CP/M terminal in period assembly, compiled into the binary, and each is placed in <em>two</em> places: CP/M drive A:, where the emulator runs it, and loose in <code>transfer_dir</code>, where the file-transfer menus can send it to real hardware without starting the emulator at all. Nothing else puts them there on a fresh install. A file already present is <strong>never</strong> overwritten whatever this says &mdash; each terminal saves its settings inside its own <code>.COM</code>, so refreshing a copy would discard your configuration &mdash; so this only decides whether a <em>missing</em> one is written. Turn it off if you keep your own build, or your own <code>EGT80.COM</code> from before 0.9.2, and would rather a file you deleted stayed deleted instead of reappearing on the next restart.</td></tr>
@@ -1446,6 +1446,13 @@ password as a <strong>PBKDF2 hash</strong>, so reading the file does not yield a
 usable password. The username, the Groq API key and
 <code>slave_master_password</code> are still plain text. Protect the file with
 the <code>0600</code> permissions the gateway sets automatically.
+</p>
+<p>
+<code>slave_master_password</code> need not be stored at all: a slave can prove
+itself to its master with the Ed25519 key it already generates for outbound SSH,
+which never leaves the machine (&sect;9.14). That is better than encrypting the
+password in this file, because the key that decrypted it would have to live on
+the same disk.
 </aside>
 
 <h2>6.4 Web Configuration Interface</h2>
@@ -4429,6 +4436,43 @@ these settings are editable from the telnet
 sub-screen, the web config <em>Master/Slave</em> card, and the GUI Server
 <em>More&#8230;</em> popup.
 </p>
+
+<h3>9.14.2a Logging in without storing the master&rsquo;s password</h3>
+<p>
+<code>slave_master_password</code> is the one secret in <code>egateway.conf</code>
+that cannot be stored as a hash: the slave <strong>presents</strong> it to the
+master rather than checking it, and a hash cannot be presented. Rather than
+encrypt it &mdash; which would only move the problem, since the key that
+decrypted it would sit on the same disk &mdash; a slave can prove itself with
+the Ed25519 key it already generates for outbound SSH. The private half never
+leaves the slave.
+</p>
+<p>To enrol a slave:</p>
+<ol>
+<li>Start the slave. It logs its public key at startup:
+<pre><code>Relay: this slave's public key — add it to
+ethernetgateway-data/relay_authorized_keys on the master:
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... </code></pre></li>
+<li>On the <strong>master</strong>, paste that line into
+<code>ethernetgateway-data/relay_authorized_keys</code> (one key per line;
+blank lines and <code>#</code> comments are ignored, and a trailing comment
+naming the machine is good practice). No restart is needed &mdash; the file is
+read once per incoming connection.</li>
+<li>On the <strong>slave</strong>, clear <code>slave_master_password</code>.</li>
+</ol>
+<p>
+The slave then logs <code>authenticated to master … by public key</code> and the
+master logs <code>authenticated by public key</code> with the key&rsquo;s
+fingerprint. Nothing else changes: the ports register exactly as before.
+</p>
+<aside class="note">
+<strong>Nothing breaks if you do none of this.</strong> A slave offers its key
+first and falls back to <code>slave_master_password</code>, and a master with no
+<code>relay_authorized_keys</code> file refuses key authentication outright &mdash;
+so an existing pair keeps working untouched, and the two ends can be upgraded in
+either order. If you clear the password <em>before</em> enrolling the key, the
+slave says so precisely, naming the file to add the key to.
+</aside>
 
 <h3>9.14.3 How Ports Relay</h3>
 <ul>
