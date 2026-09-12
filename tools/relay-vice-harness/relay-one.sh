@@ -50,6 +50,13 @@ DISPLAY=:0 timeout 120 python3 freshdisk.py 2>&1 | grep -v "X protocol\|Xlib" ||
 # Report the transfer's status, not the filter's: ending on a pipe would make
 # this script exit with grep's status, and grep answers 0 when it printed
 # something -- so a failed run that happened to print a line would look clean.
-DISPLAY=:0 timeout 660 python3 run-transfer.py "$PROTO" "$DIR" "$DIALNO" 2>&1 \
+# On the telnet link the gateway the C64 dials is the SLAVE's own telnet
+# server, and the files under test belong to the MASTER -- so the run takes the
+# slave's Telnet Gateway out to it.  Without this the telnet leg would test the
+# slave against itself and pass while proving nothing about a relay.
+TG=()
+[ "$LINK" = telnet ] && TG=("tg=${MASTER_TG:-192.168.1.178:2323}")
+
+DISPLAY=:0 timeout 660 python3 run-transfer.py "$PROTO" "$DIR" "$DIALNO" "${TG[@]}" 2>&1 \
     | grep -v "X protocol\|Xlib"
 exit "${PIPESTATUS[0]}"
