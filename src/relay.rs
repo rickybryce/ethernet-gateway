@@ -539,6 +539,109 @@ impl russh::client::Handler for SlaveRelayHandler {
 /// proxy's `GATEWAY_CONNECT_TIMEOUT`).
 const RELAY_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// A master password typed at a screen, held **in memory only**.
+///
+/// There is no reason to write it down. It is needed for exactly one login --
+/// the one that enrols this slave's key -- and after that the key does the
+/// work, so persisting it would create on disk the very thing this whole
+/// feature exists to remove, for the sake of a few seconds.
+///
+/// The config's `slave_master_password` is still read (a wizard or a
+/// hand-edited file may carry one, and those are erased once the key works),
+/// but a password an operator types at a screen never reaches the file at all.
+///
+/// Lost on restart, deliberately: if the gateway is restarted before the key is
+/// enrolled, the screen asks again. That is a fair price for a secret that was
+/// never stored, and the ask is one line.
+static PENDING_MASTER_PASSWORD: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Bumped whenever something happens that makes an immediate retry worthwhile.
+///
+/// A relay that has just been refused backs off for minutes, which is right for
+/// a master that is down and wrong the instant an operator types the missing
+/// password: without this they would enter it, see nothing happen, and
+/// reasonably conclude it had not worked.  The backoff waits poll this, so a
+/// change cuts the wait short.
+static RETRY_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Ask the relay loops to stop waiting and try again now.
+pub fn request_retry_now() {
+    RETRY_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The current generation, for a waiter to compare against.
+pub fn retry_generation() -> u64 {
+    RETRY_GENERATION.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Hold a password an operator just typed, for the next relay connection.
+pub fn set_pending_master_password(password: &str) {
+    {
+        let mut g = PENDING_MASTER_PASSWORD.lock().unwrap_or_else(|e| e.into_inner());
+        *g = Some(password.to_string());
+    }
+    // Try it now rather than in six minutes: an operator who types a password
+    // and watches nothing happen has no way to tell "waiting" from "wrong".
+    request_retry_now();
+}
+
+/// Forget it -- the key works now, or the operator cleared it.
+pub fn clear_pending_master_password() {
+    let mut g = PENDING_MASTER_PASSWORD.lock().unwrap_or_else(|e| e.into_inner());
+    *g = None;
+}
+
+/// The password to try: the one typed at a screen, else whatever is configured.
+fn master_password_to_try(configured: &str) -> String {
+    PENDING_MASTER_PASSWORD
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_else(|| configured.to_string())
+}
+
+/// The master this slave cannot authenticate to, if that is where it stands.
+///
+/// Set when a registration is refused **and there is no password left to try**,
+/// which is the one relay failure an operator can fix in ten seconds and the one
+/// they will otherwise never see: a slave is headless, so the log line naming it
+/// is read by nobody. Cleared the moment any relay connection authenticates.
+///
+/// Read by all three configuration surfaces and by the telnet/serial session
+/// start, so whoever reaches this gateway first is told, wherever they arrive.
+static MASTER_CREDENTIAL_NEEDED: std::sync::Mutex<Option<(String, u16)>> =
+    std::sync::Mutex::new(None);
+
+/// Note that this slave has no usable credential for its master.
+pub fn note_master_credential_needed(host: &str, port: u16) {
+    let mut g = MASTER_CREDENTIAL_NEEDED.lock().unwrap_or_else(|e| e.into_inner());
+    if g.is_none() {
+        glog!(
+            "Relay: no usable credential for master {}:{} — the next person to reach \
+             this gateway will be asked for the master's password.",
+            host, port
+        );
+    }
+    *g = Some((host.to_string(), port));
+}
+
+/// Withdraw it because a relay connection authenticated.
+///
+/// The half that makes the prompt trustworthy: a screen that keeps asking after
+/// the problem is gone teaches an operator to dismiss it.
+pub fn clear_master_credential_needed() {
+    let mut g = MASTER_CREDENTIAL_NEEDED.lock().unwrap_or_else(|e| e.into_inner());
+    *g = None;
+}
+
+/// The master to ask about, if this slave currently has no way in.
+pub fn master_credential_needed() -> Option<(String, u16)> {
+    MASTER_CREDENTIAL_NEEDED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
 /// Enrolment and the wipe each happen **once per process**, not once per
 /// connection: a slave opens several relay connections (port A, port B, the
 /// CP/M endpoint) and they would otherwise each offer the same key and each
@@ -1106,6 +1209,10 @@ async fn connect_master_relay_inner(
         Err(e) => glog!("Relay: no client key ({}); falling back to the password", e),
     }
 
+    // A password typed at a screen wins over the configured one, and never
+    // touched the disk to get here.
+    let password = &master_password_to_try(password);
+
     if !authed {
         // **An empty password after a refused key is a diagnosis, not a
         // rejection.**  It means the operator has moved to keys and the
@@ -1116,10 +1223,12 @@ async fn connect_master_relay_inner(
             let _ = session
                 .disconnect(russh::Disconnect::ByApplication, "auth failed", "")
                 .await;
+            note_master_credential_needed(host, port);
             return Err(RelayConnectError::Auth(format!(
                 "master {}:{} refused this slave's public key and no \
-                 slave_master_password is set — add the slave's key to \
-                 {} on the master (the slave logs it at startup)",
+                 slave_master_password is set — enter the master's password on \
+                 any configuration screen, or add this slave's key to {} on the \
+                 master (the slave logs it at startup)",
                 host, port, crate::ssh::RELAY_AUTHORIZED_KEYS_FILE
             )));
         }
@@ -1138,12 +1247,16 @@ async fn connect_master_relay_inner(
         }
     }
 
+    clear_master_credential_needed();
     if by_key {
         // **The key works, so the password is no longer needed -- and only now
         // is that safe to act on.**  Wiping it on the strength of the master
         // saying "stored" would strand this slave if the enrolment were lost
         // between then and the next connect; waiting for a key login to
         // actually succeed proves the whole path before discarding the fallback.
+        // The typed one first: it is the copy that exists right now, and the
+        // config may never have had one at all.
+        clear_pending_master_password();
         forget_master_password_once();
     } else {
         // Authenticated by password: offer the key, so the next connection can

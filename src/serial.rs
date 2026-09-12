@@ -2499,7 +2499,12 @@ async fn cpm_wait_stop(stop: &Arc<AtomicBool>) {
 async fn cpm_announce_backoff(stop: &Arc<AtomicBool>, dur: Duration) {
     let mut waited = Duration::ZERO;
     let step = Duration::from_millis(200);
-    while waited < dur && !stop.load(Ordering::SeqCst) {
+    // Same nudge as `slave_backoff`: a newly typed password is tried at once.
+    let since = crate::relay::retry_generation();
+    while waited < dur
+        && !stop.load(Ordering::SeqCst)
+        && crate::relay::retry_generation() == since
+    {
         tokio::time::sleep(step).await;
         waited += step;
     }
@@ -2658,9 +2663,14 @@ pub async fn cpm_slave_announce(stop: Arc<AtomicBool>) {
 fn slave_backoff(idx: usize, shutdown: &Arc<AtomicBool>, backoff: Duration) {
     let mut waited = Duration::ZERO;
     let step = Duration::from_millis(100);
+    // Cut the wait short when an operator has just given us something new to
+    // try -- typing the master's password and then watching six minutes of
+    // nothing is indistinguishable from having typed it wrong.
+    let since = crate::relay::retry_generation();
     while waited < backoff
         && !shutdown.load(Ordering::SeqCst)
         && !SERIAL_RESTART[idx].load(Ordering::SeqCst)
+        && crate::relay::retry_generation() == since
     {
         std::thread::sleep(step);
         waited += step;

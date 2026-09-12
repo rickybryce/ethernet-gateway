@@ -1032,6 +1032,21 @@ fn apply_form_post(body: &[u8]) -> (String, SaveAction) {
     // a file (`gateway_hosts`), not the config, and it must be an explicit press
     // -- the gateway will not re-pin a changed host key on its own, because a
     // reinstalled master and a man-in-the-middle look identical from here.
+    // The slave's master password, typed into the red panel.  Non-empty only:
+    // an empty box is somebody saving an unrelated setting, not a request to
+    // forget the credential.
+    if fields.contains_key("master_password_save")
+        && let Some(pw) = fields.get("master_password_entry").filter(|v| !v.trim().is_empty())
+    {
+        // In memory only -- see `relay::set_pending_master_password`.
+        crate::relay::set_pending_master_password(pw.trim());
+        crate::relay::clear_master_credential_needed();
+        let msg = "Master password saved. The slave will retry, and erase it \
+                   again once its key works."
+            .to_string();
+        notice = if notice.is_empty() { msg } else { format!("{notice} {msg}") };
+    }
+
     if let Some(id) = fields.get("resolve_id").filter(|v| !v.is_empty()) {
         let msg = match crate::resolve::resolve(id) {
             Ok(note) => note,
@@ -2216,6 +2231,46 @@ fn render_resolve_panel() -> String {
     out
 }
 
+/// The red panel a slave shows when it cannot log in to its master.
+///
+/// Its own panel rather than an entry in the resolve list, because the remedy
+/// here is a *value* and not a button: the operator has to type something, and
+/// the resolve mechanism offers decisions rather than fields. Shown only when
+/// the relay has actually failed that way -- a slave that is registering
+/// happily says nothing.
+///
+/// The words come from `master_password_screen_lines`, so this page and the
+/// C64 screen cannot drift into describing the same fault differently.
+fn render_master_password_panel() -> String {
+    let Some((host, port)) = crate::relay::master_credential_needed() else {
+        return String::new();
+    };
+    let mut out = String::new();
+    out.push_str("<div class=\"notice\" style=\"border-color:#c33\">");
+    out.push_str("<strong>Master password needed</strong><p>");
+    let body = crate::telnet::master_password_screen_lines(&host, port);
+    let mut para = String::new();
+    for line in body {
+        if line.is_empty() {
+            para.push_str("<br><br>");
+        } else {
+            if !para.is_empty() && !para.ends_with("<br><br>") {
+                para.push(' ');
+            }
+            para.push_str(&html_escape(&line));
+        }
+    }
+    out.push_str(&para);
+    out.push_str("</p>");
+    // Its own form: the main settings form must not carry this, or saving any
+    // unrelated setting would submit an empty password and read as "clear it".
+    out.push_str(
+        "<form method=\"post\" action=\"/master-password\" style=\"margin-top:.6em\">         <input type=\"password\" name=\"master_password\" placeholder=\"Master password\"          style=\"max-width:18em\">          <button type=\"submit\">Save and retry</button></form>",
+    );
+    out.push_str("</div>");
+    out
+}
+
 fn render_main_page(cfg: &Config, notice: Option<String>, show_port_check: bool) -> String {
     let mut out = String::with_capacity(32 * 1024);
     out.push_str("<!doctype html><html lang=\"en\"><head>");
@@ -2243,6 +2298,7 @@ fn render_main_page(cfg: &Config, notice: Option<String>, show_port_check: bool)
     // drawn before the form opens would render perfectly and do nothing.  Only
     // while there are any, because a panel that is always there is a panel
     // nobody reads.  See `crate::resolve`.
+    out.push_str(&render_master_password_panel());
     out.push_str(&render_resolve_panel());
     out.push_str(&render_grid(cfg));
     out.push_str(&render_more_popups(cfg));

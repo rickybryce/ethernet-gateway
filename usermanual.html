@@ -4486,6 +4486,24 @@ A revoked slave that has already erased its password has no credential left, and
 says so precisely. To restore it, enter the master&rsquo;s password on that slave
 again: it re-enrols on the next connection and erases it again.
 </p>
+<h4>If the slave cannot get in</h4>
+<p>
+A slave whose key is refused and which has no password cannot register at all,
+and it is headless &mdash; so it asks the next person who reaches it. The
+desktop and web editors show a red <strong>Master password needed</strong> panel
+with a box to type it in, and a telnet or serial session gets the same thing as
+a screen <em>before</em> the main menu, sized for a 40-column C64. It always
+offers to skip: the rest of the gateway works perfectly well while the relay is
+down.
+</p>
+<p>
+The password you type there is <strong>held in memory and never written to
+<code>egateway.conf</code></strong>. It is needed for one login &mdash; the one
+that enrols this slave's key &mdash; so storing it would put on disk the very
+thing this is here to remove. Entering it also cuts short the retry backoff, so
+the slave tries again within seconds rather than minutes. If the gateway is
+restarted before the key is enrolled, the screen simply asks again.
+</p>
 <aside class="note">
 <strong>Compatibility.</strong> None of this requires the two ends to be upgraded
 together. A master too old to know about enrolment refuses that one request, and

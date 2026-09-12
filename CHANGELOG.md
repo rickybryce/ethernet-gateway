@@ -48,6 +48,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gateway is a master with `master_accept_relays` on, so a standalone gateway
   with SSH switched on cannot have keys pushed into it.
 
+- **A slave that cannot reach its master now asks whoever arrives.**  It is
+  headless, so the log line naming the fault was read by nobody.  The desktop
+  and web editors show a red "Master password needed" panel with a box; a
+  telnet or serial session gets the same words as a screen **before** the main
+  menu, fitted to a 40-column C64 and always skippable.  The password typed
+  there is **held in memory and never written to `egateway.conf`** -- it is
+  needed for the single login that enrols the key, so storing it would put on
+  disk the thing this feature removes.  Typing it also cuts short the retry
+  backoff: six minutes of nothing is indistinguishable from having typed it
+  wrong.  Verified live: a slave with no key and no password showed the screen,
+  took the password, retried within seconds, enrolled its key and registered --
+  with the config file still empty throughout.
+
 ### Changed
 
 - **Every telnet session is asked which terminal it is**, even one that

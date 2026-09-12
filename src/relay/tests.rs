@@ -2024,3 +2024,68 @@ async fn test_relay_onward_dial_zmodem_large() {
 
     let _ = tokio::time::timeout(Duration::from_secs(5), dialer).await;
 }
+
+/// **The prompt appears only when the slave really cannot get in, and leaves
+/// the moment it can.**
+///
+/// Both halves matter. A screen shown when nothing is wrong trains an operator
+/// to click past it; one that stays after the fix teaches them it does not
+/// work. This is the state all three surfaces read, so it is the one place the
+/// rule can be wrong for every surface at once.
+#[test]
+fn test_the_master_credential_prompt_appears_and_withdraws() {
+    super::clear_master_credential_needed();
+    assert!(super::master_credential_needed().is_none(), "nothing wrong, nothing shown");
+
+    super::note_master_credential_needed("192.168.1.178", 2222);
+    assert_eq!(
+        super::master_credential_needed(),
+        Some(("192.168.1.178".to_string(), 2222)),
+        "the surfaces must be told which master to ask about"
+    );
+
+    // Reported again on every retry of a backoff loop -- one state, not a pile.
+    super::note_master_credential_needed("192.168.1.178", 2222);
+    assert_eq!(super::master_credential_needed(), Some(("192.168.1.178".to_string(), 2222)));
+
+    super::clear_master_credential_needed();
+    assert!(
+        super::master_credential_needed().is_none(),
+        "a slave that connected must stop asking"
+    );
+}
+
+/// **A password typed at a screen is never written down.**
+///
+/// It is needed for one login -- the one that enrols this slave's key -- so
+/// persisting it would put on disk the very thing the feature removes. It wins
+/// over a configured one while it is held, and the key working forgets it.
+#[test]
+fn test_a_typed_master_password_is_held_in_memory_only() {
+    super::clear_pending_master_password();
+    assert_eq!(
+        super::master_password_to_try("from-the-config"),
+        "from-the-config",
+        "with nothing typed, the configured password is what is tried"
+    );
+
+    super::set_pending_master_password("typed-at-a-screen");
+    assert_eq!(
+        super::master_password_to_try("from-the-config"),
+        "typed-at-a-screen",
+        "what the operator just typed wins"
+    );
+    // Nothing here touches the config: the value lives in this process only.
+    assert!(
+        crate::config::get_config().slave_master_password.is_empty()
+            || crate::config::get_config().slave_master_password != "typed-at-a-screen",
+        "a typed password must not reach the config"
+    );
+
+    super::clear_pending_master_password();
+    assert_eq!(
+        super::master_password_to_try("from-the-config"),
+        "from-the-config",
+        "once the key works the typed password is forgotten"
+    );
+}

@@ -6576,6 +6576,45 @@ async fn test_a_silent_announced_client_falls_back_instead_of_being_dropped() {
     assert_eq!(session.erase_char, session::DEFAULT_ERASE_CHAR);
 }
 
+/// **The master-password screen fits a C64.**
+///
+/// 40 columns and 22 rows is the budget for every screen this gateway draws,
+/// and this one is drawn on the narrowest terminal it serves at the worst
+/// moment -- a slave whose relay is down, reached over a serial modem. Counting
+/// the whole screen, not just the prose: the frame, the indent, the prompt and
+/// the confirmation all take rows too.
+#[test]
+fn test_the_master_password_screen_fits_a_c64() {
+    // The longest address this can name: IPv6, or a long hostname.
+    for (host, port) in [
+        ("192.168.1.178", 2222u16),
+        ("2001:0db8:85a3:0000:0000:8a2e:0370:7334", 65535),
+        ("a-rather-long-master-hostname.local", 2222),
+    ] {
+        let body = crate::telnet::session::master_password_screen_lines(host, port);
+        for line in &body {
+            // Two-space indent, as the screen renders them.
+            assert!(
+                line.chars().count() + 2 <= 40,
+                "{:?} is {} columns with its indent",
+                line,
+                line.chars().count() + 2
+            );
+        }
+        // 3 frame rows + a blank + the body + a blank + the prompt + 2 rows of
+        // confirmation + a blank + "press any key" — all inside 22.
+        let rows = 3 + 1 + body.len() + 1 + 1 + 2 + 1 + 1;
+        assert!(rows <= 22, "the screen is {rows} rows for {host}");
+    }
+    // A very long address wraps rather than being silently cut: it is on its
+    // own line precisely so the rest of the screen cannot be pushed out.
+    let long = crate::telnet::session::master_password_screen_lines(
+        "2001:0db8:85a3:0000:0000:8a2e:0370:7334",
+        65535,
+    );
+    assert!(long.iter().any(|l| l.contains("2001:0db8")), "the address must be shown");
+}
+
 /// **A terminal announced AFTER the keypress does not overrule it.**
 ///
 /// `SB TTYPE IS` can arrive at any moment, including the input drain that runs

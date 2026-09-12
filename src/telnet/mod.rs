@@ -82,6 +82,9 @@ pub(crate) fn is_normal_disconnect(e: &std::io::Error) -> bool {
 pub(crate) use cpm_emu::{place_bundled_terminals, DriveA};
 mod session;
 pub(crate) use session::is_backspace_key;
+/// Shared with the web and desktop editors so all three surfaces describe a
+/// slave's missing credential in the same words.
+pub(crate) use session::master_password_screen_lines;
 // Test-only re-exports: `match_terminal_name` is now reached through
 // `TelnetSession::note_announced_terminal` (shared by telnet TTYPE and the SSH
 // pty request), so production code no longer names it directly.

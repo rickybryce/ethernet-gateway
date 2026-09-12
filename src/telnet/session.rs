@@ -128,7 +128,104 @@ pub(crate) const ANNOUNCED_WAIT: std::time::Duration = std::time::Duration::from
 /// prompt exists to identify.
 pub(crate) const DETECT_REPROMPT: &str = "Space cannot erase. Press BACKSPACE: ";
 
+/// The screen a slave shows when it cannot log in to its master.
+///
+/// **Fitted to the narrowest terminal this gateway serves** — a 40-column
+/// PETSCII C64, with the two-space indent the menus use — and short enough to
+/// leave room for the prompt inside 22 rows.  Held by
+/// `test_the_master_password_screen_fits_a_c64` rather than by counting here.
+///
+/// A pure function so the text can be tested without a session, and so the
+/// desktop and web surfaces can show the same words rather than three
+/// paraphrases that drift.
+/// The widest a body line may be: 40 columns less the two-space indent.
+const BODY_WIDTH: usize = 38;
+
+pub(crate) fn master_password_screen_lines(host: &str, port: u16) -> Vec<String> {
+    let mut lines = vec![
+        "This gateway is a SLAVE and cannot".to_string(),
+        "log in to its master at".to_string(),
+    ];
+    // **Wrapped, not truncated.**  The address is the point of the line -- it
+    // says WHICH master -- and an IPv6 one runs to 45 columns with its port.
+    // Cutting it would hide the part an operator checks against their config;
+    // a second row is affordable and a missing octet is not.
+    let addr = format!("{}:{}", host, port);
+    let mut rest = addr.as_str();
+    while !rest.is_empty() {
+        let take = rest.chars().count().min(BODY_WIDTH);
+        let at = rest.char_indices().nth(take).map(|(i, _)| i).unwrap_or(rest.len());
+        lines.push(rest[..at].to_string());
+        rest = &rest[at..];
+    }
+    lines.extend([
+        String::new(),
+        "Its key was refused and no password".to_string(),
+        "is stored, so it cannot register.".to_string(),
+        String::new(),
+        "Check the master is up and reachable".to_string(),
+        "at that address, then enter its".to_string(),
+        "password. It is used once to enrol".to_string(),
+        "this slave's key and is not stored.".to_string(),
+    ]);
+    lines
+}
+
 impl TelnetSession {
+
+    /// Ask for the master's password, if this slave has no way in.
+    ///
+    /// Shown **before the main menu**, because a slave is headless and the
+    /// operator who can fix this is whoever dialled in — on a C64 over a serial
+    /// modem as often as not.  Skipping is always allowed: the gateway's other
+    /// features work perfectly well while the relay is down, and a screen that
+    /// could not be passed would lock somebody out of their own gateway.
+    pub(in crate::telnet) async fn offer_master_password(
+        &mut self,
+    ) -> Result<(), std::io::Error> {
+        let Some((host, port)) = crate::relay::master_credential_needed() else {
+            return Ok(());
+        };
+        self.clear_screen().await?;
+        self.send_line(&self.separator()).await?;
+        self.send_line(&format!("  {}", self.red("MASTER PASSWORD NEEDED"))).await?;
+        self.send_line(&self.separator()).await?;
+        self.send_line("").await?;
+        for line in master_password_screen_lines(&host, port) {
+            if line.is_empty() {
+                self.send_line("").await?;
+            } else {
+                self.send_line(&format!("  {}", line)).await?;
+            }
+        }
+        self.send_line("").await?;
+        self.send("  Password (ENTER to skip): ").await?;
+        self.flush().await?;
+
+        let typed = self.get_password_input().await?.unwrap_or_default();
+        if typed.trim().is_empty() {
+            self.send_line("").await?;
+            self.send_line("  Skipped. The relay stays down.").await?;
+        } else {
+            // **Held in memory, never written.** It is needed for exactly one
+            // login -- the one that enrols this slave's key -- so writing it to
+            // `egateway.conf` would put on disk the very thing this feature
+            // exists to remove, for the sake of a few seconds.
+            crate::relay::set_pending_master_password(typed.trim());
+            // Cleared here as well as on a successful connect: the retry may be
+            // minutes away on a backoff, and a screen that goes on demanding a
+            // password somebody just typed reads as "it did not take".
+            crate::relay::clear_master_credential_needed();
+            self.send_line("").await?;
+            self.send_line("  Held for the next attempt. It is").await?;
+            self.send_line("  not written to the config.").await?;
+        }
+        self.send_line("").await?;
+        self.send("  Press any key to continue...").await?;
+        self.flush().await?;
+        let _ = self.session_read_byte().await?;
+        Ok(())
+    }
 
     // ─── Terminal detection ─────────────────────────────────
 
@@ -803,6 +900,12 @@ impl TelnetSession {
         // The main menu render does its own clear + banner; emitting a
         // separate welcome banner here would just flash on screen before
         // being wiped, which is especially painful at 1200 baud on a C64.
+        // **Before the menu, not inside it.**  A slave that cannot reach its
+        // master is broken in the one way the person arriving can fix, and on
+        // a headless slave that person is whoever just dialled in.  Putting it
+        // behind a menu item would mean they had to already know.
+        self.offer_master_password().await?;
+
         match self.run_menu_loop().await {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {

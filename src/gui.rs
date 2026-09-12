@@ -739,6 +739,13 @@ struct App {
     kermit_server_port_buf: String,
     web_port_buf: String,
     slave_master_port_buf: String,
+    /// What the operator is typing into the "master password needed" panel.
+    ///
+    /// Its own field rather than the config's `slave_master_password`, which
+    /// the editor deliberately renders empty: typing into that box and pressing
+    /// Save is a different act from answering this panel, and conflating them
+    /// would make an unrelated Save look like an answer.
+    master_pw_entry: String,
     max_sessions_buf: String,
     idle_timeout_buf: String,
     negotiation_timeout_buf: String,
@@ -1172,6 +1179,7 @@ impl App {
         Self {
             cfg,
             last_synced_cfg,
+            master_pw_entry: String::new(),
             console_lines: Vec::new(),
             theme_applied: false,
             local_ip: local_ip(),
@@ -5384,6 +5392,56 @@ impl eframe::App for App {
                 // advisory; these carry an action, and dismissing an action
                 // leaves the problem in place with nothing on screen about it.
                 // They leave when they are resolved or when they stop applying.
+                // A slave that cannot log in to its master. Above the resolve
+                // list and in the same red frame, but its own panel: the remedy
+                // is a *value* the operator types, where a resolve entry offers
+                // a decision to press. The words come from the C64 screen's own
+                // function, so the three surfaces cannot drift into describing
+                // one fault differently.
+                if let Some((mhost, mport)) = crate::relay::master_credential_needed() {
+                    egui::Frame::group(ui.style())
+                        .fill(WARN_BG)
+                        .stroke(Stroke::new(1.5_f32, WARN_BORDER))
+                        .show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            ui.label(
+                                egui::RichText::new("Master password needed")
+                                    .strong()
+                                    .color(RED_ALERT),
+                            );
+                            for line in
+                                crate::telnet::master_password_screen_lines(&mhost, mport)
+                            {
+                                if line.is_empty() {
+                                    ui.add_space(4.0);
+                                } else {
+                                    ui.label(line);
+                                }
+                            }
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.master_pw_entry)
+                                        .password(true)
+                                        .desired_width(200.0)
+                                        .hint_text("Master password"),
+                                );
+                                if ui.button("Save and retry").clicked()
+                                    && !self.master_pw_entry.trim().is_empty()
+                                {
+                                    // In memory only -- see
+                                    // `relay::set_pending_master_password`.
+                                    crate::relay::set_pending_master_password(
+                                        self.master_pw_entry.trim(),
+                                    );
+                                    crate::relay::clear_master_credential_needed();
+                                    self.master_pw_entry.clear();
+                                }
+                            });
+                        });
+                    ui.add_space(6.0);
+                }
+
                 for problem in crate::resolve::list() {
                     let resolved = egui::Frame::group(ui.style())
                         .fill(WARN_BG)
