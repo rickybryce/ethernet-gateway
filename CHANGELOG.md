@@ -95,6 +95,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **One wrong master password used to silence the prompt for good.**  All three
+  configuration surfaces clear the "master password needed" flag the moment
+  somebody types one -- rightly, because a screen still demanding a password
+  just entered reads as "it did not take".  But the only place that flag was
+  ever *raised* is the branch that runs when there is no password at all, which
+  a pending one stops the connect path reaching.  So a slave given a wrong
+  password took the prompt down, went on being refused by its master, and said
+  nothing on any screen ever again -- on a headless machine, with the log the
+  only evidence, which is the exact situation the prompt was added to fix.  A
+  refusal now puts the ask back, and drops the credential the master has
+  already rejected rather than offering it every retry and walking the slave's
+  IP toward the per-IP lockout it shares with telnet.  Found by running it: the
+  screen was gone on the very next session while the relay was still failing.
+
 - **The wipe that removes the master's password could stop working for the
   life of the process.**  `forget_master_password` latched a once-per-process
   flag *before* asking whether there was anything to erase, so the first key

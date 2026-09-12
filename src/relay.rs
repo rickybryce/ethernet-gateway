@@ -634,6 +634,17 @@ pub fn clear_master_credential_needed() {
     *g = None;
 }
 
+/// The master answered and refused the password, so this slave has no way in
+/// again: drop the credential it refused and put the ask back on every screen.
+///
+/// Its own function because the rule is easy to state and was easy to miss --
+/// [`note_master_credential_needed`] is reachable from exactly one other place,
+/// the "no password at all" branch, which a pending password stops us reaching.
+pub fn note_password_refused(host: &str, port: u16) {
+    clear_pending_master_password();
+    note_master_credential_needed(host, port);
+}
+
 /// The master to ask about, if this slave currently has no way in.
 pub fn master_credential_needed() -> Option<(String, u16)> {
     MASTER_CREDENTIAL_NEEDED
@@ -1369,6 +1380,23 @@ async fn connect_master_relay_inner(
                 let _ = session
                     .disconnect(russh::Disconnect::ByApplication, "auth failed", "")
                     .await;
+                // **A refused password puts the ask back.**  All three surfaces
+                // clear the "master password needed" flag the moment somebody
+                // types one -- rightly, because a screen still demanding a
+                // password just entered reads as "it did not take".  But the
+                // only place that flag was ever *raised* is the empty-password
+                // branch above, which a pending password stops us reaching --
+                // so one wrong answer silenced the prompt for good, and a
+                // headless slave went on failing with nothing on any screen.
+                // Measured live on 141: the screen was gone on the very next
+                // session while the relay was still being refused.
+                //
+                // The wrong one is dropped rather than kept: the master
+                // *answered*, so this is a definite refusal and not a
+                // transport blip (that is the `Err` arm below).  Retrying a
+                // credential the master has already rejected only walks the
+                // slave's IP toward the per-IP lockout it shares with telnet.
+                note_password_refused(host, port);
                 return Err(RelayConnectError::Auth(
                     "authentication rejected by master".to_string(),
                 ));

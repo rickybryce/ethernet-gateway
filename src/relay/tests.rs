@@ -2233,3 +2233,47 @@ async fn test_the_password_wipe_heals_itself() {
 
     crate::config::update_config_value("slave_master_password", &prev);
 }
+
+/// **A refused password has to put the ask back.**
+///
+/// All three surfaces clear the "master password needed" flag the moment
+/// somebody types one -- rightly, since a screen still demanding a password
+/// just entered reads as "it did not take".  But the only place that flag was
+/// raised is the branch that runs when there is no password *at all*, which a
+/// pending one stops the connect path reaching.  So one wrong answer silenced
+/// the prompt for the life of the process while the relay went on being
+/// refused -- measured live on the two gateways, the screen gone on the very
+/// next session.
+#[test]
+fn test_a_refused_password_puts_the_ask_back() {
+    let _lock = super::key_auth_test_lock();
+    super::clear_master_credential_needed();
+    super::clear_pending_master_password();
+
+    // The operator types one, and every surface takes the prompt down.
+    super::set_pending_master_password("wrong-guess");
+    super::clear_master_credential_needed();
+    assert!(
+        super::master_credential_needed().is_none(),
+        "the fixture did not take, so the assertion below would prove nothing"
+    );
+
+    // The master answers and says no.
+    super::note_password_refused("192.168.1.178", 2222);
+
+    assert_eq!(
+        super::master_credential_needed(),
+        Some(("192.168.1.178".to_string(), 2222)),
+        "a refused password left every screen silent about a slave that cannot register"
+    );
+    // And the credential the master has already rejected is not kept to be
+    // retried -- that only walks the slave toward the shared per-IP lockout.
+    assert_eq!(
+        super::master_password_state(""),
+        super::MasterPasswordState::Missing,
+        "the refused password was kept and would be offered again"
+    );
+
+    super::clear_master_credential_needed();
+    super::clear_pending_master_password();
+}
