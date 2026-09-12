@@ -5,7 +5,9 @@ All notable changes to **ethernetgateway** are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.0] - Unreleased
+## [Unreleased]
+
+## [1.0.0] - 2026-09-12
 
 ### Added
 
@@ -7141,7 +7143,8 @@ Otherwise the gateway will create fresh files and SSH clients will see a
 - Windows build fix for `GetDiskFreeSpaceExW`.
 - S-register persistence via `AT&W`.
 
-[1.0.0]: https://github.com/rickybryce/ethernetgateway/compare/v1.0.0-RC2...HEAD
+[Unreleased]: https://github.com/rickybryce/ethernetgateway/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/rickybryce/ethernetgateway/releases/tag/v1.0.0
 [1.0.0-RC2]: https://github.com/rickybryce/ethernetgateway/releases/tag/v1.0.0-RC2
 [1.0.0-RC1]: https://github.com/rickybryce/ethernetgateway/releases/tag/v1.0.0-RC1
 [0.9.7]: https://github.com/rickybryce/ethernetgateway/releases/tag/v0.9.7
