@@ -236,6 +236,13 @@ impl Wizard {
                     cfg.slave_master_port = p;
                 }
                 cfg.slave_master_username = self.master_username.trim().to_string();
+                // **Lands in the draft, never in the file.**  `persist_config`
+                // routes a non-empty value to `relay::set_pending_master_
+                // password` and carries the stored one forward, so the
+                // master's password is held in memory for the one login that
+                // enrols this slave's key and `egateway.conf` never gains it.
+                // One rule there covers this wizard and the editor's own Pass
+                // box alike -- see `App::persist_config`.
                 cfg.slave_master_password = self.master_password.clone();
             }
             _ => {}

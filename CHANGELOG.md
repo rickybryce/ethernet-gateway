@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Nothing the gateway offers writes the master's password to disk any more.**
+  The prompt screen already held a typed password in memory only; the four
+  surfaces that *configure* one -- the telnet Master/Slave screen, the web and
+  desktop Pass boxes, and the setup wizard -- all still wrote it into
+  `egateway.conf`.  They now hand it to the same in-memory holder, which is
+  where it belongs: it is needed for exactly one login, the one that enrols
+  this slave's key, and the relay retries within seconds rather than at the
+  next restart.  The key is what gets in from then on, so the password has
+  nothing left to do.  `egateway.conf` is still **read** for it -- an upgrade,
+  or a hand-edited file, may carry one -- and that value is still erased once
+  a key login succeeds.  The web editor also stops **echoing** a stored one:
+  rendering it put the master's *unified* login (telnet, SSH and the web UI
+  there, not just the relay) into the page source and posted it back on every
+  unrelated save.  All four boxes now render empty, and empty means "leave it
+  alone", the same rule the gateway password has always used.  One consequence
+  worth knowing: a slave that has **not yet enrolled** and is restarted no
+  longer registers from a stored password -- it asks whoever arrives.  That
+  window is normally seconds, and the trade is deliberate.
+
 - **A slave can log in to its master with a key instead of storing the master's
   password.**  `slave_master_password` was the one secret in `egateway.conf`
   that could not be hashed -- a slave *presents* it rather than checking it, and
@@ -94,16 +113,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   -- and all three configuration surfaces rendered that empty value as a dim
   `(not set)`, the same thing shown by a slave with no way in at all.  The
   state the feature exists to reach was displayed as the fault it replaces.
-  The telnet Master/Slave screen now says `(using key)`, and the web and
-  desktop Pass boxes carry it as the placeholder drawn while they are empty;
-  all three ask `relay::master_password_state`, so they cannot describe one
-  state three ways.  It is an **outcome, not a setting**: the claim is made
+  The telnet Master/Slave screen now says `Auth OK`, and the web and desktop
+  Pass boxes carry it as the placeholder drawn while they are empty; all three
+  ask `relay::master_password_state`, so they cannot describe one state three
+  ways.  The field itself stays put in all three layouts -- once the key works
+  there is nothing to type there, and it holds its place.  It is an **outcome, not a setting**: the claim is made
   only after a key login has actually succeeded -- the config cannot know
   whether a key is enrolled on the *master* -- and it is taken down again the
   moment a key is refused, because a stale "using key" is worse than the dim
-  `(not set)` it replaced.  A password typed at a screen and still held in
-  memory reads `(entered, not saved)` rather than `(not set)`, which is what an
-  operator saw immediately after typing one.
+  `(not set)` it replaced.  A password typed at a screen and still held in memory reads
+  `(entered)` rather than `(not set)`, which is what an operator saw
+  immediately after typing one.
 
 - **A peer-dial across the master crossbar no longer answers `CONNECT` for a
   device that never picked up.**  Dialling a port on one slave from a device on

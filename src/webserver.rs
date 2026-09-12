@@ -1303,6 +1303,17 @@ fn collect_form_updates(
             if *key == "password" && v.is_empty() {
                 continue;
             }
+            // **The master's password is never written to `egateway.conf`.**
+            // It is needed for exactly one login -- the one that enrols this
+            // slave's key -- so a typed value goes to the in-memory holder and
+            // the file never gains it.  An empty box means "leave it alone",
+            // the same rule as `password` above.
+            if *key == "slave_master_password" {
+                if !v.is_empty() {
+                    crate::relay::set_pending_master_password(v);
+                }
+                continue;
+            }
             updates.push(((*key).to_string(), v.clone()));
         }
     }
@@ -2606,12 +2617,21 @@ fn master_slave_rows(cfg: &Config) -> String {
         // password, which rendered as a blank box indistinguishable from a
         // slave nobody has configured.  Same answer as the telnet screen and
         // the desktop editor -- `relay::master_password_state`.
+        // **Never echoed, and never saved.**  Rendering the value would put
+        // the master's full login -- telnet, SSH and the web UI there, not
+        // just the relay -- in this page's source and post it back on every
+        // unrelated save.  The box is empty and the placeholder says what the
+        // state actually is: `Auth OK` once the key works, at which point
+        // there is nothing to type here at all and the field is holding its
+        // place in the layout.
         pass = textfield_attr(
-            "slave_master_password", "Pass", &cfg.slave_master_password, true, 12,
+            "slave_master_password", "Pass", "", true, 12,
             &format!(
                 "{} placeholder=\"{}\"",
                 dis_slave,
-                html_escape(crate::relay::master_password_state("").label()),
+                html_escape(
+                    crate::relay::master_password_state(&cfg.slave_master_password).label()
+                ),
             ),
         ),
     )
@@ -5829,6 +5849,64 @@ mod tests {
         assert!(request_presented_credential(&req_with_auth(Some("Basic !!garbage!!"))));
     }
 
+    /// **The master's password must not reach `egateway.conf` from the web
+    /// editor, and must not be echoed back into the page.**
+    ///
+    /// It is needed for exactly one login -- the one that enrols this slave's
+    /// key -- so saving it would put on disk the thing the feature removes,
+    /// and echoing it would put the master's *unified* login (telnet, SSH and
+    /// the web UI there) into this page's source and post it back on every
+    /// unrelated save.
+    #[test]
+    fn test_the_master_password_is_held_in_memory_not_written_or_echoed() {
+        let _lock = crate::relay::key_auth_test_lock();
+        crate::relay::note_relay_key_auth(false);
+        crate::relay::clear_pending_master_password();
+
+        let cfg = Config { gateway_role: "slave".to_string(), ..Config::default() };
+        let mut fields: HashMap<String, String> = HashMap::new();
+        fields.insert("slave_master_password".to_string(), "hunter2".to_string());
+        fields.insert("slave_master_username".to_string(), "relay".to_string());
+        let (updates, _) = collect_form_updates(&fields, &cfg);
+
+        assert!(
+            !updates.iter().any(|(k, _)| k == "slave_master_password"),
+            "the master's password was written to the config"
+        );
+        // **Positive control.** Asserting only that one key is absent passes
+        // just as well when the whole screen stopped saving, so a neighbour on
+        // the same form must still land.
+        assert!(
+            updates.iter().any(|(k, v)| k == "slave_master_username" && v == "relay"),
+            "the rest of the Master/Slave form stopped saving: {updates:?}"
+        );
+        // And it did reach the in-memory holder, or the operator typed it for
+        // nothing.
+        assert_eq!(
+            crate::relay::master_password_state(""),
+            crate::relay::MasterPasswordState::Entered,
+            "the typed password never reached the in-memory holder"
+        );
+
+        // Nothing echoes a stored one back into the page.
+        let stored = Config {
+            gateway_role: "slave".to_string(),
+            slave_master_password: "from-the-file".to_string(),
+            ..Config::default()
+        };
+        let html = master_slave_rows(&stored);
+        assert!(
+            !html.contains("from-the-file"),
+            "the stored master password was rendered into the page: {html}"
+        );
+        assert!(
+            html.contains("name=\"slave_master_password\""),
+            "the field itself must stay -- it holds its place in the layout: {html}"
+        );
+
+        crate::relay::clear_pending_master_password();
+    }
+
     #[test]
     fn test_apply_form_post_rejects_empty_body() {
         // An empty/chunked body must not be applied: collect_form_updates
@@ -7903,8 +7981,21 @@ mod tests {
         // Controls whose values a *different* handler owns.  Named rather than
         // pattern-matched, and each is asserted to still be on the page below,
         // so an exclusion cannot outlive the control it excuses.
-        let mut elsewhere: Vec<String> =
-            vec!["cpm_new_format".to_string(), "cpm_new_name".to_string()];
+        let mut elsewhere: Vec<String> = vec![
+            "cpm_new_format".to_string(),
+            "cpm_new_name".to_string(),
+            // **Owned by the in-memory holder, not by the config file.**  The
+            // master's password is needed for exactly one login -- the one
+            // that enrols this slave's key -- so a save hands it to
+            // `relay::set_pending_master_password` and `egateway.conf` never
+            // gains it.  It is excused from the round-trip and *not* from the
+            // page: the assertion below holds that the box is still rendered,
+            // which is what keeps it holding its place in the layout once
+            // there is nothing left to type in it.  That it reaches the
+            // holder is pinned separately, by
+            // `test_the_master_password_is_held_in_memory_not_written_or_echoed`.
+            "slave_master_password".to_string(),
+        ];
         for d in 0..16u8 {
             elsewhere.push(format!("cpm_mount_{}", (b'a' + d) as char));
         }

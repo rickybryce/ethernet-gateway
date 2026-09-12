@@ -525,13 +525,21 @@ impl TelnetSession {
     /// Returns `true` if the value was changed/saved, `false` if the user
     /// cancelled with empty input — so a caller whose setting needs a
     /// server restart can show the restart notice only on an actual change.
-    pub(in crate::telnet) async fn other_set_field(
+    /// Draw the "set one field" screen and read the answer.
+    ///
+    /// Split out of [`other_set_field`] because not every field this screen
+    /// asks about is written to `egateway.conf`: the master's password is
+    /// needed for exactly one login and is held in memory only, so it shares
+    /// the screen and not the write.  One screen, two destinations -- rather
+    /// than a second copy of a layout already fitted to 22 PETSCII rows.
+    ///
+    /// `Ok(None)` means the operator entered nothing, which is a cancel.
+    pub(in crate::telnet) async fn other_prompt_value(
         &mut self,
         label: &str,
-        key: &str,
         current_display: &str,
         is_secret: bool,
-    ) -> Result<bool, std::io::Error> {
+    ) -> Result<Option<String>, std::io::Error> {
         // Its own screen, with a heading.  This used to print underneath
         // whichever menu called it — and every one of those menus is at or near
         // the 22-row PETSCII budget, so seven more rows scrolled the heading,
@@ -565,29 +573,44 @@ impl TelnetSession {
             self.get_line_input().await?
         };
 
-        let input = match input {
-            Some(s) if !s.is_empty() => s,
-            _ => return Ok(false),
-        };
+        match input {
+            Some(s) if !s.is_empty() => Ok(Some(s)),
+            _ => Ok(None),
+        }
+    }
 
+    /// Confirm an edit and wait, so the operator sees it landed before the
+    /// menu repaints over the answer.
+    pub(in crate::telnet) async fn other_saved_notice(
+        &mut self,
+        message: &str,
+    ) -> Result<(), std::io::Error> {
+        self.send_line("").await?;
+        self.send_line(&format!("  {}", self.green(message))).await?;
+        self.send_line("").await?;
+        self.send("  Press any key to continue.").await?;
+        self.flush().await?;
+        self.wait_for_key().await?;
+        Ok(())
+    }
+
+    pub(in crate::telnet) async fn other_set_field(
+        &mut self,
+        label: &str,
+        key: &str,
+        current_display: &str,
+        is_secret: bool,
+    ) -> Result<bool, std::io::Error> {
+        let Some(v) = self.other_prompt_value(label, current_display, is_secret).await? else {
+            return Ok(false);
+        };
         let k = key.to_string();
-        let v = input;
-        let saved_label = label.to_string();
         tokio::task::spawn_blocking(move || {
             config::update_config_value(&k, &v);
         })
         .await
         .ok();
-        self.send_line("").await?;
-        self.send_line(&format!(
-            "  {}",
-            self.green(&format!("{} updated.", saved_label))
-        ))
-        .await?;
-        self.send_line("").await?;
-        self.send("  Press any key to continue.").await?;
-        self.flush().await?;
-        self.wait_for_key().await?;
+        self.other_saved_notice(&format!("{} updated.", label)).await?;
         Ok(true)
     }
 
@@ -2953,20 +2976,28 @@ impl TelnetSession {
                             "Master settings: Slave role only.",
                         )
                         .await?;
-                    } else if self
-                        .other_set_field(
-                            "Master pass",
-                            "slave_master_password",
-                            if cfg.slave_master_password.is_empty() {
-                                "(not set)"
-                            } else {
-                                "(set)"
-                            },
-                            true,
-                        )
-                        .await?
-                    {
-                        self.config_restart_notice().await?;
+                    } else {
+                        // **Never written to `egateway.conf`.**  The master's
+                        // password is needed for exactly one login -- the one
+                        // that enrols this slave's key -- so the screen holds
+                        // it in memory and the file never gains it.  Once the
+                        // key works the row reads `Auth OK` and this prompt
+                        // has nothing left to ask for.
+                        let state = crate::relay::master_password_state(
+                            &cfg.slave_master_password,
+                        );
+                        if let Some(v) = self
+                            .other_prompt_value("Master pass", state.label(), true)
+                            .await?
+                        {
+                            crate::relay::set_pending_master_password(&v);
+                            // No restart notice: nothing was written, and
+                            // `set_pending_master_password` cuts the retry
+                            // backoff short, so the next connection is seconds
+                            // away rather than a reboot away.
+                            self.other_saved_notice("Held in memory, not on disk.")
+                                .await?;
+                        }
                     }
                 }
                 "h" => {

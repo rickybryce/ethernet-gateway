@@ -697,7 +697,8 @@ pub(crate) fn key_auth_test_lock() -> std::sync::MutexGuard<'static, ()> {
 /// `master_password_screen_lines` is shared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MasterPasswordState {
-    /// The key is doing the work; no password is needed here.
+    /// The key is doing the work, so there is no password to show and none to
+    /// ask for: the field says `Auth OK` and holds its place in the layout.
     UsingKey,
     /// A password is stored in `egateway.conf`.
     Stored,
@@ -713,9 +714,9 @@ impl MasterPasswordState {
     /// `test_every_master_password_label_fits_a_c64`.
     pub fn label(self) -> &'static str {
         match self {
-            MasterPasswordState::UsingKey => "(using key)",
+            MasterPasswordState::UsingKey => "Auth OK",
             MasterPasswordState::Stored => "(set)",
-            MasterPasswordState::Entered => "(entered, not saved)",
+            MasterPasswordState::Entered => "(entered)",
             MasterPasswordState::Missing => "(not set)",
         }
     }

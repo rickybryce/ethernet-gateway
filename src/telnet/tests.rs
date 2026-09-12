@@ -3894,24 +3894,36 @@ fn test_other_settings_menu_row_count() {
 
 /// **A screen that asks a question has to be a screen.**
 ///
-/// `other_set_field` is the shared "type a new value" prompt behind eight menu
-/// entries — the Groq key, the homepage, the weather location, the log file and
-/// four more. It used to print underneath whichever menu called it, and every
-/// one of those menus sits at or near the 22-row PETSCII budget, so its seven
-/// extra rows scrolled the heading and sometimes the prompt itself off a
-/// Commodore. Ricky hit it on the real thing pressing `A`.
+/// `other_prompt_value` is the shared "type a new value" prompt behind nine menu
+/// entries — the Groq key, the homepage, the weather location, the log file, the
+/// master password and four more. It used to print underneath whichever menu
+/// called it, and every one of those menus sits at or near the 22-row PETSCII
+/// budget, so its seven extra rows scrolled the heading and sometimes the prompt
+/// itself off a Commodore. Ricky hit it on the real thing pressing `A`.
+///
+/// **The drawing lives in `other_prompt_value`, not in `other_set_field`.** The
+/// two were one function until the master password needed the same screen
+/// without the write that followed it — it is held in memory, never put in
+/// `egateway.conf` — so the prompt was split from its destination. The row
+/// budget is measured across both halves, because an operator still sees one
+/// screen and then its confirmation.
 ///
 /// Scanned from the source because the function needs a live session to run:
 /// what matters is that it clears and draws a heading *before* it asks.
 #[test]
 fn test_a_value_prompt_gets_its_own_screen() {
     let src = include_str!("config_ui.rs");
-    let start = src
-        .find("pub(in crate::telnet) async fn other_set_field")
-        .expect("the shared value prompt");
-    let end = src[start..].find("\n    pub(in crate::telnet) async fn ").map(|i| i + start + 5)
-        .unwrap_or(src.len());
-    let body = &src[start..end];
+    let fn_body = |name: &str| -> &str {
+        let start = src
+            .find(&format!("pub(in crate::telnet) async fn {name}"))
+            .unwrap_or_else(|| panic!("{name} is gone -- the value prompt moved again"));
+        let end = src[start..]
+            .find("\n    pub(in crate::telnet) async fn ")
+            .map(|i| i + start + 5)
+            .unwrap_or(src.len());
+        &src[start..end]
+    };
+    let body = fn_body("other_prompt_value");
 
     let clear = body.find("self.clear_screen()").expect("it must clear first");
     let heading = body.find("self.yellow(&label.to_uppercase())").expect("a heading naming the field");
@@ -3920,8 +3932,11 @@ fn test_a_value_prompt_gets_its_own_screen() {
     assert!(heading < ask, "the question must come after the heading, or it scrolls off");
 
     // And it stays inside the budget: three header rows, a blank, Current, a
-    // blank and the prompt is seven — then four more after the answer.
-    let rows = body.matches("send_line(").count() + 1; // + the prompt, drawn with `send`
+    // blank and the prompt is seven — then four more after the answer, which
+    // is now `other_saved_notice`.
+    let rows = body.matches("send_line(").count()
+        + fn_body("other_saved_notice").matches("send_line(").count()
+        + 1; // + the prompt, drawn with `send`
     assert!(rows <= 22, "the value prompt draws {rows} rows, over the PETSCII budget");
 }
 

@@ -1176,6 +1176,11 @@ impl App {
         // blank box as an external change.
         let mut cfg = cfg;
         cfg.password = String::new();
+        // Same rule, one credential further out: the master's password is
+        // never echoed into an editable box either.  `last_synced_cfg` keeps
+        // the real value so `refresh_from_global` does not read the blank box
+        // as an external change.
+        cfg.slave_master_password = String::new();
         Self {
             cfg,
             last_synced_cfg,
@@ -3166,7 +3171,10 @@ impl App {
                     ui,
                     "Pass:",
                     &mut self.cfg.slave_master_password,
-                    crate::relay::master_password_state("").label(),
+                    crate::relay::master_password_state(
+                        &self.last_synced_cfg.slave_master_password,
+                    )
+                    .label(),
                 );
             });
         });
@@ -3938,6 +3946,10 @@ impl App {
         if out.password.is_empty() {
             out.password = config::get_config().password;
         }
+        out.slave_master_password = master_password_for_save(
+            &out.slave_master_password,
+            &config::get_config().slave_master_password,
+        );
         let result = config::save_config(&out);
         // Re-read rather than cloning `out`: `save_config` hashes a newly
         // typed password, so the global is the only place the value we
@@ -3945,6 +3957,7 @@ impl App {
         // would leave `refresh_from_global` seeing a difference every frame.
         self.last_synced_cfg = config::get_config();
         self.cfg.password = String::new();
+        self.cfg.slave_master_password = String::new();
         self.dirty = false;
         result
     }
@@ -4433,6 +4446,7 @@ impl App {
         self.last_synced_cfg = global;
         // Never let a resync put the stored hash into the editable box.
         self.cfg.password = String::new();
+        self.cfg.slave_master_password = String::new();
         // Rebuild the string buffers that back numeric text fields.
         self.telnet_port_buf = self.cfg.telnet_port.to_string();
         self.ssh_port_buf = self.cfg.ssh_port.to_string();
@@ -4898,6 +4912,28 @@ fn labeled_password(ui: &mut egui::Ui, label: &str, buf: &mut String, hint: &str
 /// setting instead of an outcome.
 fn password_box_hint(stored: &str) -> &'static str {
     if stored.is_empty() { "(not set)" } else { "(hidden)" }
+}
+
+/// What a save must write for `slave_master_password`, given what is in the
+/// editor's box and what is stored.
+///
+/// **The answer is never the box.**  The master's password is needed for
+/// exactly one login -- the one that enrols this slave's key -- so writing it
+/// down would put on disk the very thing the feature exists to remove.  A
+/// typed value is the operator answering "which password?", so it goes to the
+/// in-memory holder and the relay tries it within seconds; whatever is
+/// *stored* (a hand-edited file, or an install that predates key auth) is
+/// carried forward untouched, for the relay to erase once the key works.
+///
+/// Its own function because two surfaces reach it -- the Pass box and the
+/// setup wizard, which both land in `persist_config` -- and because the rule
+/// is the whole of the guarantee, so it is worth being able to test on its
+/// own.
+fn master_password_for_save(typed: &str, stored: &str) -> String {
+    if !typed.is_empty() {
+        crate::relay::set_pending_master_password(typed);
+    }
+    stored.to_string()
 }
 
 /// A singleline `TextEdit` with a Cut/Copy/Paste/Select All right-click menu.
@@ -7013,6 +7049,60 @@ mod tests {
             app.last_synced_cfg.password, cfg.password,
             "the sync snapshot lost the credential, so the editor will churn"
         );
+    }
+
+    /// **The master's password must not reach the saved config, from either
+    /// the editor's Pass box or the wizard.**
+    ///
+    /// It is needed for exactly one login -- the one that enrols this slave's
+    /// key -- so writing it down would put on disk the very thing the feature
+    /// exists to remove.  `persist_config` is the single rule both surfaces
+    /// go through, which is why one test covers both.
+    #[test]
+    fn test_the_master_password_never_reaches_the_saved_config() {
+        let app = App::new(
+            Config {
+                slave_master_password: "from-the-file".into(),
+                ..Config::default()
+            },
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            None,
+        );
+        assert!(
+            app.cfg.slave_master_password.is_empty(),
+            "the stored master password reached the editable box"
+        );
+        assert_eq!(
+            app.last_synced_cfg.slave_master_password, "from-the-file",
+            "the sync snapshot lost it, so the editor will churn every frame"
+        );
+
+        // And the save rule itself, which is what actually keeps it off the
+        // disk -- the box being blank at startup is not the guarantee, since
+        // the operator is about to type in it.
+        let _lock = crate::relay::key_auth_test_lock();
+        crate::relay::note_relay_key_auth(false);
+        crate::relay::clear_pending_master_password();
+        assert_eq!(
+            master_password_for_save("hunter2", "from-the-file"),
+            "from-the-file",
+            "a typed master password was written to the config file"
+        );
+        assert_eq!(
+            crate::relay::master_password_state(""),
+            crate::relay::MasterPasswordState::Entered,
+            "the typed password never reached the in-memory holder"
+        );
+        // An untouched box must not blank a stored one: empty means "leave it
+        // alone", the same rule as the gateway password above.
+        crate::relay::clear_pending_master_password();
+        assert_eq!(
+            master_password_for_save("", "from-the-file"),
+            "from-the-file",
+            "an untouched box erased a stored password"
+        );
+        crate::relay::clear_pending_master_password();
     }
 
     /// A resync from the global config must not refill the box either -- the
