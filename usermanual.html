@@ -1149,10 +1149,16 @@ After the initial option handshake you will see:
 
 <p>
 The byte you send determines the terminal class, as described in chapter 1.
-If the client already replied with an <code>IAC SB TTYPE IS …</code> subnegotiation
-during the initial handshake, the terminal is determined from that and the
-prompt is skipped entirely.
-</p>
+Every telnet client is asked, including one that announced its terminal with an
+<code>IAC SB TTYPE IS &hellip;</code> subnegotiation during the handshake. That name is a
+claim made by whatever speaks telnet, which for a Commodore on a WiFi modem is the
+<em>modem</em> and not the machine behind it &mdash; tcpser announces <code>VT100</code> for a
+C64, which would then be sent 80-column ANSI menus it cannot render. The announcement is
+used as the <strong>fallback</strong> instead: if no key is pressed within ten seconds the
+announced terminal is taken and the session continues, so a client that is not a person is
+not dropped at a prompt it will never answer. Over SSH there is no prompt at all &mdash; the
+client&rsquo;s <code>TERM</code> arrives in its own pty request, with no modem in a position
+to answer for it.</p>
 
 <p>
 You are then asked to enable colour:

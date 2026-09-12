@@ -727,8 +727,13 @@
                     <code>SB TTYPE SEND</code> subnegotiation, and the client answers
                     <code>SB TTYPE IS "&lt;name&gt;"</code>. The gateway maps that name to its
                     three classes &mdash; <strong>PETSCII</strong> (Commodore),
-                    <strong>ANSI</strong>, or <strong>ASCII/DUMB</strong> &mdash; so it can
-                    skip the manual BACKSPACE detection prompt entirely.
+                    <strong>ANSI</strong>, or <strong>ASCII/DUMB</strong> &mdash; and keeps it
+                    as the <em>fallback</em> for the BACKSPACE prompt, which every telnet
+                    client is still shown. The name is a claim made by whatever speaks
+                    telnet, and for a Commodore behind a WiFi modem that is the modem:
+                    tcpser announces <code>VT100</code> for a C64. If no key is pressed
+                    within ten seconds the announced name decides, so a client that is
+                    not a person still gets in.
                 </p>
 
                 <div class="cat">NAWS &mdash; Window Size, option 31 (RFC 1073)</div>

@@ -110,10 +110,15 @@ pub(crate) const DETECT_PROMPT: &str = "Press BACKSPACE to detect terminal: ";
 ///
 /// Two values, because the two situations are not the same question.  With
 /// nothing to fall back on the prompt is the only way to learn anything, so it
-/// waits out the session idle allowance.  With a terminal already announced it
-/// only needs long enough for a person to press a key -- a machine never will
-/// -- and the fallback lands on exactly the answer the announcement would have
+/// waits a full minute before giving up on the session.  With a terminal
+/// already announced it only needs long enough for a person to press a key,
+/// and the fallback lands on exactly the answer the announcement would have
 /// given, so a short wait cannot be worse than not asking at all.
+///
+/// Neither is the session idle allowance (`idle_timeout_secs`, 900 s by
+/// default): that one is applied *inside* `read_byte_filtered` and is handled
+/// below, because an idle timeout firing first must still reach the fallback
+/// rather than dropping a client that told us what it was.
 pub(crate) const DETECT_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 pub(crate) const ANNOUNCED_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -221,13 +226,15 @@ impl TelnetSession {
         //
         // `detect_method` records how the terminal type was decided, for
         // the gateway-debug terminal diagnostic emitted below.
-        let announced = self.ttype_matched.then(|| {
-            (
-                self.terminal_type,
-                self.ttype_raw.clone().unwrap_or_else(|| "?".to_string()),
-            )
-        });
-        let detect_wait = if announced.is_some() { ANNOUNCED_WAIT } else { DETECT_WAIT };
+        // **Read the announcement at the moment it is needed, never before.**
+        // The name arrives two round trips after the opening burst -- the
+        // client answers `WILL TTYPE`, we ask `SB TTYPE SEND`, it answers `SB
+        // TTYPE IS` -- and `read_byte_filtered` is what processes it, so on any
+        // link slower than a LAN it lands *during* the prompt below.  A
+        // snapshot taken here would still say "nothing announced", and the
+        // client that did announce would be dropped at the timeout: the exact
+        // regression this fallback exists to prevent.
+        let detect_wait = if self.ttype_matched { ANNOUNCED_WAIT } else { DETECT_WAIT };
         let detect_method = 'detect: {
             self.send_raw(b"\r\n").await?;
             self.send_raw(DETECT_PROMPT.as_bytes()).await?;
@@ -255,24 +262,33 @@ impl TelnetSession {
             let mut byte;
             let mut attempt = 0;
             loop {
-                byte = match tokio::time::timeout(detect_wait, self.read_byte_filtered())
-                .await
-                {
+                let waited = tokio::time::timeout(detect_wait, self.read_byte_filtered()).await;
+                // An idle timeout from *inside* the read is the same event as
+                // our own expiring, and must take the same road: with
+                // `idle_timeout_secs` set below ANNOUNCED_WAIT it fires first,
+                // and propagating it would drop a client that had told us what
+                // it was without even the parting message.
+                let waited = match waited {
+                    Ok(Err(e)) if e.kind() == std::io::ErrorKind::TimedOut => Err(()),
+                    Ok(other) => Ok(other),
+                    Err(_) => Err(()),
+                };
+                byte = match waited {
                     Ok(result) => match result? {
                         Some(b) => b,
                         None => return Ok(()),
                     },
-                    Err(_) => {
+                    Err(()) => {
                         // Nobody pressed anything.  Believe the announcement if
-                        // there was one rather than dropping the session.
-                        if let Some((tt, name)) = announced.as_ref() {
-                            self.terminal_type = *tt;
-                            self.erase_char = match tt {
+                        // there is one rather than dropping the session.
+                        if self.ttype_matched {
+                            self.erase_char = match self.terminal_type {
                                 TerminalType::Petscii => 0x14,
                                 _ => DEFAULT_ERASE_CHAR,
                             };
                             break 'detect format!(
-                                "telnet TTYPE \"{}\" (no key pressed)", name
+                                "telnet TTYPE \"{}\" (no key pressed)",
+                                self.ttype_raw.as_deref().unwrap_or("?")
                             );
                         }
                         self.send_raw(b"\r\n\r\n  Disconnected: idle timeout.\r\n\r\n")
@@ -290,6 +306,36 @@ impl TelnetSession {
                 self.send_raw(b"\r\n").await?;
                 self.send_raw(DETECT_REPROMPT.as_bytes()).await?;
                 self.flush().await?;
+            }
+
+            // **A client that named itself is not identified by just any byte.**
+            // Asking everybody means a client that announces a terminal and then
+            // types ahead -- a script, a probe, someone who knows the menu --
+            // has its first byte arrive here instead of at the menu.  Under the
+            // any-byte rule that byte becomes the erase key: a script sending
+            // `f` for File Transfer would delete a character with `f` for the
+            // rest of the session.  So with a name in hand only the three real
+            // backspace bytes answer the question, and anything else is pushed
+            // back to be read as what it was -- which leaves the bytes consumed
+            // before the colour prompt exactly as they were when this prompt
+            // did not exist for such a client.
+            //
+            // A session with NO announcement keeps the any-byte rule, and must:
+            // it is the rule the exotic machines need, an Apple I back arrow
+            // being 0x5F and the early Unix erase `#`, and those never announce.
+            if self.ttype_matched && !matches!(byte, 0x08 | 0x7F | 0x14) {
+                if self.pushback.is_none() {
+                    self.pushback = Some(byte);
+                }
+                self.erase_char = match self.terminal_type {
+                    TerminalType::Petscii => 0x14,
+                    _ => DEFAULT_ERASE_CHAR,
+                };
+                break 'detect format!(
+                    "telnet TTYPE \"{}\" (0x{:02x} typed ahead, not an answer)",
+                    self.ttype_raw.as_deref().unwrap_or("?"),
+                    byte
+                );
             }
 
             // The byte still decides the terminal type — a space still means

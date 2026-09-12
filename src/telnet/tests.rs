@@ -6576,6 +6576,56 @@ async fn test_a_silent_announced_client_falls_back_instead_of_being_dropped() {
     assert_eq!(session.erase_char, session::DEFAULT_ERASE_CHAR);
 }
 
+/// **A client that named itself and then typed ahead keeps its name, and keeps
+/// its byte.**
+///
+/// Asking everybody puts the prompt in front of a client that used to skip it,
+/// so its first byte -- a script's menu key, say -- lands at a prompt that
+/// under the any-byte rule would install it as the ERASE key for the whole
+/// session: `f` would thereafter delete a character. With a name in hand only a
+/// real backspace byte answers, and anything else is pushed back, so the bytes
+/// consumed before the colour prompt are the same as when this client was not
+/// asked at all.
+#[tokio::test]
+async fn test_a_typed_ahead_byte_is_not_taken_as_the_erase_key() {
+    let (mut session, peer) = make_test_session_with_peer(TerminalType::Ascii);
+    session.note_announced_terminal("xterm");
+
+    let (mut prd, mut pwr) = tokio::io::split(peer);
+    let task = tokio::spawn(async move {
+        let mut session = session;
+        let _ = session.detect_terminal_type().await;
+        session
+    });
+
+    // Wait for the prompt before typing: the session drains its input once
+    // after the option handshake, so a byte sent before that is swallowed --
+    // correctly, and it would make this test measure the drain instead.
+    let asked = read_until(&mut prd, "detect terminal").await;
+    assert!(asked.contains("detect terminal"), "no prompt: {:?}", asked);
+
+    // The client is not answering the question; it is typing at the menu.
+    use tokio::io::AsyncWriteExt;
+    pwr.write_all(b"f").await.unwrap();
+    let seen = read_until(&mut prd, "color?").await;
+    assert!(
+        seen.to_lowercase().contains("ansi"),
+        "the announcement must stand; got {:?}",
+        seen
+    );
+    // 'f' is pushed back, so the colour prompt reads it and ignores it exactly
+    // as it did before this client was asked anything.  'n' then answers.
+    pwr.write_all(b"n").await.unwrap();
+
+    let session = task.await.unwrap();
+    assert_eq!(session.terminal_type, TerminalType::Ansi);
+    assert_eq!(
+        session.erase_char,
+        session::DEFAULT_ERASE_CHAR,
+        "a typed-ahead byte must never become the erase key"
+    );
+}
+
 /// Read from the peer until `marker` shows up, bounded so a wrong expectation
 /// fails with what was actually written instead of hanging the suite.
 async fn read_until(
@@ -6584,12 +6634,21 @@ async fn read_until(
 ) -> String {
     use tokio::io::AsyncReadExt;
     let mut buf = Vec::new();
-    for _ in 0..64 {
+    // One overall deadline, not 64 x 30 s: the docstring promised a bound and
+    // the arithmetic delivered half an hour, which is a hang with extra steps.
+    // Restoring the defect these tests exist to catch leaves the session
+    // waiting on input with nothing more to say, which is exactly when this
+    // must fail fast and print what it did see.
+    // Comfortably past ANNOUNCED_WAIT: a deadline equal to the wait under test
+    // races it, and the loser is decided by the scheduler.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            break;
+        }
         let mut tmp = [0u8; 256];
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            prd.read(&mut tmp),
-        )
+        match tokio::time::timeout(left, prd.read(&mut tmp))
         .await
         {
             Ok(Ok(0)) | Err(_) => break,
