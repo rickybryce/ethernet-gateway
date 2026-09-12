@@ -95,6 +95,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The desktop window could come back with its title bar under the desktop
+  panel, for good.**  The saved position is the *frame's* top-left and the
+  window manager draws the title bar in the frame's top edge, so a frame
+  restored above the desktop's usable area (`_NET_WORKAREA`, which starts below
+  any panel) has its title bar drawn underneath the panel -- unreadable, and,
+  the half that matters, **ungrabbable**: the control an operator would use to
+  drag the window clear is the one that is covered.  And the position that
+  causes it is the position being saved, so it survived every restart.
+  Reported on a Pi 5 as "the GUI has no title bar", which is exactly what it
+  looks like -- what shows below the panel is the program's *own* header bar,
+  which reads like a title bar and is not one.  Measured there: the work area
+  began at y=36, the saved frame top was y=11, and 25 of the title bar's 30
+  pixels were behind the panel.  A restored position is now clamped to the work
+  area's origin.  Clamped on restore rather than on save, because a panel can
+  be added, moved or resized between runs, so only the run doing the placing
+  knows where the usable area is; and when the work area cannot be read
+  (no `xprop`) nothing is clamped, which is exactly the behaviour that shipped
+  before rather than a guess at where a panel might be.
+
 - **The telnet Security screen told you to restart for a change that was
   already live.**  Setting the username or password printed "Restart the
   server for changes to take effect", and nothing needed restarting: all three

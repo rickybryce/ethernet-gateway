@@ -2246,7 +2246,7 @@ impl TelnetSession {
 
     /// What the screen says after the username or password is changed.
     ///
-    /// **Not [`config_restart_notice`], which is what this printed and which
+    /// **Not [`Self::config_restart_notice`], which is what this printed and which
     /// was untrue.** All three surfaces read the credential fresh on the way
     /// in -- the web per request (`is_authorized`), telnet per session, and
     /// SSH per connection (`new_client` calls `get_config`) -- so a new

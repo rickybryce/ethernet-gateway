@@ -129,9 +129,14 @@ pub fn run(
             .with_title(format!("Ethernet Gateway v{}", env!("CARGO_PKG_VERSION")))
             .with_min_inner_size([640.0, 480.0]);
         viewport = match parse_window_geometry(&cfg.gui_window_geometry) {
-            Some((x, y, w, h)) => viewport
-                .with_position([x as f32, y as f32])
-                .with_inner_size([w as f32, h as f32]),
+            Some((x, y, w, h)) => {
+                // Never restore the frame under a panel -- see
+                // `clamped_window_position`, where the title bar goes missing.
+                let (x, y) = clamped_window_position((x, y), work_area_origin());
+                viewport
+                    .with_position([x as f32, y as f32])
+                    .with_inner_size([w as f32, h as f32])
+            }
             None => viewport.with_inner_size([WINDOW_DEFAULT_W, WINDOW_DEFAULT_H]),
         };
         let mut options = eframe::NativeOptions {
@@ -560,6 +565,61 @@ fn parse_window_geometry(s: &str) -> Option<(i32, i32, i32, i32)> {
         return None;
     }
     Some((x, y, w, h))
+}
+
+/// Where the desktop's usable area starts, from `_NET_WORKAREA` on the root
+/// window: `Some((x, y))`, or `None` when we cannot ask.
+///
+/// Shelled out through `xprop` for the same reason `probe_wm` does -- it is
+/// already the way this file asks X a question, it inherits DISPLAY/XAUTHORITY
+/// from our environment, and a missing `xprop` degrades to "don't clamp",
+/// which is exactly the behaviour that shipped before.
+fn work_area_origin() -> Option<(i32, i32)> {
+    let out = std::process::Command::new("xprop")
+        .args(["-root", "_NET_WORKAREA"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let (_, list) = text.split_once('=')?;
+    let mut nums = list
+        .split(',')
+        .map(|n| n.trim().parse::<i32>())
+        .take(2);
+    let x = nums.next()?.ok()?;
+    let y = nums.next()?.ok()?;
+    Some((x, y))
+}
+
+/// Keep a restored window's frame out from under the desktop's panels.
+///
+/// **A saved position is replayed verbatim, and that is how the title bar gets
+/// lost.** Panels reserve a strip of the screen (`_NET_WORKAREA` starts below
+/// them), the position we save is the *frame's* top-left, and the window
+/// manager draws the title bar in the frame's top edge. Restore a frame whose
+/// top is inside the panel's strip and the title bar is drawn underneath it:
+/// unreadable, and -- the half that matters -- **ungrabbable**, so the
+/// operator cannot drag the window down to fix it. The position that causes it
+/// is the position being saved, so it survives every restart.
+///
+/// Measured on a Pi 5 (openbox + lxpanel, 1920x1080): `_NET_WORKAREA` began at
+/// y=36, the saved frame top was y=11, `_NET_FRAME_EXTENTS` reported a 30-pixel
+/// title bar -- so 25 of its 30 pixels sat behind the panel and what showed
+/// below it was the program's *own* header, which reads like a title bar and
+/// is not one. Reported as "the GUI has no title bar", which is what it looks
+/// like.
+///
+/// Clamped on **restore** rather than on save: the panel can be added, moved or
+/// resized between runs, so only the run doing the placing knows where the
+/// usable area is. Pure, and given the origin rather than fetching it, so the
+/// rule can be tested without an X server.
+fn clamped_window_position(saved: (i32, i32), work_origin: Option<(i32, i32)>) -> (i32, i32) {
+    let Some((wx, wy)) = work_origin else {
+        return saved;
+    };
+    (saved.0.max(wx), saved.1.max(wy))
 }
 
 fn apply_theme(ctx: &egui::Context) {
@@ -7049,6 +7109,39 @@ mod tests {
             app.last_synced_cfg.password, cfg.password,
             "the sync snapshot lost the credential, so the editor will churn"
         );
+    }
+
+    /// **A restored window must not put its title bar under a panel.**
+    ///
+    /// The saved position is the frame's top-left and the window manager draws
+    /// the title bar in the frame's top edge, so a frame restored above
+    /// `_NET_WORKAREA`'s origin hides the one control the operator would use to
+    /// move it back -- and the position that causes it is the position being
+    /// saved, so it survives every restart.  Measured on a Pi 5 running openbox
+    /// with lxpanel: the work area began at y=36, the saved frame top was y=11,
+    /// and 25 of the title bar's 30 pixels were behind the panel.
+    #[test]
+    fn test_a_restored_window_keeps_its_title_bar_below_the_panel() {
+        // The measured case, exactly.
+        assert_eq!(
+            clamped_window_position((0, 11), Some((0, 36))),
+            (0, 36),
+            "a frame restored under the panel hides the title bar for good"
+        );
+        // A position already clear of the panel is left alone -- clamping must
+        // not drag windows around that were never in trouble.
+        assert_eq!(clamped_window_position((400, 300), Some((0, 36))), (400, 300));
+        assert_eq!(clamped_window_position((0, 36), Some((0, 36))), (0, 36));
+        // A left-hand panel is the same rule on the other axis.
+        assert_eq!(clamped_window_position((5, 300), Some((64, 0))), (64, 300));
+        // Negative saved positions (dragged off the top) are covered by the
+        // same max, which is the point of using one.
+        assert_eq!(clamped_window_position((-20, -50), Some((0, 36))), (0, 36));
+        // **No work area means no clamp**: `xprop` may be absent, and the
+        // behaviour must then be exactly what shipped before, not a guess at
+        // where a panel might be.
+        assert_eq!(clamped_window_position((0, 11), None), (0, 11));
+        assert_eq!(clamped_window_position((-20, -50), None), (-20, -50));
     }
 
     /// **The master's password must not reach the saved config, from either
