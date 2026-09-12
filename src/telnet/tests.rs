@@ -10253,3 +10253,38 @@ async fn test_the_post_transfer_prompt_is_offered_more_than_once() {
         seen
     );
 }
+
+/// **The security screen used to promise a restart that nothing needed.**
+///
+/// All three surfaces read the credential fresh on the way in -- the web per
+/// request, telnet per session, SSH per connection -- so a changed username or
+/// password is live for the next login with nothing restarted.  Measured on a
+/// live pair: changed the master's password, restarted nothing, and its SSH
+/// server accepted the new one and refused the old one on the next connection.
+/// A screen telling an operator to restart a headless gateway for a change
+/// that had already taken effect is the same class of defect as a comment
+/// describing a fix the code does not make.
+#[test]
+fn test_the_credential_notice_fits_a_c64_and_does_not_promise_a_restart() {
+    let lines = TelnetSession::credential_saved_lines();
+    assert!(!lines.is_empty(), "the notice says nothing at all");
+    for line in lines {
+        // Two-space indent on a 40-column PETSCII screen, which does not wrap
+        // -- it silently loses the end.
+        assert!(
+            line.chars().count() <= 38,
+            "notice line {line:?} is {} columns",
+            line.chars().count()
+        );
+    }
+    let text = lines.join(" ").to_lowercase();
+    assert!(
+        !text.contains("restart"),
+        "the notice still asks for a restart that is not needed: {text}"
+    );
+    // And it must still say the thing that IS true, or it is not a notice.
+    assert!(
+        text.contains("new logins"),
+        "the notice no longer says when the change applies: {text}"
+    );
+}

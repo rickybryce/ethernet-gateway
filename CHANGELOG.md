@@ -95,6 +95,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The telnet Security screen told you to restart for a change that was
+  already live.**  Setting the username or password printed "Restart the
+  server for changes to take effect", and nothing needed restarting: all three
+  surfaces read the credential fresh on the way in -- the web per request
+  (`is_authorized`), telnet per session, and SSH per connection (`new_client`
+  calls `get_config`).  Measured on a live pair: changed the master's password,
+  restarted nothing, and its SSH server accepted the new one and refused the
+  old one on the very next connection.  The screen now says the change applies
+  to new logins, and that a session already open keeps the credential it signed
+  in with -- which is deliberate, so that a config save cannot throw out the
+  operator making it.  Telling somebody to restart a headless gateway for no
+  reason is the same class of defect as a comment describing a fix the code
+  does not make.
+
 - **One wrong master password used to silence the prompt for good.**  All three
   configuration surfaces clear the "master password needed" flag the moment
   somebody types one -- rightly, because a screen still demanding a password

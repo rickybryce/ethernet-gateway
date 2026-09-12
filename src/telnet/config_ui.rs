@@ -2240,7 +2240,43 @@ impl TelnetSession {
         })
         .await
         .ok();
-        self.config_restart_notice().await?;
+        self.credential_saved_notice().await?;
+        Ok(())
+    }
+
+    /// What the screen says after the username or password is changed.
+    ///
+    /// **Not [`config_restart_notice`], which is what this printed and which
+    /// was untrue.** All three surfaces read the credential fresh on the way
+    /// in -- the web per request (`is_authorized`), telnet per session, and
+    /// SSH per connection (`new_client` calls `get_config`) -- so a new
+    /// password is live for the next login with nothing restarted. Measured
+    /// on the master at 192.168.1.178: changed it, restarted nothing, and the
+    /// SSH server accepted the new password and refused the old one on the
+    /// very next connection.
+    ///
+    /// The second half is the part worth saying: an already-authenticated
+    /// session keeps the credential it came in with, deliberately, so that a
+    /// config save cannot throw out the operator who is making it.
+    pub(in crate::telnet) fn credential_saved_lines() -> &'static [&'static str] {
+        &[
+            "Saved. New logins use it at once.",
+            "Sessions already open keep the",
+            "one they signed in with.",
+        ]
+    }
+
+    pub(in crate::telnet) async fn credential_saved_notice(
+        &mut self,
+    ) -> Result<(), std::io::Error> {
+        self.send_line("").await?;
+        for line in Self::credential_saved_lines() {
+            self.send_line(&format!("  {}", self.green(line))).await?;
+        }
+        self.send_line("").await?;
+        self.send("  Press any key to continue.").await?;
+        self.flush().await?;
+        self.wait_for_key().await?;
         Ok(())
     }
 
